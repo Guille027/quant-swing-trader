@@ -17,7 +17,7 @@ from qsts.db import models as m
 from qsts.db.session import init_db, make_engine, session_factory
 from qsts.execution.broker import PaperBroker
 from qsts.execution.service import ExecutionService
-from qsts.notify.service import LogChannel, NotificationService
+from qsts.notify.service import LogChannel, NotificationService, TelegramChannel
 from qsts.research.experiments import ExperimentTracker
 from qsts.risk.engine import MICRO_LIVE, RiskEngine, RiskLimits
 from qsts.strategy.lifecycle import StrategyRegistry
@@ -70,7 +70,10 @@ def build_context(settings: Settings | None = None, initial_paper_cash: float = 
     limits: RiskLimits = MICRO_LIVE if st.env is Environment.LIVE else RiskLimits()
     risk = RiskEngine(limits, ks)
     log_ch = LogChannel()
-    notifier = NotificationService([log_ch])
+    channels = [log_ch]
+    if st.telegram_bot_token and st.telegram_chat_id:
+        channels.append(TelegramChannel(st.telegram_bot_token.get_secret_value(), st.telegram_chat_id))
+    notifier = NotificationService(channels)
     # Only a PAPER broker exists. A live adapter (phase 17) must be added explicitly; never auto-selected.
     broker = PaperBroker(initial_paper_cash, CostModel())
     execu = ExecutionService(broker, risk, ks, modes, notifier)

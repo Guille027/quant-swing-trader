@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     paper_broker_api_key: SecretStr | None = None
     live_broker_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
 
     # Default random seed for reproducible experiments.
     default_seed: int = Field(default=42)

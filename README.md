@@ -13,6 +13,8 @@ python -m pytest
 ```
 
 ## Use
+On Windows, if `qsts` is "not recognized", use `python -m qsts` instead (e.g. `python -m qsts desktop`).
+
 ```bash
 qsts ingest --provider yahoo --symbols SPY,AAPL,MSFT --start 2010-01-01   # needs network access to Yahoo
 qsts serve                     # UI at http://127.0.0.1:8765  (or: qsts desktop)

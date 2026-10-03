@@ -122,6 +122,16 @@ def cmd_evolve(args, ctx):
     print(f"trials evaluated: {res['n_trials']} — {res['note']}")
 
 
+def cmd_notify_test(args, ctx):
+    from qsts.notify.service import Event
+    names = [c.name for c in ctx.notifier.channels]
+    ctx.notifier.notify(Event.NEW_SIGNAL, "Test de QSTS", "Si lees esto, las notificaciones funcionan.")
+    print(f"channels: {names}")
+    print("failures: " + (str(ctx.notifier.failures) if ctx.notifier.failures else "none"))
+    if "telegram" not in names:
+        print("Telegram not configured: set QSTS_TELEGRAM_BOT_TOKEN and QSTS_TELEGRAM_CHAT_ID in .env")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="qsts")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -150,10 +160,11 @@ def main(argv=None):
     s.add_argument("--population", type=int, default=30)
     s.add_argument("--generations", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    sub.add_parser("notify-test")
     args = p.parse_args(argv)
     ctx = build_context()
     {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "scan": cmd_scan,
-     "research": cmd_research, "evolve": cmd_evolve}[args.cmd](args, ctx)
+     "research": cmd_research, "evolve": cmd_evolve, "notify-test": cmd_notify_test}[args.cmd](args, ctx)
 
 
 if __name__ == "__main__":
