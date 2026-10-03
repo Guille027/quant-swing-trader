@@ -119,6 +119,11 @@ class BacktestEngine:
             if len(df):
                 frames[sym], sigs[sym] = df, sig
         timeline = sorted(set().union(*[f.index for f in frames.values()])) if frames else []
+        # numpy views: row access via .iloc is ~100x slower and dominated run time
+        B = {sym: {k: df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume")}
+             for sym, df in frames.items()}
+        SIG = {sym: {k: sg[k].to_numpy() for k in sg.columns} for sym, sg in sigs.items()}
+        IDX = {sym: list(df.index) for sym, df in frames.items()}
 
         cash = cfg.initial_capital
         pos: dict[str, _Pos] = {}
@@ -158,15 +163,15 @@ class BacktestEngine:
 
         for ts in timeline:
             todays = []
-            for sym, df in frames.items():
+            for sym in frames:
                 i = ptr[sym]
-                if i < len(df) and df.index[i] == ts:
+                if i < len(IDX[sym]) and IDX[sym][i] == ts:
                     todays.append((sym, i))
                     ptr[sym] = i + 1
             # ---------------------------------------------------------- opens
             for sym, i in todays:
-                bar = frames[sym].iloc[i]
-                o, h, l, c, v = bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]
+                b = B[sym]
+                o, h, l, c, v = b["open"][i], b["high"][i], b["low"][i], b["close"][i], b["volume"][i]
                 cap_qty = v * cm.max_volume_participation if v > 0 else 0.0
                 p = pos.get(sym)
                 # pending market exit -> fill at open
@@ -227,7 +232,7 @@ class BacktestEngine:
             # ---------------------------------------------------------- closes
             for sym, i in todays:
                 p = pos.get(sym)
-                s = sigs[sym].iloc[i]
+                s = {k: col[i] for k, col in SIG[sym].items()}
                 if p is None:
                     continue
                 p.bars += 1
@@ -257,7 +262,7 @@ class BacktestEngine:
             for sym, i in todays:
                 if sym in pos or sym in pending_entries:
                     continue
-                s = sigs[sym].iloc[i]
+                s = {k: col[i] for k, col in SIG[sym].items()}
                 if s["long_entry"] or s["short_entry"]:
                     cands.append((-(s["rank"] if np.isfinite(s["rank"]) else -np.inf), sym, s))
             cands.sort(key=lambda x: (x[0], x[1]))  # deterministic: rank desc, then symbol
