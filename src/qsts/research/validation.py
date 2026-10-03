@@ -203,7 +203,8 @@ def parameter_robustness(sd: StrategyDefinition, data, cfg: BacktestConfig, star
     configurable bar; min_stability/max_sharpness define pass/fail and are configurable too."""
     _, mc = run_window(sd, data, cfg, start, end, regime)
     c = objective(mc)
-    space = space or {k: neighborhood(v) for k, v in sd.params.items()}
+    ints = sd.integer_params()
+    space = space or {k: neighborhood(v, integer=k in ints) for k, v in sd.params.items()}
     nb, held, scores = {}, [], []
     for k, vals in space.items():
         nb[k] = []

@@ -52,6 +52,17 @@ class AppContext:
         vb = validate_and_clean(raw, symbol, timeframe)
         return adjust(vb.df, self.repo.load_corporate_actions(symbol), "total")
 
+    def adjusted_bars(self, symbol: str, timeframe: Timeframe = Timeframe.D1, asof=None) -> pd.DataFrame:
+        """Stored RAW bars backward-adjusted with the corporate actions known at `asof` (ex_date <= asof),
+        so a replay at a past time sees the price scale the system would have seen then. OHLCV only."""
+        from qsts.data.adjust import adjust
+        raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]
+        acts = self.repo.load_corporate_actions(symbol)
+        if asof is not None:
+            t = pd.Timestamp(asof)
+            acts = acts[acts["ex_date"] <= (t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC"))]
+        return adjust(raw, acts, "total")[["open", "high", "low", "close", "volume"]]
+
     def symbols(self) -> list[str]:
         with self.sf() as s:
             return list(s.scalars(select(m.Asset.symbol).join(m.Price, m.Price.asset_id == m.Asset.id)

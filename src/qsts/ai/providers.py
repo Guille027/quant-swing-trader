@@ -1,8 +1,8 @@
 """AIProvider abstraction. The rest of the system talks only to `AIProvider`.
 
 GeminiProvider: implemented against the Gemini REST `models/{model}:generateContent` endpoint
-(v1beta). Status UNVERIFIED: the official docs were unreachable from the build environment, so
-re-check request/response fields against https://ai.google.dev/api before relying on it.
+(v1beta). Verified 2026-10-03 against https://ai.google.dev/api/generate-content (endpoint, x-goog-api-key,
+systemInstruction, generationConfig.responseMimeType, usageMetadata) and with live calls (docs/STATUS.md).
 """
 from __future__ import annotations
 

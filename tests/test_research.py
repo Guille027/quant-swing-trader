@@ -87,6 +87,17 @@ def test_parameter_robustness_runs(data):
     assert 0 <= r.stability <= 1 or np.isnan(r.stability)
 
 
+
+def test_parameter_robustness_default_space_float_window(data):
+    # params are stored as floats (JSON, AI, optimisers); window neighbours must still be integers
+    sd = StrategyDefinition(name="roc", family="momentum", hypothesis="h",
+                            entry_long=(Condition(F("roc", n="$n"), ">", V(0.0)),),
+                            exit_long=(Condition(F("roc", n="$n"), "<", V(0.0)),),
+                            stop=StopRule("atr", 14, 4.0), take_profit=TakeProfitRule("none"), params={"n": 126.0})
+    assert sd.integer_params() == {"n"} and mr_strategy().integer_params() == {"n"}
+    r = parameter_robustness(sd, data, BacktestConfig(), data["AAA"].index[0], data["AAA"].index[-1])
+    assert r.neighbors["n"] and all(float(v).is_integer() for v, _ in r.neighbors["n"])
+
 def test_monte_carlo():
     rng = np.random.default_rng(0)
     trades = pd.DataFrame({"pnl": rng.normal(10, 100, 200)})

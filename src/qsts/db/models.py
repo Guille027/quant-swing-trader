@@ -4,7 +4,7 @@ Design notes:
 - All timestamps are stored as timezone-naive UTC.
 - Point-in-time correctness: fundamentals, news and macro rows carry `available_at`,
   the moment the information became public. Queries for a decision at time T must
-  filter `available_at <= T` (see qsts.data.pit).
+  filter `available_at <= T` (see qsts.data.repository.PointInTimeStore).
 - Universe membership is stored as intervals so historical universes can be rebuilt
   (survivorship-bias protection).
 - Strategies are never deleted: status changes are appended to strategy_status_history.

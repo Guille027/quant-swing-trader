@@ -119,6 +119,24 @@ class StrategyDefinition:
         params = {k: int(v) if isinstance(v, float) and v.is_integer() else v for k, v in params.items()}
         return FeatureSpec(o.feature, params)
 
+    def integer_params(self) -> set[str]:
+        """Params used where only an integer makes sense (window lengths, bar counts). Optimisers and the
+        robustness scan must vary these in integer steps: params are stored as floats."""
+        out = set()
+
+        def ref(v):
+            return v[1:] if isinstance(v, str) and v.startswith("$") else None
+        for c in [*self.entry_long, *self.entry_short, *self.exit_long, *self.exit_short]:
+            for o in (c.left, c.right):
+                defaults = REGISTRY[o.feature].defaults if o.feature in REGISTRY else {}
+                for k, v in o.params.items():
+                    if ref(v) and isinstance(defaults.get(k), int) and not isinstance(defaults.get(k), bool):
+                        out.add(ref(v))
+        for v in (self.stop.atr_n, self.stop.structure_k, self.max_holding_bars):
+            if ref(v):
+                out.add(ref(v))
+        return out & set(self.params)
+
     def feature_set(self) -> FeatureSet:
         specs = {}
         for c in [*self.entry_long, *self.entry_short, *self.exit_long, *self.exit_short]:

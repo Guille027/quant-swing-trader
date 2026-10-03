@@ -72,3 +72,33 @@ def test_mode_kill_switch_and_scan(client):
     assert c.post("/api/kill-switch", json={"engage": True, "reason": "test"}).json()["engaged"]
     assert c.post("/api/kill-switch", json={"engage": False}).status_code == 400
     assert not c.post("/api/kill-switch", json={"engage": False, "confirm": True}).json()["engaged"]
+
+
+def test_split_adjusted_everywhere_and_point_in_time(tmp_path):
+    """RAW bars with a real 4:1 split + the split action: research, charts and scans see continuous prices,
+    and a replay before the ex-date does not use the (then unknown) split."""
+    root = tmp_path / "csv"
+    (root / "1d").mkdir(parents=True)
+    (root / "actions").mkdir()
+    for i, s in enumerate(["SPY", "AAA"]):
+        df = synthetic_daily("2018-01-01", "2022-12-30", seed=i)
+        if s == "AAA":
+            df.loc[df.index >= "2021-06-01", ["open", "high", "low", "close"]] /= 4
+            df.loc[df.index >= "2021-06-01", "volume"] *= 4
+        df.index.name = "ts"
+        df.to_csv(root / "1d" / f"{s}.csv")
+    (root / "actions" / "AAA.csv").write_text("ex_date,kind,value\n2021-06-01,split,4.0\n")
+    st = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path}/q.db", state_dir=tmp_path / "var")
+    ctx = build_context(st)
+    import qsts.cli as cli
+    cli.build_context = lambda: ctx
+    main(["ingest", "--provider", "csv", "--root", str(root), "--symbols", "SPY,AAA", "--start", "2018-01-01",
+          "--end", "2022-12-30"])
+    import numpy as np
+    assert np.log(ctx.research_frame("AAA")["close"]).diff().abs().max() < 0.2
+    assert np.log(ctx.adjusted_bars("AAA")["close"]).diff().abs().max() < 0.2
+    before = ctx.adjusted_bars("AAA", asof="2021-05-01")  # split not yet known -> raw scale kept
+    assert np.allclose(before["close"], ctx.load_bars("AAA")["close"])
+    c = TestClient(create_app(ctx))
+    closes = [x["close"] for x in c.get("/api/chart/AAA").json()["candles"]]
+    assert np.abs(np.diff(np.log(closes))).max() < 0.2

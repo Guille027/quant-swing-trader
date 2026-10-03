@@ -21,6 +21,7 @@ from qsts.app.scanner import MarketScanner, StrategySlot, render_report
 from qsts.backtest.engine import BacktestConfig, CostModel
 from qsts.core.modes import ModeTransitionError, SystemMode
 from qsts.data.bars import Timeframe
+from qsts.data.adjust import adjust
 from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.db import models as m
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
@@ -152,9 +153,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         except DataQualityError as e:
             raise HTTPException(422, str(e))
         df = vb.df
-        if asof:  # reconstruct what the system could see at `asof`
+        acts = ctx.repo.load_corporate_actions(symbol)
+        if asof:  # reconstruct what the system could see at `asof` (bars AND corporate actions)
             t = pd.Timestamp(asof)
-            df = df[df["available_at"] <= (t.tz_localize("UTC") if t.tz is None else t)]
+            t = t.tz_localize("UTC") if t.tz is None else t
+            df = df[df["available_at"] <= t]
+            acts = acts[acts["ex_date"] <= t]
+        df = adjust(df, acts, "total")  # split/dividend adjusted; raw prices are what is stored
         specs = []
         for tok in filter(None, indicators.split(",")):
             name, _, arg = tok.partition(":")
@@ -251,8 +256,8 @@ def create_app(ctx: AppContext) -> FastAPI:
                               .order_by(m.StrategyVersion.version.desc())).first()
                 if v:
                     slots.append(StrategySlot(st.id, definition_from_dict(v.definition), st.status))
-        sc = MarketScanner(lambda sym: ctx.load_bars(sym), slots, ctx.risk)
         t = pd.Timestamp(asof) if asof else pd.Timestamp.now(tz="UTC")
+        sc = MarketScanner(lambda sym: ctx.adjusted_bars(sym, asof=t), slots, ctx.risk)
         rep = sc.scan(syms, t, portfolio_state(ctx))
         ctx.last_scan = rep
         return _j({"asof": rep.asof, "regime": rep.regime, "assets_scanned": rep.assets_scanned,

@@ -50,7 +50,8 @@ def cmd_ingest(args, ctx):
         except Exception as e:  # noqa: BLE001
             print(f"{sym}: FAILED - {e!r}", file=sys.stderr)
     print(f"{ok} symbols ingested")
-    print("NOTE: prices stored RAW; use qsts.data.adjust for split/dividend adjustment in research.")
+    print("NOTE: prices are stored RAW with corporate actions; research, charts and scans adjust them "
+          "(qsts.data.adjust) using only actions known at the time.")
 
 
 def _app(ctx):
