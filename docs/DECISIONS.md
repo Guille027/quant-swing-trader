@@ -12,5 +12,15 @@
 7. **Conservative intrabar assumptions**: stop before target; gaps fill at the open.
 8. **Unknown short availability ⇒ not shortable.**
 9. **Uncalibrated confidence ⇒ no conviction sizing** (NORMAL at most; never displayed as a %).
-10. **Network in the build environment blocks Yahoo/Stooq/Trading 212 docs**: the yfinance provider is
-    implemented but unverified; Trading 212 integration is deferred until official docs can be read.
+10. **Network in the build environment blocked Yahoo/Stooq/Trading 212 docs** (until 2026-10-03). With network open:
+    Yahoo and the Trading 212 / Gemini docs are reachable; Stooq resets connections and FRED is blocked by policy.
+11. **Store RAW prices, adjust on read.** Yahoo's `auto_adjust=False` OHLC, volume and dividends are already
+    split-adjusted, so the provider multiplies back by later split ratios to recover raw values. Adjustment
+    (split + dividend, CRSP-style backward factors) happens in `research_frame` / charts / scans, using only
+    corporate actions with ex_date <= the as-of time. Verified: equals Yahoo Adj Close to float precision.
+12. **Spin-offs** are reported by Yahoo as fractional "splits" (T 2022 1.324, GE 2023 1.281, IBM 2021 1.046…).
+    Treating them as splits keeps prices continuous; the volume of bars before a spin-off is scaled by the same
+    factor, which is wrong for volume (share count did not change) — acceptable for now, documented.
+13. **Integer parameters**: params are stored as floats; window-length params (detected from feature defaults /
+    stop & holding fields) are varied in integer steps by the robustness scan.
+14. **`.gitignore` anchors `/data/`** — the unanchored `data/` silently excluded `src/qsts/data/` from git.

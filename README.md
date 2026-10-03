@@ -19,6 +19,7 @@ qsts serve                     # UI at http://127.0.0.1:8765  (or: qsts desktop)
 qsts scan                      # text dashboard
 qsts research --strategy my.json --symbols AAPL,MSFT --oos-start 2022-01-01 --space '{"rsi_lo":[30,35,40]}'
 qsts evolve --symbols AAPL,MSFT --train 2012-01-01:2017-12-31 --validate 2018-01-15:2021-12-31
+python scripts/run_baselines.py --oos-start 2023-01-01   # baselines through the full pipeline (one OOS read per version)
 ```
 Screenshots in `docs/screenshots/` were taken with SYNTHETIC random-walk data (symbols `SYN_*`) — they show the UI, not market results.
 
@@ -36,4 +37,5 @@ src/qsts/
   risk/                risk engine & position sizing (incl. MICRO_LIVE preset)
 docs/                  ARCHITECTURE, STATUS (phase checklists), DECISIONS
 ```
-See [docs/STATUS.md](docs/STATUS.md) for what is implemented, mocked or pending.
+See [docs/STATUS.md](docs/STATUS.md) for what is implemented, mocked or pending, and
+[docs/TRADING212_API.md](docs/TRADING212_API.md) for what the Trading 212 API does and does not allow.
