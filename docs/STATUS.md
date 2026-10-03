@@ -14,7 +14,9 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 5 | Backtest engine, costs, partial fills, gaps, shorts, metrics, benchmarks, look-ahead checker | IMPLEMENTED |
 | 6 | Strategy definitions (versioned DSL), regime engine, lifecycle | IMPLEMENTED |
 | 7 | Risk engine & position sizing, MICRO_LIVE preset | IMPLEMENTED |
-| 8–22 | Strategy Lab, AI, evolution, WF/OOS/MC, portfolio, paper, UI, notifications, brokers, live safety | NOT STARTED |
+| 8 | Strategy Lab backend: experiment tracking, REPRODUCE EXPERIMENT, full validation pipeline, ablation | IMPLEMENTED (UI pending, phase 14) |
+| 11 | Walk-forward (train/validate/test + embargo), OOS vault (logged, limited access), parameter robustness, Monte Carlo, cost sensitivity, PSR/DSR, Overfitting Risk Score, Strategy Score | IMPLEMENTED |
+| 9, 10, 12–22 | AI, evolution, portfolio, paper, UI, notifications, brokers, live safety | NOT STARTED |
 
 Implied volatility, market breadth, fundamentals/news/macro *providers*: NOT STARTED (schema + PIT queries exist).
 Real historical S&P 500 membership source: NOT STARTED (needed before any multi-year universe backtest).
@@ -45,3 +47,10 @@ Real historical S&P 500 membership source: NOT STARTED (needed before any multi-
 ### Phase 6–7
 - [x] Regime labels causal; lifecycle gates (evidence, human-only approval, history kept)
 - [x] Risk: kill switch, loss limits, DD de-risking, sector & correlation caps, short availability, €100 micro-live sizing
+### Phase 8 / 11
+- [x] Experiments store strategy version, dataset hashes, config, period, seed, code version; reproduce is bit-identical and detects tampered data
+- [x] Folds ordered with embargo; params chosen on train, shortlist ranked on validation, single run on test
+- [x] OOS hidden from research; every access logged; second access per version refused
+- [x] Robustness neighbourhood scan; MC percentiles (5/25/50/75/95), ruin probability, insufficient-trade guard
+- [x] DSR penalises many trials; ORS flags too-perfect/too-few-trades results
+- [x] Pipeline returns REJECTED on random-walk data (no fake edge)
