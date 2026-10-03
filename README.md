@@ -12,6 +12,16 @@ cp .env.example .env
 python -m pytest
 ```
 
+## Use
+```bash
+qsts ingest --provider yahoo --symbols SPY,AAPL,MSFT --start 2010-01-01   # needs network access to Yahoo
+qsts serve                     # UI at http://127.0.0.1:8765  (or: qsts desktop)
+qsts scan                      # text dashboard
+qsts research --strategy my.json --symbols AAPL,MSFT --oos-start 2022-01-01 --space '{"rsi_lo":[30,35,40]}'
+qsts evolve --symbols AAPL,MSFT --train 2012-01-01:2017-12-31 --validate 2018-01-15:2021-12-31
+```
+Screenshots in `docs/screenshots/` were taken with SYNTHETIC random-walk data (symbols `SYN_*`) — they show the UI, not market results.
+
 ## Layout
 ```
 src/qsts/

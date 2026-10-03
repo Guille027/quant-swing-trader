@@ -83,6 +83,8 @@ def test_costs_and_cash_conservation(daily):
     assert len(r.trades) > 0
     assert np.isclose(r.equity["equity"].iloc[-1], cfg.initial_capital + r.trades["pnl"].sum(), rtol=1e-9)
     assert (r.trades["costs"] > 0).all()
+    assert (r.trades["spread_slippage"] > 0).all()
+    assert np.allclose(r.trades["costs"], r.trades["commission_borrow"] + r.trades["spread_slippage"])
 
 
 def test_costs_reduce_pnl(daily):

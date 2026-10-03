@@ -78,7 +78,8 @@ class _Pos:
     target: float | None
     stop_dist: float
     initial_risk: float
-    costs: float
+    costs: float  # commissions + borrow fees (cash costs, subtracted from P&L)
+    impl_cost: float = 0.0  # spread+slippage paid at entry (already inside entry_price)
     bars: int = 0
     mae: float = 0.0
     mfe: float = 0.0
@@ -144,12 +145,15 @@ class BacktestEngine:
             cash += p.direction * qty * px - comm  # long: +proceeds ; short: -cost to cover
             frac = qty / p.qty
             entry_cost_share = p.costs * frac
+            impl_share = p.impl_cost * frac
+            exit_impl = qty * abs(px - raw_price)
             gross = p.direction * qty * (px - p.entry_price)
             pnl = gross - comm - entry_cost_share
             trades.append({
                 "symbol": p.symbol, "direction": "LONG" if p.direction > 0 else "SHORT",
                 "entry_ts": p.entry_ts, "exit_ts": ts, "entry_price": p.entry_price, "exit_price": px,
-                "qty": qty, "pnl": pnl, "costs": comm + entry_cost_share,
+                "qty": qty, "pnl": pnl, "costs": comm + entry_cost_share + impl_share + exit_impl,
+                "commission_borrow": comm + entry_cost_share, "spread_slippage": impl_share + exit_impl,
                 "r_multiple": pnl / (p.initial_risk * frac) if p.initial_risk > 0 else np.nan,
                 "return_pct": p.direction * (px / p.entry_price - 1),
                 "bars_held": p.bars, "exit_reason": reason,
@@ -158,6 +162,7 @@ class BacktestEngine:
             })
             p.qty -= qty
             p.costs -= entry_cost_share
+            p.impl_cost -= impl_share
             if p.qty <= cfg.min_qty:
                 del pos[p.symbol]
 
@@ -204,7 +209,7 @@ class BacktestEngine:
                         sd = e["stop_dist"]
                         stop = px - d * sd
                         target = px + d * e["tp_dist"] if np.isfinite(e["tp_dist"]) else None
-                        pos[sym] = _Pos(sym, d, qty, ts, px, stop, target, sd, qty * sd, comm)
+                        pos[sym] = _Pos(sym, d, qty, ts, px, stop, target, sd, qty * sd, comm, qty * abs(px - o))
                         last_close[sym] = px
                         if qty < e["qty"] - 1e-9:
                             rejected.append({"ts": ts, "symbol": sym, "reason": "partial fill",

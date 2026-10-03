@@ -1,0 +1,309 @@
+"""Local backend API for the desktop UI (FastAPI). Binds to 127.0.0.1 only.
+
+The UI is a thin client: every number it shows comes from these endpoints, which call the same
+engines used everywhere else. Nothing is computed or invented in the frontend.
+"""
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from qsts.app.context import AppContext
+from qsts.app.scanner import MarketScanner, StrategySlot, render_report
+from qsts.backtest.engine import BacktestConfig, CostModel
+from qsts.core.modes import ModeTransitionError, SystemMode
+from qsts.data.bars import Timeframe
+from qsts.data.quality import DataQualityError, validate_and_clean
+from qsts.db import models as m
+from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
+from qsts.risk.engine import PortfolioState
+from qsts.strategy.definition import definition_from_dict
+
+STATIC = Path(__file__).resolve().parent.parent / "ui" / "static"
+
+
+def _j(x):
+    """JSON-safe conversion (NaN/inf -> None, numpy -> python, timestamps -> iso)."""
+    if isinstance(x, dict):
+        return {str(k): _j(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_j(v) for v in x]
+    if isinstance(x, (np.floating, float)):
+        return None if not math.isfinite(float(x)) else float(x)
+    if isinstance(x, np.integer):
+        return int(x)
+    if isinstance(x, np.bool_):
+        return bool(x)
+    if isinstance(x, pd.Timestamp):
+        return x.isoformat()
+    return x
+
+
+class KillSwitchBody(BaseModel):
+    engage: bool
+    reason: str = "manual"
+    confirm: bool = False
+
+
+class ModeBody(BaseModel):
+    mode: str
+    reason: str
+    confirm: bool = False
+
+
+class BacktestBody(BaseModel):
+    definition: dict
+    symbols: list[str]
+    start: str | None = None
+    end: str | None = None
+    initial_capital: float = 10_000.0
+    risk_per_trade: float = 0.01
+    spread_bps: float = 5.0
+    slippage_bps: float = 5.0
+    strategy_id: str | None = None
+
+
+class ApprovalBody(BaseModel):
+    approve: bool
+    reason: str = ""
+
+
+def portfolio_state(ctx: AppContext) -> PortfolioState:
+    try:
+        acc = ctx.execution.broker.account()
+        eq, cash = acc.equity, acc.cash
+    except Exception:  # noqa: BLE001
+        eq = cash = float("nan")
+    peak = ctx.extra.setdefault("peak_equity", eq)
+    if eq > peak:
+        ctx.extra["peak_equity"] = peak = eq
+    return PortfolioState(eq, cash, peak, ctx.extra.get("day_start", eq), ctx.extra.get("week_start", eq))
+
+
+def create_app(ctx: AppContext) -> FastAPI:
+    app = FastAPI(title="QSTS", docs_url="/api/docs")
+
+    # ------------------------------------------------------------------ system
+    @app.get("/api/status")
+    def status():
+        try:
+            acc = ctx.execution.broker.account()
+            broker = {"name": ctx.execution.broker.name, "environment": ctx.execution.broker.environment,
+                      "connected": ctx.execution.connected, "cash": acc.cash, "equity": acc.equity,
+                      "positions": ctx.execution.broker.positions()}
+        except Exception as e:  # noqa: BLE001
+            broker = {"name": ctx.execution.broker.name, "connected": False, "error": repr(e)}
+        return _j({"environment": ctx.settings.env.value, "mode": ctx.modes.mode.name,
+                   "live_enabled_by_config": ctx.settings.live_allowed_by_config,
+                   "kill_switch": {"engaged": ctx.kill_switch.is_engaged(), "info": ctx.kill_switch.info()},
+                   "broker": broker, "needs_reconcile": ctx.execution.needs_reconcile,
+                   "symbols_with_data": len(ctx.symbols()), "strategies": ctx.strategy_counts(),
+                   "ai": "configured" if ctx.settings.gemini_api_key else "not configured",
+                   "pending_approvals": len(ctx.execution.pending)})
+
+    @app.post("/api/kill-switch")
+    def kill_switch(body: KillSwitchBody):
+        if body.engage:
+            ctx.execution.stop_all_trading(body.reason)
+        else:
+            try:
+                ctx.kill_switch.release(confirmed_by_user=body.confirm)
+            except PermissionError as e:
+                raise HTTPException(400, str(e))
+        return {"engaged": ctx.kill_switch.is_engaged()}
+
+    @app.post("/api/mode")
+    def set_mode(body: ModeBody):
+        try:
+            target = SystemMode[body.mode]
+            ctx.modes.transition(target, reason=body.reason, confirmed_by_user=body.confirm)
+        except (KeyError, ModeTransitionError) as e:
+            raise HTTPException(400, str(e))
+        return {"mode": ctx.modes.mode.name}
+
+    # ------------------------------------------------------------------ market data / charts
+    @app.get("/api/symbols")
+    def symbols():
+        return ctx.symbols()
+
+    @app.get("/api/features")
+    def features():
+        return {k: {"category": d.category, "defaults": d.defaults, "version": d.version}
+                for k, d in sorted(REGISTRY.items()) if not k.startswith("_")}
+
+    @app.get("/api/chart/{symbol}")
+    def chart(symbol: str, tf: str = "1d", indicators: str = "", asof: str | None = None):
+        try:
+            raw = ctx.load_bars(symbol, Timeframe(tf))
+        except KeyError:
+            raise HTTPException(404, f"no data for {symbol}")
+        if raw.empty:
+            raise HTTPException(404, f"no data for {symbol}")
+        try:
+            vb = validate_and_clean(raw[["open", "high", "low", "close", "volume"]], symbol, Timeframe(tf))
+        except DataQualityError as e:
+            raise HTTPException(422, str(e))
+        df = vb.df
+        if asof:  # reconstruct what the system could see at `asof`
+            t = pd.Timestamp(asof)
+            df = df[df["available_at"] <= (t.tz_localize("UTC") if t.tz is None else t)]
+        specs = []
+        for tok in filter(None, indicators.split(",")):
+            name, _, arg = tok.partition(":")
+            if name not in REGISTRY:
+                raise HTTPException(400, f"unknown indicator {name}")
+            params = {"n": int(arg)} if arg else {}
+            specs.append(FeatureSpec(name, params))
+        feats = FeatureSet(specs).compute(df) if specs else pd.DataFrame(index=df.index)
+        t = [int(x.timestamp()) for x in df.index]
+        return _j({"symbol": symbol, "timeframe": tf, "data_version": vb.version,
+                   "quality": [{"code": i.code, "severity": i.severity.value, "message": i.message} for i in vb.report.issues],
+                   "candles": [{"time": ti, "open": o, "high": h, "low": l, "close": c}
+                               for ti, o, h, l, c in zip(t, df["open"], df["high"], df["low"], df["close"])],
+                   "volume": [{"time": ti, "value": v} for ti, v in zip(t, df["volume"])],
+                   "indicators": {col: [{"time": ti, "value": v} for ti, v in zip(t, feats[col]) if pd.notna(v)]
+                                  for col in feats.columns}})
+
+    # ------------------------------------------------------------------ strategies / experiments
+    @app.get("/api/strategies")
+    def strategies():
+        with ctx.sf() as s:
+            rows = s.scalars(select(m.Strategy).order_by(m.Strategy.created_at)).all()
+            out = []
+            for r in rows:
+                vers = s.scalars(select(m.StrategyVersion).where(m.StrategyVersion.strategy_id == r.id)
+                                 .order_by(m.StrategyVersion.version)).all()
+                out.append({"id": r.id, "name": r.name, "family": r.family, "status": r.status, "origin": r.origin,
+                            "versions": [{"id": v.id, "version": v.version, "definition": v.definition} for v in vers]})
+        return _j(out)
+
+    @app.get("/api/strategies/{sid}/history")
+    def strategy_history(sid: str):
+        return ctx.registry.history(sid)
+
+    @app.get("/api/experiments")
+    def experiments(limit: int = 100):
+        with ctx.sf() as s:
+            rows = s.scalars(select(m.Experiment).order_by(m.Experiment.created_at.desc()).limit(limit)).all()
+            return _j([{"id": e.id, "kind": e.kind, "strategy_version_id": e.strategy_version_id,
+                        "dataset_version_id": e.dataset_version_id, "seed": e.seed, "code_version": e.code_version,
+                        "created_at": str(e.created_at), "metrics": e.metrics,
+                        "period": [e.config.get("start"), e.config.get("end")], "symbols": e.config.get("symbols")}
+                       for e in rows])
+
+    @app.get("/api/experiments/{eid}")
+    def experiment(eid: str):
+        with ctx.sf() as s:
+            e = s.get(m.Experiment, eid)
+            if e is None:
+                raise HTTPException(404)
+            bt = s.scalars(select(m.Backtest).where(m.Backtest.experiment_id == eid)).first()
+            return _j({"id": e.id, "config": e.config, "metrics": e.metrics, "seed": e.seed,
+                       "code_version": e.code_version, "strategy_version_id": e.strategy_version_id,
+                       "trades": bt.trades if bt else [], "equity": bt.equity_curve if bt else []})
+
+    @app.post("/api/experiments/{eid}/reproduce")
+    def reproduce(eid: str):
+        e = ctx.tracker.get(eid)
+        data = {s: ctx.research_frame(s) for s in e.config["symbols"]}
+        return _j(ctx.tracker.reproduce(eid, data))
+
+    @app.post("/api/lab/backtest")
+    def lab_backtest(body: BacktestBody):
+        try:
+            sd = definition_from_dict(body.definition)
+            sd.validate()
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, f"invalid strategy: {e}")
+        data = {}
+        for sym in body.symbols:
+            try:
+                data[sym] = ctx.research_frame(sym)
+            except (KeyError, DataQualityError) as e:
+                raise HTTPException(422, f"{sym}: {e}")
+        cfg = BacktestConfig(initial_capital=body.initial_capital, risk_per_trade=body.risk_per_trade,
+                             costs=CostModel(spread_bps=body.spread_bps, slippage_bps=body.slippage_bps))
+        start = pd.Timestamp(body.start, tz="UTC") if body.start else None
+        end = pd.Timestamp(body.end, tz="UTC") if body.end else None
+        rec = ctx.tracker.run_backtest(sd, data, cfg, start=start, end=end, strategy_id=body.strategy_id)
+        eq = rec.result.equity["equity"]
+        return _j({"experiment_id": rec.id, "strategy_version_id": sd.version_id, "metrics": rec.metrics,
+                   "complexity": sd.complexity(),
+                   "equity": [{"time": int(t.timestamp()), "value": v} for t, v in eq.items()],
+                   "trades": rec.result.trades.astype(str).to_dict("records")[:500]})
+
+    # ------------------------------------------------------------------ scan / signals / approvals
+    @app.post("/api/scan")
+    def scan(asof: str | None = None, universe: str | None = None):
+        syms = universe.split(",") if universe else [s for s in ctx.symbols() if s != "SPY"]
+        with ctx.sf() as s:
+            slots = []
+            for st in s.scalars(select(m.Strategy)).all():
+                v = s.scalars(select(m.StrategyVersion).where(m.StrategyVersion.strategy_id == st.id)
+                              .order_by(m.StrategyVersion.version.desc())).first()
+                if v:
+                    slots.append(StrategySlot(st.id, definition_from_dict(v.definition), st.status))
+        sc = MarketScanner(lambda sym: ctx.load_bars(sym), slots, ctx.risk)
+        t = pd.Timestamp(asof) if asof else pd.Timestamp.now(tz="UTC")
+        rep = sc.scan(syms, t, portfolio_state(ctx))
+        ctx.last_scan = rep
+        return _j({"asof": rep.asof, "regime": rep.regime, "assets_scanned": rep.assets_scanned,
+                   "valid_assets": rep.valid_assets, "invalid": rep.invalid, "potential_setups": rep.potential_setups,
+                   "final_signals": rep.final_signals, "signals": [s.__dict__ for s in rep.signals],
+                   "no_trade": [s.__dict__ for s in rep.no_trade[:200]]})
+
+    @app.get("/api/scan/text", response_class=PlainTextResponse)
+    def scan_text():
+        if ctx.last_scan is None:
+            return "No scan yet. POST /api/scan first."
+        rep = ctx.last_scan
+        data_state = ("OK" if rep.valid_assets == rep.assets_scanned else
+                      f"PARTIAL ({len(rep.invalid)} invalid)" if rep.valid_assets else
+                      ("NO DATA" if not rep.assets_scanned else f"INVALID/STALE ({', '.join(sorted(set(rep.invalid.values())))[:60]})"))
+        sysinfo = {"Data": data_state,
+                   "AI": "OK" if ctx.settings.gemini_api_key else "NOT CONFIGURED",
+                   "Broker": ctx.execution.broker.environment.upper(),
+                   "Risk Engine": "OK", "Kill Switch": "ENGAGED" if ctx.kill_switch.is_engaged() else "READY"}
+        return render_report(ctx.last_scan, portfolio_state(ctx), ctx.strategy_counts(), sysinfo)
+
+    @app.get("/api/approvals")
+    def approvals():
+        return _j([{"key": k, "signal": s.__dict__, "qty": d.qty, "risk_amount": d.risk_amount, "tier": d.tier.value}
+                   for k, (s, d) in ctx.execution.pending.items()])
+
+    @app.post("/api/approvals/{key}")
+    def decide(key: str, body: ApprovalBody):
+        if key not in ctx.execution.pending:
+            raise HTTPException(404)
+        if body.approve:
+            o = ctx.execution.approve(key, actor="user")
+            return _j({"status": o.status, "reasons": o.reasons})
+        ctx.execution.reject(key, actor="user", reason=body.reason)
+        return {"status": "REJECTED"}
+
+    @app.get("/api/journal")
+    def journal(limit: int = 200):
+        return _j(ctx.execution.journal[-limit:])
+
+    @app.get("/api/notifications")
+    def notifications(limit: int = 200):
+        return _j([{"ts": n.ts, "event": n.event.value, "title": n.title, "body": n.body}
+                   for n in ctx.log_channel.sent[-limit:]])
+
+    # ------------------------------------------------------------------ frontend
+    if STATIC.exists():
+        app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+        @app.get("/")
+        def index():
+            return FileResponse(STATIC / "index.html")
+
+    return app

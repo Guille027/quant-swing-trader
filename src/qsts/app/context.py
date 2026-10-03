@@ -1,0 +1,79 @@
+"""Application context: wires settings, database, safety components and services together."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pandas as pd
+from sqlalchemy import func, select
+
+from qsts.backtest.engine import CostModel
+from qsts.config import Environment, Settings, load_settings
+from qsts.core.kill_switch import KillSwitch
+from qsts.core.modes import ModeController, SystemMode
+from qsts.data.bars import Timeframe
+from qsts.data.repository import MarketDataRepository
+from qsts.db import models as m
+from qsts.db.session import init_db, make_engine, session_factory
+from qsts.execution.broker import PaperBroker
+from qsts.execution.service import ExecutionService
+from qsts.notify.service import LogChannel, NotificationService
+from qsts.research.experiments import ExperimentTracker
+from qsts.risk.engine import MICRO_LIVE, RiskEngine, RiskLimits
+from qsts.strategy.lifecycle import StrategyRegistry
+
+
+@dataclass
+class AppContext:
+    settings: Settings
+    sf: object
+    repo: MarketDataRepository
+    kill_switch: KillSwitch
+    modes: ModeController
+    risk: RiskEngine
+    notifier: NotificationService
+    log_channel: LogChannel
+    execution: ExecutionService
+    tracker: ExperimentTracker
+    registry: StrategyRegistry
+    last_scan: object = None
+    extra: dict = field(default_factory=dict)
+
+    def load_bars(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
+        return self.repo.load_bars(symbol, timeframe)
+
+    def research_frame(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
+        """The ONE way research code gets bars: stored data re-validated (ValidatedBars contract).
+        Using the same loader everywhere keeps dataset hashes stable for reproduction."""
+        from qsts.data.quality import validate_and_clean
+        raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]
+        return validate_and_clean(raw, symbol, timeframe).df
+
+    def symbols(self) -> list[str]:
+        with self.sf() as s:
+            return list(s.scalars(select(m.Asset.symbol).join(m.Price, m.Price.asset_id == m.Asset.id)
+                                  .distinct().order_by(m.Asset.symbol)))
+
+    def strategy_counts(self) -> dict[str, int]:
+        with self.sf() as s:
+            rows = s.execute(select(m.Strategy.status, func.count()).group_by(m.Strategy.status)).all()
+        return {k.lower(): v for k, v in rows}
+
+
+def build_context(settings: Settings | None = None, initial_paper_cash: float = 10_000.0) -> AppContext:
+    st = settings or load_settings()
+    eng = make_engine(st.database_url)
+    init_db(eng)
+    sf = session_factory(eng)
+    ks = KillSwitch(st.state_dir)
+    modes = ModeController(SystemMode.OBSERVATION)  # always start in OBSERVATION
+    limits: RiskLimits = MICRO_LIVE if st.env is Environment.LIVE else RiskLimits()
+    risk = RiskEngine(limits, ks)
+    log_ch = LogChannel()
+    notifier = NotificationService([log_ch])
+    # Only a PAPER broker exists. A live adapter (phase 17) must be added explicitly; never auto-selected.
+    broker = PaperBroker(initial_paper_cash, CostModel())
+    execu = ExecutionService(broker, risk, ks, modes, notifier)
+    Path(st.state_dir).mkdir(parents=True, exist_ok=True)
+    return AppContext(st, sf, MarketDataRepository(sf), ks, modes, risk, notifier, log_ch, execu,
+                      ExperimentTracker(sf), StrategyRegistry(sf))

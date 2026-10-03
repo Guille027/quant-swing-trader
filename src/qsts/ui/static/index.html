@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%234c8dff%22/%3E%3C/svg%3E">
+<title>QSTS — Quant Swing Trading System</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">QSTS <span id="env" class="pill"></span> <span id="mode" class="pill"></span></div>
+  <nav>
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="signals">Señales</button>
+    <button data-tab="charts">Gráficos</button>
+    <button data-tab="strategies">Estrategias</button>
+    <button data-tab="lab">Strategy Lab</button>
+    <button data-tab="research">Research</button>
+    <button data-tab="logs">Logs</button>
+  </nav>
+  <button id="kill" class="danger">STOP ALL TRADING</button>
+</header>
+
+<main>
+<section id="tab-dashboard" class="tab active">
+  <div class="grid">
+    <div class="card"><h3>Portfolio</h3><dl id="portfolio"></dl></div>
+    <div class="card"><h3>Mercado</h3><dl id="market"></dl></div>
+    <div class="card"><h3>Estrategias</h3><dl id="strat-counts"></dl></div>
+    <div class="card"><h3>Sistema</h3><dl id="system"></dl></div>
+  </div>
+  <div class="card"><h3>Último escaneo <button id="run-scan">Escanear ahora</button></h3><pre id="scan-text">Sin escaneo.</pre></div>
+  <div class="card"><h3>Modo del sistema</h3>
+    <p class="muted">Progresión estricta: OBSERVATION → BACKTEST → PAPER → MANUAL_APPROVAL → SEMI_AUTOMATIC → FULL_AUTOMATIC. LIVE requiere además la puerta de seguridad.</p>
+    <select id="mode-select"></select> <input id="mode-reason" placeholder="motivo"> <label><input type="checkbox" id="mode-confirm"> confirmo</label>
+    <button id="mode-apply">Cambiar modo</button> <span id="mode-msg" class="muted"></span>
+  </div>
+</section>
+
+<section id="tab-signals" class="tab">
+  <div class="card"><h3>Pendientes de aprobación</h3><table id="approvals"></table></div>
+  <div class="card"><h3>Señales del último escaneo</h3><table id="signals"></table></div>
+  <div class="card"><h3>NO TRADE (motivos)</h3><table id="notrade"></table></div>
+</section>
+
+<section id="tab-charts" class="tab">
+  <div class="card">
+    <select id="chart-symbol"></select>
+    <select id="chart-tf"><option>1d</option><option>1h</option><option>4h</option><option>1w</option></select>
+    <input id="chart-ind" value="ema:20,ema:50" title="Indicadores superpuestos (precio)">
+    <input id="chart-osc" value="rsi:14" title="Oscilador (panel inferior)">
+    <input id="chart-asof" placeholder="as-of (opcional, ISO)" title="Reconstruye lo que el sistema veía en ese momento">
+    <button id="chart-load">Cargar</button> <span id="chart-msg" class="muted"></span>
+    <div id="chart" class="chart"></div>
+    <div id="chart-osc-pane" class="chart small"></div>
+  </div>
+</section>
+
+<section id="tab-strategies" class="tab">
+  <div class="card"><h3>Estrategias (nunca se borran)</h3><table id="strategies"></table></div>
+  <div class="card"><h3>Historial</h3><pre id="strategy-history" class="muted">Selecciona una estrategia.</pre></div>
+</section>
+
+<section id="tab-lab" class="tab">
+  <div class="grid two">
+    <div class="card">
+      <h3>Definición (JSON)</h3>
+      <textarea id="lab-def" spellcheck="false"></textarea>
+      <div class="row">
+        <input id="lab-symbols" placeholder="símbolos, p.ej. AAPL,MSFT">
+        <input id="lab-start" placeholder="inicio (YYYY-MM-DD)"><input id="lab-end" placeholder="fin">
+      </div>
+      <div class="row">
+        <label>Capital <input id="lab-cap" value="10000" size="7"></label>
+        <label>Riesgo/trade <input id="lab-risk" value="0.01" size="5"></label>
+        <label>Spread bps <input id="lab-spread" value="5" size="4"></label>
+        <label>Slippage bps <input id="lab-slip" value="5" size="4"></label>
+      </div>
+      <button id="lab-run">Ejecutar backtest</button> <span id="lab-msg" class="muted"></span>
+      <p class="muted">Walk-forward, OOS, Monte Carlo y robustez: pipeline completo vía CLI <code>qsts research</code>.</p>
+    </div>
+    <div class="card"><h3>Resultado</h3><div id="lab-equity" class="chart small"></div><dl id="lab-metrics" class="metrics"></dl></div>
+  </div>
+  <div class="card"><h3>Operaciones</h3><table id="lab-trades"></table></div>
+</section>
+
+<section id="tab-research" class="tab">
+  <div class="card"><h3>Experimentos</h3><table id="experiments"></table></div>
+  <div class="card"><h3>Reproducción</h3><pre id="repro" class="muted">Pulsa REPRODUCE en un experimento.</pre></div>
+</section>
+
+<section id="tab-logs" class="tab">
+  <div class="card"><h3>Notificaciones / eventos</h3><table id="notifications"></table></div>
+  <div class="card"><h3>Journal de decisiones</h3><table id="journal"></table></div>
+</section>
+</main>
+<footer class="muted">Plataforma de investigación. Rentabilidades pasadas no garantizan resultados futuros. NO EVIDENCE → NO TRADE. Gráficos: TradingView Lightweight Charts™.</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

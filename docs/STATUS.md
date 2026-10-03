@@ -25,8 +25,8 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 18/19 | Manual approval queue, semi-automatic thresholds | IMPLEMENTED |
 | 20/21 | LiveSafetyGate (config, mode, user confirmation, kill switch, approved strategy, paper report, data, errors), MICRO_LIVE | IMPLEMENTED (no live adapter exists) |
 | 17 | Trading 212 adapter | NOT STARTED — blocked: official docs unreachable from environment |
-| 13 | Scheduled scanner / paper-trading loop | NOT STARTED |
-| 14 | Desktop UI | NOT STARTED |
+| 13 | Market scanner (point-in-time), CLI `qsts scan` | IMPLEMENTED (scheduling via cron/Task Scheduler: not yet) |
+| 14 | Desktop UI: FastAPI backend (127.0.0.1) + web frontend (dashboard, signals/approvals, charts with as-of replay, strategies, Strategy Lab, research/REPRODUCE, logs), `qsts desktop` native window via pywebview | IMPLEMENTED |
 | 22 | Full validation on real data | NOT STARTED — needs real data access |
 
 Implied volatility, market breadth, fundamentals/news/macro *providers*: NOT STARTED (schema + PIT queries exist).
