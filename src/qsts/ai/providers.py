@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable
 
+from qsts.core import net
+
 
 class AIProviderError(RuntimeError):
     pass
@@ -56,7 +58,7 @@ class GeminiProvider(AIProvider):
                                      data=json.dumps(body).encode(), method="POST",
                                      headers={"Content-Type": "application/json", "x-goog-api-key": self._key})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with net.urlopen(req, self.timeout) as r:
                 data = json.loads(r.read())
         except urllib.error.HTTPError as e:
             raise AIProviderError(f"Gemini HTTP {e.code}: {e.read()[:300]!r}") from e

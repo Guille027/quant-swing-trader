@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from enum import Enum
 
+from qsts.core import net
 from qsts.core.logging import get_logger
 
 log = get_logger("notify")
@@ -77,7 +78,7 @@ class LogChannel(Channel):
 def _post_json(url: str, payload: dict, timeout: float = 10.0) -> None:
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with net.urlopen(req, timeout) as r:
         if r.status >= 300:
             raise RuntimeError(f"HTTP {r.status}")
 

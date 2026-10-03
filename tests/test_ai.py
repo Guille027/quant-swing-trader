@@ -69,7 +69,7 @@ def test_gemini_request_shape(monkeypatch):
         return Resp(json.dumps({"candidates": [{"content": {"parts": [{"text": "{\"a\":1}"}]}}],
                                 "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2}}).encode())
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("qsts.core.net.urlopen", fake_urlopen)
     g = GeminiProvider("KEY", model="gemini-test")
     r = g.generate("sys", "hello")
     assert seen["url"].endswith("/models/gemini-test:generateContent")

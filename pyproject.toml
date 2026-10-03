@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "pandas_market_calendars>=4.4",
+    "truststore>=0.9",
 ]
 
 [project.optional-dependencies]
