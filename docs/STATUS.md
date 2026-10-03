@@ -16,7 +16,18 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 7 | Risk engine & position sizing, MICRO_LIVE preset | IMPLEMENTED |
 | 8 | Strategy Lab backend: experiment tracking, REPRODUCE EXPERIMENT, full validation pipeline, ablation | IMPLEMENTED (UI pending, phase 14) |
 | 11 | Walk-forward (train/validate/test + embargo), OOS vault (logged, limited access), parameter robustness, Monte Carlo, cost sensitivity, PSR/DSR, Overfitting Risk Score, Strategy Score | IMPLEMENTED |
-| 9, 10, 12–22 | AI, evolution, portfolio, paper, UI, notifications, brokers, live safety | NOT STARTED |
+| 9 | AIProvider abstraction, AI research service (strategy proposals, news labels, result review) with schema validation, caching, daily budget, provenance | IMPLEMENTED |
+| 9 | GeminiProvider | UNVERIFIED (API docs unreachable from build env; request shape unit-tested) |
+| 10 | Evolutionary search (train/val min-fitness, complexity & divergence penalties, trial counting) | IMPLEMENTED |
+| 12 | Strategy allocation (risk parity/inverse vol/min-var with shrinkage, health, cash), correlation clusters, effective bets, beta, sector exposure, confidence calibration, decay detection | IMPLEMENTED |
+| 13/16 | BrokerAdapter, PaperBroker (same fill model as backtest), ExecutionService | IMPLEMENTED |
+| 15 | NotificationService: log, email IMPLEMENTED; Telegram, Discord UNVERIFIED; WhatsApp PLACEHOLDER | PARTIAL |
+| 18/19 | Manual approval queue, semi-automatic thresholds | IMPLEMENTED |
+| 20/21 | LiveSafetyGate (config, mode, user confirmation, kill switch, approved strategy, paper report, data, errors), MICRO_LIVE | IMPLEMENTED (no live adapter exists) |
+| 17 | Trading 212 adapter | NOT STARTED — blocked: official docs unreachable from environment |
+| 13 | Scheduled scanner / paper-trading loop | NOT STARTED |
+| 14 | Desktop UI | NOT STARTED |
+| 22 | Full validation on real data | NOT STARTED — needs real data access |
 
 Implied volatility, market breadth, fundamentals/news/macro *providers*: NOT STARTED (schema + PIT queries exist).
 Real historical S&P 500 membership source: NOT STARTED (needed before any multi-year universe backtest).
@@ -54,3 +65,12 @@ Real historical S&P 500 membership source: NOT STARTED (needed before any multi-
 - [x] Robustness neighbourhood scan; MC percentiles (5/25/50/75/95), ruin probability, insufficient-trade guard
 - [x] DSR penalises many trials; ORS flags too-perfect/too-few-trades results
 - [x] Pipeline returns REJECTED on random-walk data (no fake edge)
+### Phases 9–21 (implemented parts)
+- [x] AI output rejected when it invents features, adds unexpected fields (e.g. performance claims) or breaks numeric ranges; cached; budgeted
+- [x] Evolution deterministic per seed; penalties only lower fitness; genomes always valid
+- [x] Tech names cluster as one bet; allocation ignores past returns; 100% cash possible; calibration refuses to emit confidence without evidence
+- [x] Decay: significant underperformance -> UNDER_REVIEW/DISABLE; too few trades -> no verdict
+- [x] Paper broker: next-bar fills, idempotent orders, stop gaps, limit, partial fills, short/fractional rejection
+- [x] Observation never executes; manual approval needs a human; kill switch blocks & cancels, keeps positions
+- [x] Disconnect: block, notify, no position changes; reconnect requires reconciliation; divergence needs explicit user acceptance
+- [x] Live gate blocks by default with explicit reasons; micro-live enforces MICRO_LIVE limits and capital cap
