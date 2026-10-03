@@ -176,3 +176,76 @@ def test_point_in_time_fundamentals(sf):
     assert pit.fundamentals_asof(aid, "2021-04-28 21:00") == {"eps": 1.0}
     assert pit.news_asof(aid, "2021-04-28 14:00") == []
     assert len(pit.news_asof(aid, "2021-04-28 15:00")) == 1
+
+
+def test_incomplete_bar_removed(daily):
+    # at 15:00 UTC on 2022-06-01 that session is still open: its bar must not be used
+    raw = daily[daily.index <= "2022-06-01"]
+    vb = validate_and_clean(raw, "X", Timeframe.D1, asof=pd.Timestamp("2022-06-01 15:00", tz="UTC"))
+    assert "INCOMPLETE_BAR" in vb.report.codes() and vb.df.index[-1] == pd.Timestamp("2022-05-31", tz="UTC")
+
+
+def test_split_adjust_volume_and_factor(daily):
+    d = daily.copy()
+    d.loc[d.index >= "2021-06-01", ["open", "high", "low", "close"]] /= 2
+    d.loc[d.index >= "2021-06-01", "volume"] *= 2
+    actions = pd.DataFrame({"ex_date": [pd.Timestamp("2021-06-01", tz="UTC")], "kind": ["split"], "value": [2.0]})
+    adj = adjust(d, actions, "total")
+    before = adj.index < "2021-06-01"
+    assert np.allclose(adj["volume"][before], daily["volume"][before] * 2)
+    assert np.allclose(adj["adj_factor"][before], 0.5) and np.allclose(adj["adj_factor"][~before], 1.0)
+
+
+class _FakeYahooTicker:
+    """Mimics the Yahoo conventions verified against live responses (docs/STATUS.md): OHLC, volume and
+    dividends are split-adjusted; Adj Close also includes dividends. Built from SYNTHETIC raw prices."""
+
+    def __init__(self, raw, split_date, ratio, div_date, raw_div):
+        self.raw, self.split_date, self.ratio, self.div_date, self.raw_div = raw, split_date, ratio, div_date, raw_div
+
+    def history(self, **kw):
+        idx = self.raw.index.tz_localize(None).tz_localize("America/New_York")  # Yahoo: local midnight
+        f = np.where(self.raw.index < self.split_date, self.ratio, 1.0)
+        h = pd.DataFrame({"Open": self.raw["open"].values / f, "High": self.raw["high"].values / f,
+                          "Low": self.raw["low"].values / f, "Close": self.raw["close"].values / f,
+                          "Volume": self.raw["volume"].values * f}, index=idx)
+        prev = self.raw["close"][self.raw.index < self.div_date].iloc[-1]
+        h["Adj Close"] = h["Close"] * np.where(self.raw.index < self.div_date, 1 - self.raw_div / prev, 1.0)
+        return h
+
+    @property
+    def actions(self):
+        fdiv = self.ratio if self.div_date < self.split_date else 1.0
+        idx = (pd.DatetimeIndex([self.div_date, self.split_date]).tz_localize(None) + pd.Timedelta(hours=9, minutes=30)
+               ).tz_localize("America/New_York")  # Yahoo stamps actions at 09:30 local
+        return pd.DataFrame({"Dividends": [self.raw_div / fdiv, 0.0], "Stock Splits": [0.0, self.ratio]}, index=idx)
+
+
+def test_yahoo_provider_reconstructs_raw_prices(monkeypatch):
+    pytest.importorskip("yfinance")
+    from qsts.data.providers.yfinance_provider import YFinanceProvider
+    raw = synthetic_daily("2020-01-01", "2021-12-31", seed=5)
+    raw.loc[raw.index >= "2021-03-01", ["open", "high", "low", "close"]] /= 4  # real 4:1 split in RAW prices
+    raw.loc[raw.index >= "2021-03-01", "volume"] *= 4
+    fake = _FakeYahooTicker(raw, pd.Timestamp("2021-03-01", tz="UTC"), 4.0, pd.Timestamp("2020-11-02", tz="UTC"), 0.8)
+    p = YFinanceProvider()
+    monkeypatch.setattr(p, "_ticker", lambda s: fake)
+    got = p.get_bars("X", Timeframe.D1, "2020-01-01", "2021-12-31")
+    vb = validate_and_clean(got, "X", Timeframe.D1)
+    assert np.allclose(vb.df["close"].values, raw["close"].values) and np.allclose(vb.df["volume"].values, raw["volume"].values)
+    acts = p.get_corporate_actions("X")
+    assert acts.set_index("kind").loc["dividend", "value"] == pytest.approx(0.8)  # raw, not split-adjusted
+    rt = p.verify_roundtrip("X", "2020-01-01", "2021-12-31")
+    assert rt["max_rel_err"] < 1e-9
+
+
+def test_corporate_actions_roundtrip(sf):
+    repo = MarketDataRepository(sf)
+    repo.upsert_asset("AAA")
+    acts = pd.DataFrame({"ex_date": pd.to_datetime(["2021-03-01", "2021-06-01"], utc=True),
+                         "kind": ["dividend", "split"], "value": [0.5, 4.0]})
+    assert repo.store_corporate_actions("AAA", acts, "csv") == 2
+    assert repo.store_corporate_actions("AAA", acts, "csv") == 2  # idempotent
+    back = repo.load_corporate_actions("AAA")
+    assert len(back) == 2 and list(back["kind"]) == ["dividend", "split"]
+    assert back["ex_date"].iloc[0] == pd.Timestamp("2021-03-01", tz="UTC")

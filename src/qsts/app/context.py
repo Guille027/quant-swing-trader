@@ -43,11 +43,14 @@ class AppContext:
         return self.repo.load_bars(symbol, timeframe)
 
     def research_frame(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
-        """The ONE way research code gets bars: stored data re-validated (ValidatedBars contract).
+        """The ONE way research code gets bars: stored RAW data re-validated (ValidatedBars contract), then
+        backward-adjusted for splits and dividends from stored corporate actions (`raw_close` kept).
         Using the same loader everywhere keeps dataset hashes stable for reproduction."""
+        from qsts.data.adjust import adjust
         from qsts.data.quality import validate_and_clean
         raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]
-        return validate_and_clean(raw, symbol, timeframe).df
+        vb = validate_and_clean(raw, symbol, timeframe)
+        return adjust(vb.df, self.repo.load_corporate_actions(symbol), "total")
 
     def symbols(self) -> list[str]:
         with self.sf() as s:
