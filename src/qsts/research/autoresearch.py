@@ -350,23 +350,35 @@ class AutoResearcher:
                             "return": float((1 + b).prod() - 1)} for b in blocks]})
         return self._passive
 
-    def oos_benchmarks(self) -> dict:
-        """Buy & hold references over the OOS period (same stocks equal weight; benchmark). Only used to judge a
-        final test; never shown to the search or the AI."""
-        if getattr(self, "_oos_bench", None) is None:
+    def oos_benchmarks(self, symbols: list[str] | None = None) -> dict:
+        """Buy & hold references over the OOS period (the strategy's stocks equal weight; benchmark). Only used to
+        judge a final test; never shown to the search or the AI."""
+        cache = self.__dict__.setdefault("_oos_bench", {})
+        frames = {k: self.full[k] for k in (symbols or self.full) if k in self.full} or self.full
+        key = tuple(sorted(frames))
+        if key not in cache:
             oos = pd.Timestamp(self.cfg.oos_start, tz="UTC")
             end = max(v.index.max() for v in self.full.values())
-            rets = pd.concat({k: v["close"].pct_change() for k, v in self.full.items()}, axis=1)
+            rets = pd.concat({k: v["close"].pct_change() for k, v in frames.items()}, axis=1)
             rets = rets[(rets.index >= oos) & (rets.index <= end)].mean(axis=1, skipna=True)
-            out = {"passive": window_stats(rets, self.bt.bars_per_year)}
+            out = {"passive": {**window_stats(rets, self.bt.bars_per_year), "n_symbols": len(frames)}}
             if self.benchmark is not None:
                 b = self.benchmark.pct_change()
                 out["benchmark"] = window_stats(b[(b.index >= oos) & (b.index <= end)], self.bt.bars_per_year)
-            self._oos_bench = _clean(out)
-        return self._oos_bench
+            cache[key] = _clean(out)
+        return cache[key]
+
+    def _row_symbols(self, row) -> list[str] | None:
+        """Stocks the strategy was validated on (its validation experiment), if recorded."""
+        exp = (row.validation or {}).get("experiment_id")
+        if not exp:
+            return None
+        with self.sf() as s:
+            e = s.get(m.Experiment, exp)
+        return list((e.config or {}).get("symbols") or []) or None if e is not None else None
 
     def _judge(self, row, oos: dict) -> dict:
-        bench = self.oos_benchmarks()
+        bench = self.oos_benchmarks(self._row_symbols(row))
         research_sharpe = ((row.validation or {}).get("is_metrics") or {}).get("sharpe") or (row.metrics or {}).get("sharpe")
         v = final_verdict(oos, research_sharpe, bench.get("passive"))
         return {**v, "research_sharpe": research_sharpe, "passive": bench.get("passive"),
@@ -374,11 +386,11 @@ class AutoResearcher:
 
     def rejudge_finals(self) -> int:
         """Final tests judged under the old, too lenient rule (only 'made money') are re-judged with the current
-        criteria from their STORED out-of-sample metrics (the vault is not opened again)."""
+        criteria from their STORED out-of-sample metrics (the vault is not opened again). All rankings: an approval
+        from an earlier ranking must not stay approved (or in simulation) just because the data changed since."""
         R = m.ResearchCandidate
         with self.sf() as s:
-            rows = s.scalars(select(R).where(R.universe_id == self.universe_id,
-                                             R.status.in_(("FINAL_PASS", "FINAL_FAIL")))).all()
+            rows = s.scalars(select(R).where(R.status.in_(("FINAL_PASS", "FINAL_FAIL")))).all()
         changed = 0
         for row in rows:
             fin = dict(row.final or {})

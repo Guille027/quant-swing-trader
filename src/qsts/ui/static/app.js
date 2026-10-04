@@ -402,6 +402,7 @@ async function loadTelegram() {
     : t.token_set ? '<span class="bad">Falta el paso 3–4</span>: abre tu bot, pulsa Iniciar y luego "Detectar mi chat".'
     : '<span class="bad">No configurado.</span> Sigue estos pasos (una sola vez):';
   $("#tg-setup").style.display = t.configured ? "none" : "block";
+  if (t.configured) $("#paper-on").after($("#tg-card")); else $("#paper-none").before($("#tg-card"));  // not set up yet: show it first
   $("#tg-test").disabled = $("#tg-report").disabled = !t.configured;
   table($("#tg-log"), t.last, [["Enviado", n => n.sent_at], ["Día", n => n.day], ["Tipo", n => ({ daily: "diario", manual: "manual" }[n.kind] || n.kind)],
     ["", n => n.ok ? '<span class="good">✔</span>' : `<span class="bad">✘ ${esc(n.error || "")}</span>`]]);

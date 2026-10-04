@@ -171,7 +171,9 @@ def test_old_lenient_final_pass_is_rejudged_without_reopening_the_vault(sf, data
         s.add(m.PaperSession(strategy_id=sid, version_id=vid, symbols=sorted(data), start=pd.Timestamp("2023-06-01").date(),
                              capital=10_000.0, config={}, status="ACTIVE"))
     accesses = count(sf, m.OOSAccessLog)
-    assert r.rejudge_finals() == 1
+    # the data changed since (another ranking): the old approval must still be re-judged
+    r2 = researcher(sf, {k: data[k] for k in ("AAA", "BBB")}, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    assert r2.universe_id != r.universe_id
     row = r.get_row(vid)
     assert row.status == "FINAL_FAIL" and row.final["decision"] == "FINAL_FAIL" and "rejudged" in row.final
     assert row.final["checks"]["limited_decay"] is False and row.final["criteria_version"] == ar.FINAL_CRITERIA_VERSION

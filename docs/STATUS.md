@@ -113,7 +113,8 @@ because concurrent positions are not independent.
       final-tested versions not re-imported, last search options remembered across restarts (tested)
 - [x] Final test only for research-validated candidates, once per version; its results never reach the AI context
 - [x] Final test verdict (criteria v2): OOS return > 0 AND OOS Sharpe >= buy & hold of the same stocks over the same
-      OOS window AND OOS Sharpe >= 50% of the research Sharpe; old lenient passes re-judged from stored metrics
+      OOS window AND OOS Sharpe >= 50% of the research Sharpe; old lenient passes (of every ranking, judged against
+      the strategy's own stocks) re-judged from stored metrics
       (no new vault access), CANDIDATE/PAPER demoted and paper sessions stopped (tested)
 - [x] AI proposals: schema-validated, long-only enforced, malformed ones logged and not backtested
 
