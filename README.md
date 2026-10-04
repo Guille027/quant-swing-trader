@@ -19,6 +19,7 @@ what it would buy at the next open, with your capital in euros or dollars; nothi
 a Telegram bot sends the next-open orders every evening (set up in 3 · Simulación → Avisos por Telegram).
 
 ## Windows: open it from the desktop
+To update to the latest version: close QSTS and double-click **`Actualizar QSTS.bat`** (runs `git pull`).
 Once: double-click **`Crear acceso directo.bat`** in the project folder (or run `python -m qsts.cli shortcut`).
 It creates a **QSTS** icon on the desktop and in the Start menu; double-click it to open the app (no console).
 `Abrir QSTS.bat` does the same without creating a shortcut. Logs go to `var/desktop.log`.
