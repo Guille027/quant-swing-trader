@@ -110,6 +110,10 @@ class TelegramTokenBody(BaseModel):
     token: str
 
 
+class KeyBody(BaseModel):
+    key: str
+
+
 class SyncDirBody(BaseModel):
     dir: str
 
@@ -570,6 +574,17 @@ def create_app(ctx: AppContext) -> FastAPI:
         _save_env({"QSTS_TELEGRAM_BOT_TOKEN": tok})
         ctx.settings.telegram_bot_token = SecretStr(tok)
         return {"bot": (me or {}).get("username"), "name": (me or {}).get("first_name")}
+
+    @app.post("/api/settings/gemini")
+    def set_gemini_key(body: KeyBody):
+        """The AI key is a secret: saved only to this computer's .env (never copied to other computers)."""
+        key = body.key.strip()
+        if len(key) < 20 or any(ch.isspace() for ch in key):
+            raise HTTPException(400, "eso no parece una clave de Gemini (cópiala entera de Google AI Studio)")
+        _save_env({"QSTS_GEMINI_API_KEY": key})
+        ctx.settings.gemini_api_key = SecretStr(key)
+        _invalidate_research_views()  # the next search is built with the AI
+        return {"saved": True}
 
     @app.post("/api/telegram/detect")
     def tg_detect():

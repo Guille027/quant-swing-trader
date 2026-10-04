@@ -251,6 +251,7 @@ async function loadAuto(full) {
     if (st.last_options.avoid_earnings != null) $("#ar-earn").checked = !!st.last_options.avoid_earnings;
     if (st.last_options.use_ai != null) $("#ar-ai").checked = !!st.last_options.use_ai;
   }
+  $("#ai-key-box").style.display = st.ai_available ? "none" : "flex";
   if (!st.ai_available) { $("#ar-ai").checked = false; $("#ar-ai").disabled = true; $("#ar-ai").parentElement.title = "Pon QSTS_GEMINI_API_KEY en .env"; }
   dl($("#ar-state"), { "Estado": st.running ? '<span class="good">investigando…</span>' : "parado", "Fase": esc(st.phase),
     "Ciclos (esta sesión)": st.cycles_done, "Probadas (esta sesión)": st.session_trials,
@@ -370,6 +371,13 @@ window.finalTest = async (id) => {
   loadBoard();
 };
 $("#ar-group").onchange = () => loadBoard();
+$("#ai-key-save").onclick = async () => {
+  try { await post("/api/settings/gemini", { key: $("#ai-key").value }); $("#ai-key").value = "";
+    $("#ar-ai").disabled = false; $("#ar-ai").checked = true; $("#ar-ai").parentElement.title = "";
+    $("#ar-msg").textContent = "Clave guardada: la IA se usará en la próxima investigación."; }
+  catch (e) { $("#ar-msg").textContent = e.message; }
+  loadAuto(false);
+};
 $("#ar-start").onclick = async () => {
   const body = { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value };
   try { const r = await post("/api/autoresearch/start", body).catch(async (e) => {

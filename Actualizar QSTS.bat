@@ -12,7 +12,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-python -m pip install -e . --quiet
+python -m pip install -e ".[desktop,yahoo]" --quiet
 echo.
 echo Version descargada:
 git log --oneline -1

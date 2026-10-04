@@ -105,3 +105,21 @@ def test_telegram_setup_endpoints(tmp_path):
     assert t["configured"] is True and TOKEN not in str(t)  # the token never goes back to the screen
     assert c.post("/api/telegram/test").json() == {"sent": True} and calls[-1][1]["chat_id"] == "999"
     assert c.post("/api/telegram/report").status_code == 400  # no simulation running
+
+
+def test_gemini_key_is_saved_from_the_app(tmp_path):
+    from fastapi.testclient import TestClient
+    from qsts.api.server import create_app
+    from qsts.app.context import build_context
+    from qsts.config import Settings
+    ctx = build_context(Settings(_env_file=None, database_url=f"sqlite:///{tmp_path}/q.db", state_dir=tmp_path / "var",
+                                 gemini_api_key=None))  # a key in the environment must not leak into the test
+    ctx.extra["env_path"] = str(tmp_path / ".env")
+    c = TestClient(create_app(ctx))
+    assert c.get("/api/autoresearch/status").json()["ai_available"] is False
+    assert c.post("/api/settings/gemini", json={"key": "short"}).status_code == 400
+    key = "AIza" + "x" * 35
+    assert c.post("/api/settings/gemini", json={"key": key}).json() == {"saved": True}
+    assert f"QSTS_GEMINI_API_KEY={key}" in (tmp_path / ".env").read_text()
+    st = c.get("/api/autoresearch/status").json()
+    assert st["ai_available"] is True and key not in str(st)

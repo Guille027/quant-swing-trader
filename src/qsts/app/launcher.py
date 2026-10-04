@@ -185,9 +185,13 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
             "global.ok": "Aceptar", "global.quit": "Salir", "global.cancel": "Cancelar"})
     except Exception as e:  # noqa: BLE001 - no native window (e.g. WebView2 missing): use the browser
         print(f"native window unavailable: {e!r}")
+        why = ("Falta el componente de la ventana propia (pywebview): cierra QSTS y haz doble clic en "
+               "'Instalar QSTS.bat' en la carpeta del proyecto." if isinstance(e, ImportError) else
+               "Windows no pudo crear la ventana propia: instala 'Microsoft Edge WebView2 Runtime' (gratis, "
+               "de la web de Microsoft) y vuelve a abrir QSTS.")
         webbrowser.open(url)
-        message("QSTS está abierta en tu navegador.\n\nDeja este aviso abierto mientras la uses: al pulsar "
-                "Aceptar se CIERRA la app (y se detiene cualquier investigación en marcha).")
+        message("QSTS está abierta en tu navegador.\n\n" + why + "\n\nDeja este aviso abierto mientras la uses: "
+                "al pulsar Aceptar se CIERRA la app (y se detiene cualquier investigación en marcha).")
     after_close(ctx)
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} closed")
 
