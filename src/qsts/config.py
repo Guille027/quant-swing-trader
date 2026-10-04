@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # Research: data from oos_start onwards is the out-of-sample vault (used once per strategy version).
     oos_start: str = "2023-01-01"
     benchmark: str = "SPY"
+    # Research ignores a stock's history before it joined the S&P 500 (when the join date is known).
+    pit_membership: bool = True
     gemini_model: str = "gemini-2.5-flash"
     ai_max_calls_per_day: int = 50
 

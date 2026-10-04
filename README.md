@@ -12,6 +12,10 @@ cp .env.example .env
 python -m pytest
 ```
 
+## Desktop app (easiest)
+`python -m qsts.cli desktop` → tab **Inicio** guides you: 1 · Datos (download S&P 500 stocks), 2 · Investigación IA
+(automatic search), 3 · click a ranked strategy to see its backtest, 4 · Test final.
+
 ## Windows (cmd)
 `qsts` may not be on PATH after `pip install`; use `python -m qsts.cli <command>` instead, e.g.
 `python -m qsts.cli ingest --provider yahoo --symbols SPY,AAPL --start 2010-01-01` and `python -m qsts.cli desktop`.

@@ -18,7 +18,7 @@ import pandas as pd
 
 from qsts.app.context import build_context
 from qsts.data.bars import Timeframe
-from qsts.data.quality import DataQualityError, validate_and_clean
+from qsts.data.quality import DataQualityError
 
 
 def _provider(args):
@@ -30,21 +30,15 @@ def _provider(args):
 
 
 def cmd_ingest(args, ctx):
+    from qsts.app.datajobs import ingest_one
     prov = _provider(args)
     end = args.end or pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
     ok = 0
     for sym in args.symbols.split(","):
-        sym = sym.strip().upper()
+        sym = sym.strip().upper().replace(".", "-")
         try:
-            raw = prov.get_bars(sym, Timeframe.D1, pd.Timestamp(args.start), pd.Timestamp(end))
-            vb = validate_and_clean(raw, sym, Timeframe.D1)
-            ctx.repo.upsert_asset(sym)
-            n = ctx.repo.store_bars(vb, prov.name)
-            acts = prov.get_corporate_actions(sym)
-            if len(acts):
-                ctx.repo.store_corporate_actions(sym, acts, prov.name)
-            warn = [i.code for i in vb.report.issues]
-            print(f"{sym}: {n} bars stored" + (f" (warnings: {', '.join(warn)})" if warn else ""))
+            r = ingest_one(ctx.repo, prov, sym, args.start, end)
+            print(f"{sym}: {r['bars']} bars stored" + (f" (warnings: {', '.join(r['warnings'])})" if r["warnings"] else ""))
             ok += 1
         except DataQualityError as e:
             print(f"{sym}: REJECTED - {e}", file=sys.stderr)

@@ -9,6 +9,10 @@ Bump `version` of a feature whenever its implementation changes.
 """
 from __future__ import annotations
 
+import hashlib
+import threading
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -67,6 +71,54 @@ class FeatureSpec:
         return {"name": self.name, "params": self.resolved(), "version": REGISTRY[self.name].version}
 
 
+# ------------------------------------------------------------------ optional computation cache
+_LOCAL = threading.local()
+
+
+class _FeatureCache:
+    """LRU of computed feature Series keyed by (exact frame content, feature key). A hit returns exactly what
+    the computation would return for that content, so results stay bit-identical. Thread-local and opt-in:
+    only code inside `with feature_cache():` (e.g. the research loop) uses it."""
+
+    def __init__(self, max_items: int):
+        self.max_items, self.items = max_items, OrderedDict()
+        self.hits = self.misses = 0
+        self._last: tuple = (None, None)
+
+    def token(self, df: pd.DataFrame) -> tuple:
+        if self._last[0] is df:  # holding the reference guarantees the object was not recycled
+            return self._last[1]
+        cols = [c for c in ("open", "high", "low", "close", "volume") if c in df]
+        h = pd.util.hash_pandas_object(df[cols], index=True).to_numpy()
+        tok = (len(df), hashlib.blake2b(h.tobytes(), digest_size=16).hexdigest())
+        self._last = (df, tok)
+        return tok
+
+    def get(self, key):
+        v = self.items.get(key)
+        if v is None:
+            self.misses += 1
+            return None
+        self.hits += 1
+        self.items.move_to_end(key)
+        return v
+
+    def put(self, key, value) -> None:
+        self.items[key] = value
+        if len(self.items) > self.max_items:
+            self.items.popitem(last=False)
+
+
+@contextmanager
+def feature_cache(max_items: int = 6000):
+    prev = getattr(_LOCAL, "cache", None)
+    _LOCAL.cache = cache = _FeatureCache(max_items)
+    try:
+        yield cache
+    finally:
+        _LOCAL.cache = prev
+
+
 class FeatureSet:
     def __init__(self, specs: list[FeatureSpec]):
         for s in specs:
@@ -80,15 +132,31 @@ class FeatureSet:
 
     def compute(self, df: pd.DataFrame, benchmark_close: pd.Series | None = None) -> pd.DataFrame:
         cols = {}
+        cache: _FeatureCache | None = getattr(_LOCAL, "cache", None)
+        tok = cache.token(df) if cache is not None else None
         for s in self.specs:
             d = REGISTRY[s.name]
             kw = s.resolved()
+            key = None
+            if cache is not None:
+                btok = None
+                if d.needs_benchmark and benchmark_close is not None:
+                    btok = hashlib.blake2b(pd.util.hash_pandas_object(benchmark_close.reindex(df.index)).to_numpy()
+                                           .tobytes(), digest_size=16).hexdigest()
+                key = (tok, s.id, btok)
+                hit = cache.get(key)
+                if hit is not None:
+                    cols[s.key] = hit
+                    continue
             if d.needs_benchmark:
                 if benchmark_close is None:
                     raise ValueError(f"{s.name} requires a benchmark series")
-                cols[s.key] = d.fn(df, benchmark_close.reindex(df.index), **kw)
+                val = d.fn(df, benchmark_close.reindex(df.index), **kw)
             else:
-                cols[s.key] = d.fn(df, **kw)
+                val = d.fn(df, **kw)
+            cols[s.key] = val
+            if key is not None:
+                cache.put(key, val)
         return pd.DataFrame(cols, index=df.index).astype("float64")
 
 

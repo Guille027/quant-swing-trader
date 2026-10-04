@@ -225,7 +225,9 @@ class ResearchCandidate(Base):
     """Every strategy evaluated by the automatic research loop (one row per strategy version = one trial).
     Kept forever: the row count is the multiple-testing burden used by the Deflated Sharpe Ratio."""
     __tablename__ = "research_candidates"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # strategy version id
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # row id (version id for legacy rows)
+    version_id: Mapped[str | None] = mapped_column(String(32))  # strategy version id
+    universe_id: Mapped[str | None] = mapped_column(String(32))  # symbols + research window it was scored on
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     origin: Mapped[str] = mapped_column(String(16))  # evolution | ai | baseline
     cycle: Mapped[int] = mapped_column(Integer)
@@ -239,6 +241,7 @@ class ResearchCandidate(Base):
     strategy_id: Mapped[str | None] = mapped_column(String(64))
     dataset_id: Mapped[str | None] = mapped_column(String(32))
     error: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (Index("ix_candidate_version_universe", "version_id", "universe_id"),)
 
 
 class OOSAccessLog(Base):

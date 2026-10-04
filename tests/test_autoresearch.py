@@ -121,6 +121,7 @@ def test_final_test_only_after_validation_and_only_once(sf, data, monkeypatch):
     monkeypatch.setattr(ar, "cost_sensitivity", lambda *a, **k: [{"cost_multiplier": 2.0, "sharpe": 1.0}])
     monkeypatch.setattr(ar, "parameter_robustness",
                         lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
+    monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": -99.0, "sharpe": -99.0})
     val = r.validate(vid)
     assert val["passed"] is True
     final = r.final_test(vid)
@@ -162,3 +163,29 @@ def test_describe_and_reproduce_research_view(sf, data):
     t = ExperimentTracker(sf)
     rec = t.run_backtest(momentum_baseline(), research, BacktestConfig(), start=None, end=end)
     assert t.reproduce(rec.id, data)["reproduced"] is True  # full data in, research view rebuilt
+
+
+def test_passive_benchmark_is_a_validation_gate(sf, data, monkeypatch):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    pas = r.passive_reference()
+    assert {"consistency", "sharpe", "cagr", "max_drawdown", "blocks"} <= set(pas) and len(pas["blocks"]) == CFG.blocks
+    assert r.leaderboard()["passive"]["sharpe"] == pas["sharpe"]
+    assert "passive_benchmark_to_beat" in r.ai_context()
+    r.seed_baselines()
+    r.engine().run()
+    vid = r.leaderboard(1)["rows"][0]["id"]
+    monkeypatch.setattr(ar, "strategy_score", lambda **kw: {"gates": {}, "score": 0.5})
+    monkeypatch.setattr(ar, "cost_sensitivity", lambda *a, **k: [{"cost_multiplier": 2.0, "sharpe": 1.0}])
+    monkeypatch.setattr(ar, "parameter_robustness",
+                        lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
+    monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": 99.0, "sharpe": 99.0})
+    val = r.validate(vid)
+    assert val["passed"] is False and val["failed"] == ["beats_passive"]
+    # a pass recorded under older rules (no passive gate) is re-checked before the one-time final test
+    with sf() as s, s.begin():
+        row = s.get(m.ResearchCandidate, vid)
+        row.status = "VALIDATED_PASS"
+        row.validation = {**row.validation, "gates": {k: v for k, v in row.validation["gates"].items() if k != "beats_passive"}}
+    with pytest.raises(ValueError):
+        r.final_test(vid)
+    assert count(sf, m.OOSAccessLog) == 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pandas as pd
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 
 from qsts.data.bars import OHLCV, Timeframe
 from qsts.data.quality import ValidatedBars
@@ -94,6 +94,27 @@ class MarketDataRepository:
         df.index = (idx.tz_localize("UTC") if idx.tz is None else idx).rename("ts")
         return df.drop(columns="ts").astype({c: "float64" for c in OHLCV})
 
+    def last_bar(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.Timestamp | None:
+        try:
+            aid = self.asset_id(symbol)
+        except KeyError:
+            return None
+        with self.sf() as s:
+            t = s.scalar(select(func.max(m.Price.ts)).where(m.Price.asset_id == aid,
+                                                             m.Price.timeframe == Timeframe(timeframe).value))
+        return None if t is None else pd.Timestamp(t).tz_localize("UTC")
+
+    def summary(self, timeframe: Timeframe = Timeframe.D1) -> list[dict]:
+        """One row per symbol with stored bars: name, sector, first/last bar, number of bars."""
+        with self.sf() as s:
+            rows = s.execute(select(m.Asset.symbol, m.Asset.name, m.Asset.sector, func.min(m.Price.ts),
+                                    func.max(m.Price.ts), func.count())
+                             .join(m.Price, m.Price.asset_id == m.Asset.id)
+                             .where(m.Price.timeframe == Timeframe(timeframe).value)
+                             .group_by(m.Asset.id).order_by(m.Asset.symbol)).all()
+        return [{"symbol": r[0], "name": r[1], "sector": r[2], "first": str(pd.Timestamp(r[3]).date()),
+                 "last": str(pd.Timestamp(r[4]).date()), "bars": int(r[5])} for r in rows]
+
     # ------------------------------------------------------------------ corporate actions
     def store_corporate_actions(self, symbol: str, actions: pd.DataFrame, source: str) -> int:
         aid = self.asset_id(symbol)
@@ -119,6 +140,28 @@ class MarketDataRepository:
         aid = self.asset_id(symbol)
         with self.sf() as s, s.begin():
             s.add(m.UniverseMembership(universe=universe, asset_id=aid, start_date=start, end_date=end, source=source))
+
+    def set_memberships(self, universe: str, rows: list[tuple[str, date, date | None]], source: str) -> int:
+        """Replace this source's membership rows for `universe` (idempotent re-import of a member list)."""
+        with self.sf() as s, s.begin():
+            s.execute(delete(m.UniverseMembership).where(m.UniverseMembership.universe == universe,
+                                                         m.UniverseMembership.source == source))
+            ids = dict(s.execute(select(m.Asset.symbol, m.Asset.id)).all())
+            n = 0
+            for sym, start, end in rows:
+                if sym in ids:
+                    s.add(m.UniverseMembership(universe=universe, asset_id=ids[sym], start_date=start, end_date=end,
+                                               source=source))
+                    n += 1
+        return n
+
+    def membership_starts(self, universe: str) -> dict[str, date]:
+        """Earliest known membership start per symbol."""
+        with self.sf() as s:
+            rows = s.execute(select(m.Asset.symbol, func.min(m.UniverseMembership.start_date))
+                             .join(m.UniverseMembership, m.UniverseMembership.asset_id == m.Asset.id)
+                             .where(m.UniverseMembership.universe == universe).group_by(m.Asset.symbol)).all()
+        return {sym: d for sym, d in rows if d is not None}
 
     def universe_asof(self, universe: str, d: date) -> list[str]:
         """Members on date d: start_date <= d < end_date (end exclusive)."""

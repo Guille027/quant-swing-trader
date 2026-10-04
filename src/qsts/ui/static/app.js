@@ -19,13 +19,99 @@ function table(el, rows, cols) {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---------------------------------------------------------------- tabs
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
-  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+let autoTimer = null;
+function goTab(name) {
+  document.querySelectorAll("nav button[data-tab]").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-  b.classList.add("active"); $("#tab-" + b.dataset.tab).classList.add("active");
+  $("#tab-" + name).classList.add("active");
+  if ($(`#adv button[data-tab="${name}"]`)) $("#adv").classList.add("open");
   clearInterval(autoTimer); autoTimer = null;
-  ({ auto: openAuto, signals: loadSignals, charts: initCharts, strategies: loadStrategies, research: loadExperiments, logs: loadLogs }[b.dataset.tab] || (() => {}))();
+  ({ home: loadHome, data: openData, auto: openAuto, signals: loadSignals, charts: initCharts, strategies: loadStrategies,
+     research: loadExperiments, logs: loadLogs }[name] || (() => {}))();
+}
+document.querySelectorAll("nav button[data-tab]").forEach(b => b.onclick = () => goTab(b.dataset.tab));
+$("#adv-toggle").onclick = () => $("#adv").classList.toggle("open");
+document.querySelectorAll("[data-goto]").forEach(b => b.onclick = () => {
+  if (b.dataset.open === "best" && homeBest) arSel = homeBest.id, arShowBt = true;
+  goTab(b.dataset.goto);
 });
+
+// ---------------------------------------------------------------- home (guided steps)
+let homeBest = null;
+async function loadHome() {
+  try {
+    const d = await api("/api/data/summary");
+    const el = $("#step-data");
+    el.classList.toggle("done", d.count >= 50); el.classList.toggle("todo", d.count < 50);
+    el.querySelector(".body").innerHTML = d.count === 0 ? '<span class="bad">Aún no hay datos.</span> Empieza descargando acciones del S&P 500.'
+      : `Tienes <b>${d.count}</b> acciones con precios del ${d.first} al ${d.last}.` +
+        (d.count < 50 ? '<p class="warn small">Son pocas: con tan pocas acciones casi cualquier resultado puede ser casualidad. Añade una muestra del S&amp;P 500.</p>' : "");
+  } catch (e) { $("#step-data .body").textContent = e.message; }
+  try {
+    const st = await api("/api/autoresearch/status");
+    $("#step-search .body").innerHTML = (st.running ? '<span class="good">Investigando ahora…</span> ' : "Parado. ") +
+      "La app combina indicadores y, con IA, propone ideas nuevas. Cada ciclo prueba decenas de estrategias.";
+  } catch (e) { $("#step-search .body").textContent = e.message; }
+  try {
+    const lb = await api("/api/autoresearch/leaderboard?limit=40");
+    const best = lb.rows.find(r => r.origin !== "baseline"), ref = lb.rows.find(r => r.origin === "baseline");
+    homeBest = best || null;
+    const el = $("#step-best");
+    if (!best) { el.querySelector(".body").innerHTML = `Aún no hay resultados con tus datos actuales (${lb.universe.n_symbols} acciones). Lanza la investigación.`; return; }
+    const pv = lb.passive || {};
+    const bar = Math.max(ref ? ref.consistency : -Infinity, pv.consistency ?? -Infinity);
+    const beats = best.consistency > bar;
+    el.classList.toggle("done", beats); el.classList.toggle("todo", !beats);
+    el.querySelector(".body").innerHTML = `<b>${esc(best.rules)}</b><br>Consistencia <b>${fmt(best.consistency, 3)}</b>` +
+      ` frente a ${fmt(bar, 3)} del listón (no hacer nada o la mejor regla simple): ` + (beats ? '<span class="good">lo supera</span>' : '<span class="bad">todavía no lo supera</span>') +
+      `<p class="muted small">${lb.n_trials_universe} estrategias probadas con estos datos.</p>`;
+  } catch (e) { $("#step-best .body").textContent = e.message; }
+}
+
+// ---------------------------------------------------------------- data manager
+let dataRows = [];
+function openData() { loadData(); autoTimer = setInterval(loadJob, 2000); }
+async function loadData() {
+  try {
+    const d = await api("/api/data/summary");
+    $("#data-summary").innerHTML = d.count ? `<b>${d.count}</b> acciones, del <b>${d.first}</b> al <b>${d.last}</b>.` +
+      (d.has_benchmark ? "" : ` <span class="bad">Falta ${d.benchmark} (referencia del mercado).</span>`) : '<span class="bad">No hay datos todavía.</span>';
+    dataRows = d.symbols; renderDataTable();
+  } catch (e) { $("#data-summary").textContent = e.message; }
+  api("/api/data/sp500").then(sp => {
+    $("#sp500-info").innerHTML = `Lista actual: <b>${sp.count}</b> empresas (ya tienes ${sp.loaded}). Fuente: ${esc(sp.source.replace("https://", ""))}.`;
+  }).catch(e => { $("#sp500-info").innerHTML = `<span class="bad">${esc(e.message)}</span>`; });
+  loadJob();
+}
+function renderDataTable() {
+  const q = ($("#data-filter").value || "").toUpperCase();
+  const rows = dataRows.filter(r => !q || r.symbol.includes(q) || (r.name || "").toUpperCase().includes(q) || (r.sector || "").toUpperCase().includes(q));
+  table($("#data-table"), rows.slice(0, 600), [["Símbolo", r => r.symbol], ["Empresa", r => esc(r.name || "—")], ["Sector", r => esc(r.sector || "—")],
+    ["Desde", r => r.first], ["Hasta", r => r.last], ["Días", r => r.bars], ["En el S&P 500 desde", r => r.sp500_since || "—"]]);
+}
+$("#data-filter").oninput = renderDataTable;
+let jobWasRunning = false;
+async function loadJob() {
+  let j; try { j = await api("/api/data/job"); } catch (e) { return; }
+  const pctDone = j.total ? Math.round(100 * j.done / j.total) : 0;
+  $("#job-bar").style.width = (j.running ? pctDone : (j.total ? 100 : 0)) + "%";
+  $("#job-stop").disabled = !j.running;
+  ["#sp-download", "#sym-download", "#data-update"].forEach(id => $(id).disabled = j.running);
+  $("#job-text").innerHTML = j.running ? `Descargando <b>${esc(j.current || "")}</b> · ${j.done}/${j.total} (${pctDone}%) · ${Object.keys(j.failed).length} con problemas`
+    : (j.message ? "Última descarga: " + esc(j.message) : "Sin descargas en curso.");
+  $("#job-log").textContent = (j.log || []).slice().reverse().join("\n");
+  if (jobWasRunning && !j.running) loadData();
+  jobWasRunning = j.running;
+}
+async function startIngest(body) {
+  try { const r = await post("/api/data/ingest", body); $("#job-text").textContent = `Empezando: ${r.symbols} acciones…`; }
+  catch (e) { alert(e.message); }
+  loadJob();
+}
+$("#sp-download").onclick = () => { const n = +document.querySelector('input[name="sp-size"]:checked').value; startIngest({ mode: "sp500", sample: n || null }); };
+$("#sym-download").onclick = () => startIngest({ mode: "symbols", symbols: $("#sym-input").value.split(/[,\s]+/), start: $("#sym-start").value || "2010-01-01" });
+$("#data-update").onclick = () => startIngest({ mode: "update" });
+$("#job-stop").onclick = async () => { await post("/api/data/job/stop"); loadJob(); };
 
 // ---------------------------------------------------------------- dashboard
 const MODES = ["OBSERVATION", "BACKTEST", "PAPER", "MANUAL_APPROVAL", "SEMI_AUTOMATIC", "FULL_AUTOMATIC"];
@@ -67,14 +153,15 @@ $("#run-scan").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- automatic research
-let autoTimer = null, arRows = [], arSel = null, arLastCycles = -1, arPolls = 0;
+let arRows = [], arSel = null, arLastCycles = -1, arPolls = 0, arShowBt = false, btChart = null;
 const ORIGIN = { evolution: "evolución", ai: "IA", baseline: "referencia" };
 const STATUS = { EVALUATED: "probada", INVALID: "no puntuable", VALIDATED_PASS: '<span class="good">✔ validada</span>',
   VALIDATED_FAIL: '<span class="bad">✘ no pasa validación</span>', FINAL_PASS: '<span class="good">✔✔ aprobada en test final</span>',
   FINAL_FAIL: '<span class="bad">✘ suspende test final</span>' };
 const GATES = { min_trades: "suficientes operaciones", overfit_risk: "riesgo de sobreajuste aceptable", max_drawdown: "caída máxima aceptable",
   walk_forward: "funciona en ventanas móviles (walk-forward)", beats_baselines: "supera a las estrategias de referencia",
-  robustness: "aguanta pequeños cambios de parámetros", costs_2x: "sigue ganando con el doble de costes" };
+  robustness: "aguanta pequeños cambios de parámetros", costs_2x: "sigue ganando con el doble de costes",
+  beats_passive: "supera a mantener todas las acciones sin hacer nada (consistencia y Sharpe)" };
 function openAuto() { loadAuto(true); autoTimer = setInterval(() => loadAuto(false), 3000); }
 async function loadAuto(full) {
   let st;
@@ -93,21 +180,62 @@ async function loadBoard() {
   let lb;
   try { lb = await api("/api/autoresearch/leaderboard?limit=25"); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
   $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
-  $("#ar-board-note").innerHTML = `Estrategias probadas en total: <b>${lb.n_trials}</b> · veces que se ha abierto el periodo guardado: <b>${lb.final_tests_used}</b>. ` +
+  $("#ar-board-note").innerHTML = `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
+    `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${lb.final_tests_used}</b>. ` +
+    `<b>Pulsa una fila para ver su backtest.</b> ` +
     (lb.equivalents_hidden ? `Ocultadas ${lb.equivalents_hidden} variantes equivalentes (mismas operaciones). ` : "") +
     `<b>Consistencia</b> = Sharpe del peor de los 3 tramos (más alto = mejor; por encima de 0,5 es bueno). <b>Fiabilidad</b> = probabilidad de que no sea suerte, teniendo en cuenta todas las pruebas hechas.`;
+  const pv = lb.passive || {};
+  const kp = (l, v, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s || ""}</div></div>`;
+  $("#ar-passive").innerHTML = kp("Consistencia", fmt(pv.consistency, 3), esc(pv.rules || "")) + kp("Sharpe", fmt(pv.sharpe)) +
+    kp("Al año (CAGR)", pct(pv.cagr)) + kp("Caída máx.", pct(pv.max_drawdown)) + kp("Años en positivo", pct(pv.pct_positive_years));
   arRows = lb.rows;
   table($("#ar-board"), arRows, [["#", r => arRows.indexOf(r) + 1],
     ["Estrategia", r => `<span class="badge">${ORIGIN[r.origin] || r.origin}</span>${esc(r.rules)}`],
-    ["Consistencia", r => fmt(r.consistency, 3)], ["Sharpe", r => fmt(r.sharpe)], ["Años en positivo", r => pct(r.pct_positive_years)],
+    ["Consistencia", r => `<span class="${r.consistency > (pv.consistency ?? Infinity) ? "up" : ""}">${fmt(r.consistency, 3)}</span>`], ["Sharpe", r => fmt(r.sharpe)], ["Años en positivo", r => pct(r.pct_positive_years)],
     ["Peor año", r => pct(r.worst_year)], ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades],
     ["Fiabilidad", r => r.dsr == null ? "—" : pct(r.dsr)], ["Estado", r => STATUS[r.status] || r.status],
     ["", r => r.status === "VALIDATED_PASS" ? `<button onclick="event.stopPropagation();finalTest('${r.id}')">Test final</button>` : ""]]);
   [...$("#ar-board").querySelectorAll("tr")].slice(1).forEach((tr, i) => {
     tr.classList.add("click"); if (arRows[i].id === arSel) tr.classList.add("sel");
-    tr.cells[1].classList.add("rules"); tr.onclick = () => { arSel = arRows[i].id; showDetail(arRows[i]); loadBoard(); };
+    tr.cells[1].classList.add("rules");
+    tr.onclick = () => { arSel = arRows[i].id; showDetail(arRows[i]); loadBacktest(arSel); loadBoard();
+      $("#ar-detail-card").scrollIntoView({ behavior: "smooth" }); };
   });
   const cur = arRows.find(r => r.id === arSel); if (cur) showDetail(cur);
+  if (arShowBt && cur) { arShowBt = false; loadBacktest(cur.id); $("#ar-detail-card").scrollIntoView({ behavior: "smooth" }); }
+}
+const EXIT = { stop: "stop", stop_gap: "stop (hueco de apertura)", target: "objetivo", signal_exit: "señal de salida",
+  time_stop: "tiempo máximo", end_of_data: "fin del periodo", reversal: "señal contraria" };
+let btSeries = [];
+async function loadBacktest(id) {
+  $("#ar-bt").style.display = "block"; $("#ar-bt-period").textContent = "calculando…";
+  let d; try { d = await api(`/api/autoresearch/${id}/backtest`); } catch (e) { $("#ar-bt-period").textContent = e.message; return; }
+  if (id !== arSel) return;
+  $("#ar-bt-period").textContent = `${d.period[0]} → ${d.period[1]}` + (d.includes_oos ? ` · incluye el test final (desde ${d.oos_start})`
+    : ` · solo el periodo de investigación: los años desde ${d.oos_start} se ven después del test final`);
+  const m = d.metrics, b = (d.benchmark || {}).metrics || {};
+  const k = (label, v, sub) => `<div class="kpi"><div class="l">${label}</div><div class="v">${v}</div><div class="s">${sub || ""}</div></div>`;
+  $("#ar-bt-kpis").innerHTML = k("Rentabilidad total", pct(m.total_return), `mercado (SPY): ${pct(b.total_return)}`) +
+    k("Al año (CAGR)", pct(m.cagr), `mercado: ${pct(b.cagr)}`) + k("Sharpe", fmt(m.sharpe), `mercado: ${fmt(b.sharpe)}`) +
+    k("Caída máx.", pct(m.max_drawdown), `mercado: ${pct(b.max_drawdown)}`) + k("Operaciones", m.n_trades ?? "—", `ganadoras: ${pct(m.win_rate)}`) +
+    k("Tiempo invertido", pct(m.exposure), `duración media: ${fmt(m.avg_trade_bars, 0)} días`);
+  if (!btChart) btChart = LightweightCharts.createChart($("#ar-bt-chart"), opts());
+  btSeries.forEach(x => btChart.removeSeries(x)); btSeries = [];
+  if (d.benchmark) { const sb = btChart.addLineSeries({ color: "#8b93a1", lineWidth: 1, title: "SPY" }); sb.setData(d.benchmark.equity); btSeries.push(sb); }
+  const cut = Date.parse(d.oos_start) / 1000;
+  const research = d.includes_oos ? d.equity.filter(p => p.time < cut) : d.equity;
+  const s1 = btChart.addLineSeries({ color: "#4c8dff", lineWidth: 2, title: "estrategia" }); s1.setData(research); btSeries.push(s1);
+  if (d.includes_oos) { const s2 = btChart.addLineSeries({ color: "#ffb74d", lineWidth: 2, title: "test final" });
+    s2.setData(d.equity.filter(p => p.time >= cut)); btSeries.push(s2); }
+  $("#ar-bt-oos-legend").style.display = d.includes_oos ? "inline" : "none";
+  btChart.timeScale().fitContent();
+  table($("#ar-bt-years"), d.yearly, [["Año", y => y.year], ["Estrategia", y => `<span class="${y.strategy >= 0 ? "up" : "down"}">${pct(y.strategy)}</span>`],
+    ["Mercado (SPY)", y => pct(y.benchmark)], ["Diferencia", y => y.benchmark == null ? "—" : `<span class="${y.strategy >= y.benchmark ? "up" : "down"}">${pct(y.strategy - y.benchmark)}</span>`]]);
+  $("#ar-bt-ntr").textContent = `(${m.n_trades} en total; se muestran las últimas ${d.trades.length})`;
+  table($("#ar-bt-trades"), d.trades.slice().reverse(), [["Acción", t => t.symbol], ["Compra", t => t.entry], ["Venta", t => t.exit],
+    ["Precio compra", t => fmt(t.entry_price)], ["Precio venta", t => fmt(t.exit_price)],
+    ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${fmt(t.pnl)}</span>`], ["R", t => fmt(t.r)], ["Motivo de salida", t => EXIT[t.reason] || t.reason]]);
 }
 function showDetail(r) {
   const blocks = (r.blocks || []).map(b => `<tr><td>${b.start} → ${b.end}</td><td>${fmt(b.sharpe)}</td><td>${pct(b.return)}</td><td>${b.trades}</td></tr>`).join("");
@@ -259,4 +387,4 @@ async function loadLogs() {
   table($("#journal"), (await api("/api/journal")).reverse(), [["Hora", r => r.ts.slice(0, 19)], ["Activo", r => r.signal?.symbol ?? "—"], ["Estado", r => r.status], ["Motivos", r => esc((r.reasons || []).join("; "))]]);
 }
 
-loadStatus(); setInterval(loadStatus, 10000);
+loadStatus(); setInterval(loadStatus, 10000); loadHome();

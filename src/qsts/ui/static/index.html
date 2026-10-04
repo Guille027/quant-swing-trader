@@ -12,20 +12,86 @@
 <header>
   <div class="brand">QSTS <span id="env" class="pill"></span> <span id="mode" class="pill"></span></div>
   <nav>
-    <button data-tab="dashboard" class="active">Dashboard</button>
-    <button data-tab="auto">Investigación IA</button>
-    <button data-tab="signals">Señales</button>
+    <button data-tab="home" class="active">🏠 Inicio</button>
+    <button data-tab="data">1 · Datos</button>
+    <button data-tab="auto">2 · Investigación IA</button>
     <button data-tab="charts">Gráficos</button>
-    <button data-tab="strategies">Estrategias</button>
-    <button data-tab="lab">Strategy Lab</button>
-    <button data-tab="research">Research</button>
-    <button data-tab="logs">Logs</button>
+    <button id="adv-toggle" class="ghost" title="Herramientas para usuarios avanzados">Avanzado ▾</button>
+    <span id="adv" class="adv">
+      <button data-tab="dashboard">Panel de trading</button>
+      <button data-tab="signals">Señales</button>
+      <button data-tab="strategies">Estrategias</button>
+      <button data-tab="lab">Strategy Lab</button>
+      <button data-tab="research">Experimentos</button>
+      <button data-tab="logs">Registro</button>
+    </span>
   </nav>
   <button id="kill" class="danger">STOP ALL TRADING</button>
 </header>
 
 <main>
-<section id="tab-dashboard" class="tab active">
+<section id="tab-home" class="tab active">
+  <div class="card hero">
+    <h2>Encuentra una estrategia de inversión que funcione de forma consistente</h2>
+    <p>La app prueba miles de reglas de compra sobre el pasado (sin dinero real) y te enseña las que funcionaron
+      en <b>todas</b> las épocas, no solo de media. Sigue estos pasos:</p>
+  </div>
+  <div class="grid steps-grid">
+    <div class="card step" id="step-data"><div class="num">1</div><h3>Datos</h3><div class="body">Cargando…</div>
+      <button data-goto="data" class="primary">Gestionar datos →</button></div>
+    <div class="card step" id="step-search"><div class="num">2</div><h3>Buscar estrategias</h3><div class="body">Cargando…</div>
+      <button data-goto="auto" class="primary">Ir a Investigación IA →</button></div>
+    <div class="card step" id="step-best"><div class="num">3</div><h3>Revisar la mejor</h3><div class="body">Cargando…</div>
+      <button data-goto="auto" data-open="best">Ver su backtest →</button></div>
+    <div class="card step"><div class="num">4</div><h3>Test final</h3><div class="body">
+      Cuando una estrategia esté <span class="good">✔ validada</span>, pulsa <b>Test final</b> en el ranking: se prueba
+      con los años más recientes, que la búsqueda nunca ha visto. Solo se puede hacer una vez por estrategia.
+      <p class="muted">Después vendrá la simulación con dinero ficticio (aún no disponible).</p></div></div>
+  </div>
+  <div class="card"><h3>Palabras clave</h3>
+    <dl class="glossary">
+      <dt>Backtest</dt><dd>Simular cómo habría funcionado una estrategia en el pasado, operación a operación.</dd>
+      <dt>Consistencia</dt><dd>Resultado de la estrategia en su <i>peor</i> época (el pasado se divide en 3 tramos). Más alto = mejor; por encima de 0,5 es bueno.</dd>
+      <dt>Sharpe</dt><dd>Ganancia ajustada al riesgo. 0 = nada; 0,5 = aceptable; 1 = muy bueno; más de 2 en acciones suele ser sospechoso.</dd>
+      <dt>Caída máx.</dt><dd>La peor bajada desde un máximo hasta un mínimo. -30% significa que en algún momento habrías perdido un 30% desde tu mejor punto.</dd>
+      <dt>Fiabilidad</dt><dd>Probabilidad de que el resultado no sea suerte, teniendo en cuenta cuántas estrategias se han probado.</dd>
+      <dt>Referencia</dt><dd>Estrategias muy simples (p. ej. "comprar si sube en 6 meses"). Una estrategia nueva solo sirve si las supera.</dd>
+    </dl>
+  </div>
+</section>
+
+<section id="tab-data" class="tab">
+  <div class="card"><h3>Tus datos</h3><p id="data-summary" class="big">Cargando…</p>
+    <p class="muted">Los precios vienen de Yahoo Finance (gratis, sin garantías). Se guardan en tu ordenador y cada acción pasa un control de calidad antes de guardarse.</p></div>
+  <div class="grid two">
+    <div class="card"><h3>Añadir acciones del S&amp;P 500</h3>
+      <p>Más acciones = más operaciones = resultados más fiables. El S&amp;P 500 son las ~500 mayores empresas de EE. UU.</p>
+      <p id="sp500-info" class="muted">Consultando la lista…</p>
+      <label class="opt"><input type="radio" name="sp-size" value="100" checked> <b>Muestra aleatoria de 100</b> — descarga ≈ 4 min, cada ciclo de investigación ≈ 5 min</label>
+      <label class="opt"><input type="radio" name="sp-size" value="250"> Muestra aleatoria de 250 — descarga ≈ 8 min, ciclo ≈ 12 min</label>
+      <label class="opt"><input type="radio" name="sp-size" value="0"> Todas (≈500) — descarga ≈ 15 min, ciclo ≈ 25 min</label>
+      <p class="muted">La muestra es aleatoria a propósito: elegir a mano las empresas que hoy son famosas haría trampa (ya sabemos que les fue bien).</p>
+      <button id="sp-download" class="primary">⬇ Descargar</button>
+      <p class="warn small">Ojo: la lista es la de <b>hoy</b>. Las empresas que salieron del índice (quiebras, compras) no aparecen, y eso hace que el pasado parezca algo mejor de lo que fue. Para reducirlo, la investigación ignora la historia de cada acción anterior a su entrada en el índice.</p>
+    </div>
+    <div class="card"><h3>Añadir acciones concretas</h3>
+      <p>Escribe los símbolos de Yahoo separados por comas (p. ej. <code>NVDA, AMD, ASML</code>).</p>
+      <input id="sym-input" placeholder="NVDA, AMD, ASML" style="width:100%">
+      <div class="row"><label>Desde <input id="sym-start" value="2010-01-01" size="10"></label>
+        <button id="sym-download">⬇ Descargar</button></div>
+      <h3 style="margin-top:18px">Actualizar precios</h3>
+      <p>Descarga los días nuevos de todas tus acciones (solo lo que falta).</p>
+      <button id="data-update">⟳ Actualizar ahora</button>
+    </div>
+  </div>
+  <div class="card" id="job-card"><h3>Descarga <button id="job-stop" class="small-btn">■ Detener</button></h3>
+    <div class="progress"><div id="job-bar"></div></div>
+    <p id="job-text" class="muted">Sin descargas en curso.</p>
+    <pre id="job-log" class="muted"></pre></div>
+  <div class="card"><h3>Acciones cargadas</h3><input id="data-filter" placeholder="Buscar…"><table id="data-table"></table></div>
+</section>
+
+<section id="tab-dashboard" class="tab">
   <div class="grid">
     <div class="card"><h3>Portfolio</h3><dl id="portfolio"></dl></div>
     <div class="card"><h3>Mercado</h3><dl id="market"></dl></div>
@@ -64,10 +130,22 @@
     </div>
     <dl id="ar-state"></dl>
   </div>
+  <div class="card bar"><h3>El listón a superar</h3>
+    <p class="muted">Si una estrategia no gana a <b>comprar todas tus acciones y no hacer nada</b>, no aporta nada: mejor no operar.</p>
+    <div id="ar-passive" class="kpis"></div></div>
   <div class="card"><h3>Ranking: estrategias más consistentes</h3>
     <p class="muted" id="ar-board-note"></p>
     <table id="ar-board"></table></div>
-  <div class="card"><h3>Detalle</h3><div id="ar-detail" class="muted">Pulsa una fila del ranking para ver su detalle.</div></div>
+  <div class="card" id="ar-detail-card"><h3>Detalle</h3><div id="ar-detail" class="muted">Pulsa una fila del ranking para ver su detalle y su backtest.</div>
+    <div id="ar-bt" style="display:none">
+      <h4>Backtest <span id="ar-bt-period" class="muted"></span></h4>
+      <div id="ar-bt-kpis" class="kpis"></div>
+      <div id="ar-bt-chart" class="chart"></div>
+      <p class="muted"><span class="sw" style="background:#4c8dff"></span> estrategia &nbsp; <span class="sw" style="background:#8b93a1"></span> comprar y mantener SPY (el mercado)
+        <span id="ar-bt-oos-legend" style="display:none">&nbsp; <span class="sw" style="background:#ffb74d"></span> datos del test final</span> · capital inicial 10.000</p>
+      <h4>Año a año</h4><table id="ar-bt-years"></table>
+      <h4>Operaciones <span id="ar-bt-ntr" class="muted"></span></h4><div class="scroll"><table id="ar-bt-trades"></table></div>
+    </div></div>
   <div class="card"><h3>Qué está haciendo ahora</h3><pre id="ar-log" class="muted">—</pre></div>
 </section>
 

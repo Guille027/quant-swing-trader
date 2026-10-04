@@ -123,3 +123,52 @@ def test_autoresearch_endpoints(client):
     first = lb["rows"][0]
     if first["status"] != "VALIDATED_PASS":
         assert c.post(f"/api/autoresearch/{first['id']}/final-test").status_code == 400
+
+
+def test_data_manager_and_backtest_view(client, tmp_path):
+    """Data jobs with a CSV provider (SYNTHETIC data), S&P list injection, PIT truncation, backtest view."""
+    import time
+    import pandas as pd
+    from datetime import date
+    from qsts.data.providers.csv_provider import CSVProvider
+    from qsts.data.universe import UniverseList
+    c, ctx = client
+    root = tmp_path / "csv2"
+    (root / "1d").mkdir(parents=True)
+    for i, s in enumerate(["CCC", "DDD"]):
+        df = synthetic_daily("2018-01-01", "2022-12-30", seed=20 + i)
+        df.index.name = "ts"
+        df.to_csv(root / "1d" / f"{s}.csv")
+    ctx.extra["data_provider_factory"] = lambda: CSVProvider(root)
+    members = pd.DataFrame({"symbol": ["CCC", "DDD", "EEE"], "name": ["C Co", "D Co", "E Co"],
+                            "sector": ["Energy", "Utilities", "Energy"],
+                            "date_added": pd.to_datetime(["2020-06-01", None, "2015-01-01"])})
+    ctx.extra["sp500_fetcher"] = lambda: UniverseList("SP500", "test", "2026-01-01T00:00:00+00:00", members)
+
+    def wait():
+        for _ in range(300):
+            j = c.get("/api/data/job").json()
+            if not j["running"]:
+                return j
+            time.sleep(0.1)
+        raise AssertionError("job did not finish")
+    assert c.get("/api/data/sp500").json()["count"] == 3
+    assert c.post("/api/data/ingest", json={"mode": "sp500"}).json()["started"]
+    j = wait()
+    assert j["ok"] == 2 and set(j["failed"]) == {"EEE"}  # no file for EEE: reported, not invented
+    summ = c.get("/api/data/summary").json()
+    by = {r["symbol"]: r for r in summ["symbols"]}
+    assert summ["count"] == 5 and by["CCC"]["sector"] == "Energy" and by["CCC"]["sp500_since"] == "2020-06-01"
+    assert c.post("/api/data/ingest", json={"mode": "update"}).json()["started"]
+    assert wait()["up_to_date"] >= 0
+    assert c.post("/api/data/ingest", json={"mode": "symbols", "symbols": []}).status_code == 400
+    # research ignores CCC's history before it joined the index
+    r = ctx.autoresearcher()
+    assert r.full["CCC"].index[0] >= pd.Timestamp("2020-06-01", tz="UTC")
+    assert r.full["DDD"].index[0] < pd.Timestamp("2018-01-10", tz="UTC")
+    r.seed_baselines()
+    lb = r.leaderboard()
+    bt = c.get(f"/api/autoresearch/{lb['rows'][0]['id']}/backtest").json()
+    assert bt["includes_oos"] is False and bt["equity"] and "benchmark" in bt and bt["yearly"]
+    assert bt["period"][1] < "2023-01-01"
+    assert c.get("/api/autoresearch/nope/backtest").status_code == 404

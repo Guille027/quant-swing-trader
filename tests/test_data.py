@@ -249,3 +249,35 @@ def test_corporate_actions_roundtrip(sf):
     back = repo.load_corporate_actions("AAA")
     assert len(back) == 2 and list(back["kind"]) == ["dividend", "split"]
     assert back["ex_date"].iloc[0] == pd.Timestamp("2021-03-01", tz="UTC")
+
+
+def test_sp500_list_parsing():
+    from qsts.data.universe import parse_sp500_csv, parse_sp500_wikipedia, to_yahoo
+    # SYNTHETIC list in the documented CSV format (fictional companies)
+    rows = [f"T{i:03d},Test Co {i},{'Energy' if i % 2 else 'Utilities'},Sub,City,20{10 + i % 15:02d}-01-0{1 + i % 9},{i},1900"
+            for i in range(450)]
+    csv = "Symbol,Security,GICS Sector,GICS Sub-Industry,Headquarters Location,Date added,CIK,Founded\n" + "\n".join(rows)
+    csv += "\nABC.B,Share Class Co,Energy,Sub,City,not a date,1,1900"
+    df = parse_sp500_csv(csv)
+    assert len(df) == 451 and "ABC-B" in set(df["symbol"]) and to_yahoo(" brk.b ") == "BRK-B"
+    assert pd.isna(df.set_index("symbol").loc["ABC-B", "date_added"])
+    assert df.set_index("symbol").loc["T001", "sector"] == "Energy"
+    with pytest.raises(ValueError):
+        parse_sp500_csv(csv.splitlines()[0] + "\n" + "\n".join(rows[:10]))  # far too few rows -> format changed
+    pytest.importorskip("lxml")
+    html = "<table><tr><th>Symbol</th><th>Security</th><th>GICS Sector</th><th>Date added</th></tr>" + "".join(
+        f"<tr><td>T{i:03d}</td><td>Test {i}</td><td>Energy</td><td>2015-01-01</td></tr>" for i in range(420)) + "</table>"
+    assert len(parse_sp500_wikipedia(html)) == 420
+
+
+def test_repository_summary_and_memberships(sf, daily):
+    from datetime import date
+    repo = MarketDataRepository(sf)
+    repo.upsert_asset("AAA", name="A Co", sector="Energy")
+    repo.store_bars(validate_and_clean(daily, "AAA", Timeframe.D1), "csv")
+    s = repo.summary()
+    assert s[0]["symbol"] == "AAA" and s[0]["bars"] == len(daily) and s[0]["sector"] == "Energy"
+    assert repo.last_bar("AAA") == daily.index[-1] and repo.last_bar("NOPE") is None
+    assert repo.set_memberships("SP500", [("AAA", date(2021, 1, 4), None), ("ZZZ", date(2020, 1, 2), None)], "src") == 1
+    assert repo.set_memberships("SP500", [("AAA", date(2021, 1, 4), None)], "src") == 1  # replaced, not duplicated
+    assert repo.membership_starts("SP500") == {"AAA": date(2021, 1, 4)}

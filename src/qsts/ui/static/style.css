@@ -34,3 +34,23 @@ button:disabled { opacity:.5; cursor:default; }
 .badge { font-size:11px; padding:1px 6px; border-radius:8px; border:1px solid var(--line); color:var(--muted); margin-right:6px; }
 tr.click { cursor:pointer; } tr.click:hover td { background:#1d222b; } tr.sel td { background:#1d2533; }
 td.rules { white-space:normal; min-width:320px; max-width:560px; }
+button.ghost { background:transparent; }
+.adv { display:none; gap:4px; flex-wrap:wrap; } .adv.open { display:inline-flex; }
+.hero h2 { margin:4px 0 6px; font-size:20px; } .hero p { margin:0; color:var(--fg); }
+.steps-grid { grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); }
+.step { position:relative; display:flex; flex-direction:column; gap:8px; min-height:210px; }
+.step .num { position:absolute; top:10px; right:14px; font-size:28px; font-weight:700; color:#2a3240; }
+.step .body { flex:1; } .step button { align-self:flex-start; }
+.step.done { border-color:#1f4d45; } .step.todo { border-color:#5a4520; }
+.glossary { grid-template-columns:140px 1fr; } .glossary dd { text-align:left; }
+.big { font-size:16px; } .small { font-size:12px; } .opt { display:block; margin:6px 0; }
+.progress { height:10px; background:#0b0e12; border:1px solid var(--line); border-radius:6px; overflow:hidden; margin:6px 0; }
+#job-bar { height:100%; width:0; background:var(--accent); transition:width .4s; }
+.small-btn { padding:2px 8px; font-size:12px; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px; margin:8px 0; }
+.kpi { background:#11151b; border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+.kpi .l { color:var(--muted); font-size:12px; } .kpi .v { font-size:18px; font-weight:600; } .kpi .s { color:var(--muted); font-size:12px; }
+.sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle; }
+.scroll { max-height:360px; overflow:auto; }
+h4 { margin:14px 0 6px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.5px; }
+code { background:#0b0e12; padding:1px 4px; border-radius:4px; }

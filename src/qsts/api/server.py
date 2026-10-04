@@ -17,12 +17,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from qsts.app.context import AppContext
+from qsts.app.datajobs import DataJobRunner, sample_symbols
 from qsts.app.scanner import MarketScanner, StrategySlot, render_report
 from qsts.backtest.engine import BacktestConfig, CostModel
 from qsts.core.modes import ModeTransitionError, SystemMode
 from qsts.data.bars import Timeframe
 from qsts.data.adjust import adjust
 from qsts.data.quality import DataQualityError, validate_and_clean
+from qsts.data.universe import UniverseList, fetch_sp500
 from qsts.db import models as m
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
 from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
@@ -79,6 +81,13 @@ class AutoResearchBody(BaseModel):
     max_cycles: int = 0  # 0 = until stopped
     population: int = 20
     generations: int = 4
+
+
+class IngestBody(BaseModel):
+    mode: str  # sp500 | symbols | update
+    symbols: list[str] = []
+    sample: int | None = None  # sp500: random sample size (None = all)
+    start: str = "2010-01-01"
 
 
 class ApprovalBody(BaseModel):
@@ -254,6 +263,96 @@ def create_app(ctx: AppContext) -> FastAPI:
                    "equity": [{"time": int(t.timestamp()), "value": v} for t, v in eq.items()],
                    "trades": rec.result.trades.astype(str).to_dict("records")[:500]})
 
+    # ------------------------------------------------------------------ data manager ("Datos")
+    def _invalidate_research_views():
+        ctx.extra.pop("autoresearch_view", None)
+        r = ctx.extra.get("autoresearch")
+        if r is not None and not r.state.running:
+            r.researcher = None
+
+    def _yahoo():
+        from qsts.data.providers.yfinance_provider import YFinanceProvider
+        return YFinanceProvider()
+
+    def _data_runner() -> DataJobRunner:
+        r = ctx.extra.get("datajob")
+        if r is None:
+            r = ctx.extra["datajob"] = DataJobRunner(ctx.repo, ctx.extra.get("data_provider_factory") or _yahoo,
+                                                     on_finish=_invalidate_research_views)
+        return r
+
+    def _sp500() -> UniverseList:
+        cached = ctx.extra.get("sp500")
+        if cached is not None and (pd.Timestamp.now(tz="UTC") - pd.Timestamp(cached.fetched_at)) < pd.Timedelta(hours=12):
+            return cached
+        ctx.extra["sp500"] = (ctx.extra.get("sp500_fetcher") or fetch_sp500)()
+        return ctx.extra["sp500"]
+
+    @app.get("/api/data/summary")
+    def data_summary():
+        rows = ctx.repo.summary()
+        joined = ctx.repo.membership_starts("SP500")
+        for r in rows:
+            r["sp500_since"] = str(joined[r["symbol"]]) if r["symbol"] in joined else None
+        return _j({"count": len(rows), "symbols": rows, "benchmark": ctx.settings.benchmark,
+                   "has_benchmark": any(r["symbol"] == ctx.settings.benchmark for r in rows),
+                   "first": min((r["first"] for r in rows), default=None), "last": max((r["last"] for r in rows), default=None)})
+
+    @app.get("/api/data/sp500")
+    def data_sp500():
+        try:
+            ul = _sp500()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"no se pudo descargar la lista del S&P 500: {e}")
+        have = {r["symbol"] for r in ctx.repo.summary()}
+        return {"source": ul.source, "fetched_at": ul.fetched_at, "count": len(ul.members), "sectors": ul.sectors(),
+                "loaded": int(ul.members["symbol"].isin(have).sum())}
+
+    @app.post("/api/data/ingest")
+    def data_ingest(body: IngestBody):
+        bench = ctx.settings.benchmark
+        have = [r["symbol"] for r in ctx.repo.summary()]
+        fields, members = {}, None
+        if body.mode == "update":
+            if not have:
+                raise HTTPException(400, "no hay datos que actualizar")
+            syms, incremental = have, True
+        elif body.mode == "symbols":
+            syms = sorted({x.strip().upper().replace(".", "-") for x in body.symbols if x.strip()})
+            if not syms:
+                raise HTTPException(400, "escribe al menos un símbolo")
+            incremental = False
+        elif body.mode == "sp500":
+            try:
+                ul = _sp500()
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f"no se pudo descargar la lista del S&P 500: {e}")
+            mem = ul.members
+            syms = sample_symbols(list(mem["symbol"]), body.sample) if body.sample else sorted(mem["symbol"])
+            wanted = set(syms) | set(have)  # also fill name/sector of members you already had
+            fields = {r.symbol: {"name": r.name, "sector": r.sector} for r in mem.itertuples() if r.symbol in wanted}
+            members = ("SP500", [(r.symbol, r.date_added.date(), None) for r in mem.itertuples()
+                                 if pd.notna(r.date_added)], ul.source)
+            incremental = False
+        else:
+            raise HTTPException(400, "modo desconocido")
+        if bench not in syms and bench not in have:
+            syms = [bench, *syms]
+        started = _data_runner().start(body.mode, syms, body.start, incremental=incremental, asset_fields=fields,
+                                       memberships=members)
+        if not started:
+            raise HTTPException(409, "ya hay una descarga en marcha")
+        return {"started": True, "symbols": len(syms)}
+
+    @app.get("/api/data/job")
+    def data_job():
+        return _j(_data_runner().status())
+
+    @app.post("/api/data/job/stop")
+    def data_job_stop():
+        _data_runner().stop()
+        return {"stopping": True}
+
     # ------------------------------------------------------------------ automatic research ("Investigación IA")
     def _runner() -> AutoResearchRunner:
         r = ctx.extra.get("autoresearch")
@@ -293,6 +392,15 @@ def create_app(ctx: AppContext) -> FastAPI:
     def ar_leaderboard(limit: int = 20):
         try:
             return _j(_researcher().leaderboard(max(1, min(limit, 200))))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/autoresearch/{vid}/backtest")
+    def ar_backtest(vid: str):
+        try:
+            return _j(_researcher().backtest_view(vid))
+        except KeyError:
+            raise HTTPException(404, "estrategia desconocida")
         except ValueError as e:
             raise HTTPException(400, str(e))
 

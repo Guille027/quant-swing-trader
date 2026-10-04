@@ -31,3 +31,12 @@
     stored and the leaderboard DSR uses the global trial count and the cross-trial Sharpe variance (conservative:
     similar strategies are counted as independent). The OOS vault is only opened by an explicit, once-per-version
     final test of a research-validated candidate; its result is never fed back to the search or the AI.
+16. **Bigger universes from the current S&P 500 list, sampled at random.** Hand-picking today's well-known names
+    bakes hindsight into a backtest; the UI offers a seeded random sample (100/250) or all ~500. Each stock's
+    history before its "Date added" is ignored by research (setting `QSTS_PIT_MEMBERSHIP`). Companies that left the
+    index are still absent, so long-only results remain optimistic; this is stated in the UI.
+17. **Rankings are per universe.** A strategy's score depends on the symbols and window it was scored on, so the
+    leaderboard only compares rows with the same `universe_id`; the Deflated Sharpe still counts every trial ever run.
+18. **Speed without changing numbers.** Research reuses indicator results through a content-keyed cache (exact frame
+    hash) instead of re-implementing indicators faster, because faster maths would change last-bit results and break
+    bit-identical reproduction of stored experiments.

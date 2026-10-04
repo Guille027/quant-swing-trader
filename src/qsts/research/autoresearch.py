@@ -34,7 +34,7 @@ from qsts.backtest.engine import BacktestConfig
 from qsts.backtest.metrics import periodic_returns
 from qsts.core.hashing import hash_obj
 from qsts.db import models as m
-from qsts.features.registry import REGISTRY
+from qsts.features.registry import REGISTRY, feature_cache
 from qsts.research.evolution import EvolutionConfig, EvolutionEngine, Individual
 from qsts.research.experiments import ExperimentTracker, _clean, dataset_fingerprint
 from qsts.research.scoring import (ScoreConfig, expected_max_sharpe, overfitting_risk, psr_from_stats, return_stats,
@@ -180,7 +180,10 @@ class _ConsistencyEvolution(EvolutionEngine):
 class AutoResearcher:
     def __init__(self, sf, data: dict[str, pd.DataFrame], cfg: AutoResearchConfig = AutoResearchConfig(),
                  bt_cfg: BacktestConfig = BacktestConfig(), ai: AIResearchService | None = None,
-                 log: Callable[[str], None] | None = None, stop_event: threading.Event | None = None):
+                 log: Callable[[str], None] | None = None, stop_event: threading.Event | None = None,
+                 benchmark: pd.Series | None = None):
+        """`data`: adjusted frames incl. the OOS period (only the vault reads past the boundary).
+        `benchmark`: adjusted close of the benchmark (SPY), only for the buy & hold comparison in backtest views."""
         self.sf, self.cfg, self.bt, self.ai = sf, cfg, bt_cfg, ai
         self.vault = OOSVault(sf, cfg.oos_start)
         self.full = data
@@ -192,6 +195,12 @@ class AutoResearcher:
         self.start, self.end = self.index[0], self.index[-1]
         self.evaluator = ConsistencyEvaluator(self.research, self.start, self.end, bt_cfg, cfg)
         self.dataset_id = hash_obj(dataset_fingerprint(self.research), 32)
+        self.benchmark = benchmark
+        # a ranking only compares strategies scored on the same symbols, window and scoring rules
+        self.universe_id = hash_obj({"symbols": {k: str(v.index[0].date()) for k, v in sorted(self.research.items())},
+                                     "oos_start": cfg.oos_start, "warmup": cfg.warmup_bars, "blocks": cfg.blocks,
+                                     "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
+                                     "complexity_penalty": cfg.complexity_penalty, "engine": bt_cfg.to_dict()}, 32)
         self.registry, self.tracker = StrategyRegistry(sf), ExperimentTracker(sf)
         self.log = log or (lambda msg: None)
         self.stop_event = stop_event or threading.Event()
@@ -199,6 +208,60 @@ class AutoResearcher:
         self.session_trials = 0
         self._engine: _ConsistencyEvolution | None = None
         self._last_ai_rejections: list[str] = []
+        self._adopt_legacy_rows()
+
+    def _adopt_legacy_rows(self) -> None:
+        """Rows stored before rankings were scoped by universe: adopt them if they were scored on this symbol set."""
+        R = m.ResearchCandidate
+        with self.sf() as s, s.begin():
+            legacy = s.scalars(select(R).where(R.universe_id.is_(None))).all()
+            if not legacy:
+                return
+            syms = None
+            for r in legacy:
+                exp = (r.validation or {}).get("experiment_id")
+                e = s.get(m.Experiment, exp) if exp else None
+                if e is not None:
+                    syms = set(e.config.get("symbols") or [])
+                    break
+            for r in legacy:
+                r.version_id = r.version_id or r.id
+                if syms is not None and syms == set(self.research):
+                    r.universe_id = self.universe_id
+
+    def passive_reference(self) -> dict:
+        """'Do nothing' benchmark on the SAME stocks: hold all of them, equal weight, rebalanced daily, no costs
+        (favours the benchmark). Scored exactly like a candidate (worst of the same blocks)."""
+        if getattr(self, "_passive", None) is None:
+            rets = pd.concat({k: v["close"].pct_change() for k, v in self.research.items()}, axis=1)
+            rets = rets[(rets.index >= self.start) & (rets.index <= self.end)].mean(axis=1, skipna=True).fillna(0.0)
+            eq = (1 + rets).cumprod() * self.bt.initial_capital
+            def sharpe(r):
+                sd = r.std(ddof=1)
+                return float(r.mean() / sd * np.sqrt(self.bt.bars_per_year)) if sd > 0 else 0.0
+            blocks = [rets.iloc[b] for b in np.array_split(np.arange(len(rets)), self.cfg.blocks)]
+            yearly = periodic_returns(eq, "YE")
+            self._passive = _clean({
+                "rules": f"Mantener las {len(self.research)} acciones a partes iguales, sin hacer nada",
+                "consistency": min(sharpe(b) for b in blocks), "sharpe": sharpe(rets),
+                "cagr": float((eq.iloc[-1] / eq.iloc[0]) ** (self.bt.bars_per_year / max(len(eq) - 1, 1)) - 1),
+                "max_drawdown": float((eq / eq.cummax() - 1).min()), "pct_positive_years": float((yearly > 0).mean()),
+                "worst_year": float(yearly.min()),
+                "blocks": [{"start": str(b.index[0].date()), "end": str(b.index[-1].date()), "sharpe": sharpe(b),
+                            "return": float((1 + b).prod() - 1)} for b in blocks]})
+        return self._passive
+
+    def _row_id(self, vid: str) -> str:
+        return hash_obj({"version": vid, "universe": self.universe_id}, 32)
+
+    def get_row(self, row_id: str) -> m.ResearchCandidate:
+        with self.sf() as s:
+            row = s.get(m.ResearchCandidate, row_id)
+        if row is None:
+            raise KeyError(row_id)
+        if row.universe_id != self.universe_id:
+            raise ValueError("esta estrategia se evaluó con otro conjunto de acciones; vuelve a investigar con los datos actuales")
+        return row
 
     # -------------------------------------------------------------- bookkeeping
     def check_stop(self) -> None:
@@ -208,8 +271,10 @@ class AutoResearcher:
     def evaluate_and_store(self, sd: StrategyDefinition, origin: str, cycle: int) -> tuple[float | None, dict, bool]:
         """Score a candidate once; returns (fitness, metrics, is_new_trial). Known versions are not re-counted."""
         vid = sd.version_id
+        R = m.ResearchCandidate
+        q = select(R).where(R.version_id == vid, R.universe_id == self.universe_id)
         with self.sf() as s:
-            row = s.get(m.ResearchCandidate, vid)
+            row = s.scalars(q).first()
             if row is not None:
                 return row.fitness, row.metrics or {}, False
         err = None
@@ -219,9 +284,10 @@ class AutoResearcher:
             fit, met, err = None, {}, repr(e)[:500]
         status = "EVALUATED" if fit is not None else "INVALID"
         with self.sf() as s, s.begin():
-            if s.get(m.ResearchCandidate, vid) is None:
+            if s.scalars(q).first() is None:
                 sr = met.get("sr")
-                s.add(m.ResearchCandidate(id=vid, origin=origin, cycle=cycle, definition=sd.to_dict(), fitness=fit,
+                s.add(m.ResearchCandidate(id=self._row_id(vid), version_id=vid, universe_id=self.universe_id,
+                                          origin=origin, cycle=cycle, definition=sd.to_dict(), fitness=fit,
                                           sr=sr if isinstance(sr, (int, float)) else None,
                                           metrics=met, status=status, dataset_id=self.dataset_id,
                                           error=err or met.get("invalid_reason")))
@@ -229,7 +295,8 @@ class AutoResearcher:
         return fit, met, True
 
     def trial_stats(self) -> tuple[int, float]:
-        """(number of trials ever run, variance of their per-period Sharpe) for the Deflated Sharpe Ratio."""
+        """(number of trials ever run, variance of their per-period Sharpe) for the Deflated Sharpe Ratio.
+        Counted over ALL universes: conservative, since earlier searches shaped what is tried next."""
         R = m.ResearchCandidate
         with self.sf() as s:
             n = s.scalar(select(func.count()).select_from(R)) or 0
@@ -239,7 +306,8 @@ class AutoResearcher:
 
     def _top_rows(self, n: int, origin: str | None = None, statuses: tuple[str, ...] | None = None) -> list:
         with self.sf() as s:
-            q = select(m.ResearchCandidate).where(m.ResearchCandidate.fitness.is_not(None))
+            q = select(m.ResearchCandidate).where(m.ResearchCandidate.fitness.is_not(None),
+                                                  m.ResearchCandidate.universe_id == self.universe_id)
             if origin:
                 q = q.where(m.ResearchCandidate.origin == origin)
             if statuses:
@@ -288,15 +356,17 @@ class AutoResearcher:
 
     def run(self, max_cycles: int = 0, on_cycle: Callable[[dict], None] | None = None) -> int:
         done, cycle = 0, self.next_cycle()
-        while not self.stop_event.is_set() and (max_cycles <= 0 or done < max_cycles):
-            try:
-                summary = self.run_cycle(cycle)
-            except StopRequested:
-                self.log("Detenido por el usuario")
-                break
-            if on_cycle:
-                on_cycle(summary)
-            done, cycle = done + 1, cycle + 1
+        # indicators repeat across candidates: cache them (exact-content keys, bit-identical results)
+        with feature_cache(max_items=min(12000, 60 * max(len(self.research), 1))):
+            while not self.stop_event.is_set() and (max_cycles <= 0 or done < max_cycles):
+                try:
+                    summary = self.run_cycle(cycle)
+                except StopRequested:
+                    self.log("Detenido por el usuario")
+                    break
+                if on_cycle:
+                    on_cycle(summary)
+                done, cycle = done + 1, cycle + 1
         self.phase = "parado"
         return done
 
@@ -312,7 +382,8 @@ class AutoResearcher:
                          "sharpe": mt.get("sharpe"), "block_sharpes": [b["sharpe"] for b in mt.get("blocks", [])],
                          "pct_positive_years": mt.get("pct_positive_years"), "n_trades": mt.get("n_trades")})
         with self.sf() as s:
-            reasons = s.scalars(select(m.ResearchCandidate.error).where(m.ResearchCandidate.status == "INVALID")
+            reasons = s.scalars(select(m.ResearchCandidate.error).where(m.ResearchCandidate.status == "INVALID",
+                                                                         m.ResearchCandidate.universe_id == self.universe_id)
                                 .order_by(m.ResearchCandidate.created_at.desc()).limit(200)).all()
         failures: dict[str, int] = {}
         for x in reasons:
@@ -323,6 +394,7 @@ class AutoResearcher:
                          "minus 0.03 per complexity point. Few rules, few parameters, at least 30 trades."),
                 "universe": sorted(self.research), "research_period": [str(self.start.date()), str(self.end.date())],
                 "best_so_far": best, "recent_failure_reasons": failures, "trials_so_far": n,
+                "passive_benchmark_to_beat": {k: self.passive_reference()[k] for k in ("consistency", "sharpe")},
                 "your_last_rejected_proposals": self._last_ai_rejections[-5:],
                 "rules": "direction must be 'long'; operands are objects like {\"feature\": \"rsi\", \"params\": {\"n\": 14}}"
                          " or {\"value\": 30}; never a bare string."}
@@ -351,17 +423,15 @@ class AutoResearcher:
     # -------------------------------------------------------------- validation (research data only)
     def _validate_finalists(self) -> int:
         pool = self._top_rows(self.cfg.finalist_pool)
-        todo = [r for r in pool if r.status == "EVALUATED" and r.origin != "baseline"][: self.cfg.finalists_per_cycle]
+        stale = [r for r in pool if r.status == "VALIDATED_PASS" and "beats_passive" not in ((r.validation or {}).get("gates") or {})]
+        todo = (stale + [r for r in pool if r.status == "EVALUATED" and r.origin != "baseline"])[: self.cfg.finalists_per_cycle]
         for r in todo:
             self.check_stop()
             self.validate(r.id)
         return len(todo)
 
     def validate(self, vid: str) -> dict:
-        with self.sf() as s:
-            row = s.get(m.ResearchCandidate, vid)
-        if row is None:
-            raise KeyError(vid)
+        row = self.get_row(vid)
         sd = definition_from_dict(row.definition)
         self.log(f"Validando {vid[:8]}: {describe(sd)[:90]}")
         n_trials, var_sr = self.trial_stats()
@@ -386,19 +456,31 @@ class AutoResearcher:
         gates["robustness"] = rob is None or bool(rob.passed)
         s2 = next((c.get("sharpe") for c in costs if c.get("cost_multiplier") == 2.0), None)
         gates["costs_2x"] = s2 is not None and np.isfinite(s2) and s2 > 0
+        pas = self.passive_reference()
+        gates["beats_passive"] = (row.fitness is not None and row.fitness > pas["consistency"]
+                                  and (mt.get("sharpe") or -np.inf) > pas["sharpe"])
         gates = {k: bool(v) for k, v in gates.items()}
         passed = all(gates.values())
-        sid = f"auto-{row.origin}-{vid[:8]}"
+        sid = f"auto-{row.origin}-{(row.version_id or vid)[:8]}-{self.universe_id[:4]}"
         self.registry.register(sid, sd, origin=row.origin)
         rec = self.tracker.run_backtest(sd, self.research, self.bt, start=self.start, end=self.end, seed=self.cfg.seed,
                                         strategy_id=sid, kind="autoresearch")
-        self.registry.transition(sid, Status.BACKTESTED, reason="autoresearch consistency backtest", actor="system",
-                                 evidence={"backtest_experiment_id": rec.id})
-        self.registry.transition(sid, Status.VALIDATING if passed else Status.REJECTED, actor="system",
-                                 reason="research validation passed" if passed else
-                                 f"research validation failed: {sorted(k for k, v in gates.items() if not v)}")
+        failed_txt = f"research validation failed: {sorted(k for k, v in gates.items() if not v)}"
+        cur = self.registry.status(sid)
+        if cur is Status.REJECTED and passed:  # re-validated under new rules: reopen through RESEARCH (history kept)
+            self.registry.transition(sid, Status.RESEARCH, reason="re-validation", actor="system")
+            cur = Status.RESEARCH
+        if cur is Status.RESEARCH:
+            self.registry.transition(sid, Status.BACKTESTED, reason="autoresearch consistency backtest", actor="system",
+                                     evidence={"backtest_experiment_id": rec.id})
+            cur = Status.BACKTESTED
+        if cur is Status.BACKTESTED:
+            self.registry.transition(sid, Status.VALIDATING if passed else Status.REJECTED, actor="system",
+                                     reason="research validation passed" if passed else failed_txt)
+        elif cur is Status.VALIDATING and not passed:
+            self.registry.transition(sid, Status.REJECTED, actor="system", reason=failed_txt)
         val = _clean({"passed": passed, "gates": gates, "failed": sorted(k for k, v in gates.items() if not v),
-                      "experiment_id": rec.id, "n_trials_at_validation": n_trials,
+                      "experiment_id": rec.id, "n_trials_at_validation": n_trials, "passive": pas,
                       "walk_forward": wf.summary if wf else None,
                       "robustness": None if rob is None else {"stability": rob.stability, "passed": rob.passed,
                                                               "peak_sharpness": rob.peak_sharpness},
@@ -414,10 +496,10 @@ class AutoResearcher:
     # -------------------------------------------------------------- the one-time OOS test (manual)
     def final_test(self, vid: str) -> dict:
         """Opens the OOS vault for this version (once, logged). Only for candidates that passed validation."""
-        with self.sf() as s:
-            row = s.get(m.ResearchCandidate, vid)
-        if row is None:
-            raise KeyError(vid)
+        row = self.get_row(vid)
+        if row.status == "VALIDATED_PASS" and "beats_passive" not in ((row.validation or {}).get("gates") or {}):
+            self.validate(vid)  # validated under older rules: re-check before spending the one-time test
+            row = self.get_row(vid)
         if row.status != "VALIDATED_PASS":
             raise ValueError("solo se puede hacer el test final a estrategias que pasaron la validación")
         sd = definition_from_dict(row.definition)
@@ -445,6 +527,49 @@ class AutoResearcher:
         self.log(f"Test final {vid[:8]}: {'APROBADA → CANDIDATE' if ok else 'SUSPENDE → REJECTED'}")
         return final
 
+    # -------------------------------------------------------------- backtest view (UI)
+    def backtest_view(self, vid: str, max_trades: int = 400) -> dict:
+        """Backtest of one ranked strategy vs buy & hold of the benchmark over the RESEARCH period. Only after its
+        final test (the vault is already open for this version) does it extend into the OOS period."""
+        row = self.get_row(vid)
+        sd = definition_from_dict(row.definition)
+        with_oos = row.status in ("FINAL_PASS", "FINAL_FAIL")
+        data = self.full if with_oos else self.research
+        end = max(v.index.max() for v in data.values()) if with_oos else self.end
+        res, mt = run_window(sd, data, self.bt, self.start, end)
+        eq = res.equity["equity"]
+        out = {"id": vid, "rules": describe(sd), "period": [str(self.start.date()), str(pd.Timestamp(end).date())],
+               "includes_oos": with_oos, "oos_start": self.cfg.oos_start,
+               "metrics": {k: mt.get(k) for k in ("total_return", "cagr", "sharpe", "max_drawdown", "volatility",
+                                                  "n_trades", "win_rate", "profit_factor", "exposure", "avg_trade_bars")},
+               "equity": [{"time": int(t.timestamp()), "value": float(v)} for t, v in eq.items()]}
+        yearly = periodic_returns(eq, "YE")
+        bench_yearly = None
+        if self.benchmark is not None:
+            from qsts.backtest.benchmarks import buy_and_hold
+            from qsts.backtest.metrics import compute_metrics
+            b = self.benchmark[(self.benchmark.index >= self.start) & (self.benchmark.index <= end)]
+            if len(b) > 1:
+                beq = buy_and_hold(b, self.bt)["equity"]
+                bm = compute_metrics(pd.DataFrame({"equity": beq, "gross_exposure": 1.0}), pd.DataFrame())
+                out["benchmark"] = {"metrics": {k: bm.get(k) for k in ("total_return", "cagr", "sharpe", "max_drawdown",
+                                                                         "volatility")},
+                                    "equity": [{"time": int(t.timestamp()), "value": float(v)} for t, v in beq.items()]}
+                bench_yearly = periodic_returns(beq, "YE")
+        out["yearly"] = [{"year": int(k.year), "strategy": float(v),
+                          "benchmark": float(bench_yearly.get(k)) if bench_yearly is not None and k in bench_yearly else None}
+                         for k, v in yearly.items()]
+        tr = res.trades
+        if len(tr):
+            tr = tr.sort_values("entry_ts").tail(max_trades)
+            out["trades"] = [{"symbol": t.symbol, "entry": str(t.entry_ts)[:10], "exit": str(t.exit_ts)[:10],
+                              "entry_price": float(t.entry_price), "exit_price": float(t.exit_price),
+                              "pnl": float(t.pnl), "r": float(t.r_multiple), "reason": t.exit_reason}
+                             for t in tr.itertuples(index=False)]
+        else:
+            out["trades"] = []
+        return _clean(out)
+
     # -------------------------------------------------------------- leaderboard
     def leaderboard(self, limit: int = 20) -> dict:
         n, var = self.trial_stats()
@@ -471,10 +596,14 @@ class AutoResearcher:
                          "pct_positive_years": mt.get("pct_positive_years"), "worst_year": mt.get("worst_year"),
                          "blocks": mt.get("blocks"), "dsr": dsr, "status": r.status, "strategy_id": r.strategy_id,
                          "validation": r.validation, "final": r.final})
+        R = m.ResearchCandidate
         with self.sf() as s:
-            by_status = dict(s.execute(select(m.ResearchCandidate.status, func.count())
-                                       .group_by(m.ResearchCandidate.status)).all())
-        return _clean({"n_trials": n, "final_tests_used": finals, "by_status": by_status, "equivalents_hidden": hidden,
+            by_status = dict(s.execute(select(R.status, func.count()).where(R.universe_id == self.universe_id)
+                                       .group_by(R.status)).all())
+        return _clean({"n_trials": n, "n_trials_universe": int(sum(by_status.values())), "final_tests_used": finals,
+                       "universe": {"id": self.universe_id, "n_symbols": len(self.research)},
+                       "passive": self.passive_reference(),
+                       "by_status": by_status, "equivalents_hidden": hidden,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,
                        "rows": rows})
 

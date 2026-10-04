@@ -68,15 +68,29 @@ class AppContext:
         from qsts.data.quality import DataQualityError
         from qsts.research.autoresearch import AutoResearchConfig, AutoResearcher
         cfg = cfg or AutoResearchConfig(oos_start=self.settings.oos_start)
-        data = {}
+        starts = self.repo.membership_starts("SP500") if self.settings.pit_membership else {}
+        data, cut = {}, 0
         for sym in self.symbols():
             if sym == self.settings.benchmark:
                 continue
             try:
-                data[sym] = self.research_frame(sym)
+                df = self.research_frame(sym)
             except (DataQualityError, KeyError) as e:
                 if log:
                     log(f"{sym} excluido: {e}")
+                continue
+            joined = starts.get(sym)
+            if joined is not None and pd.Timestamp(joined, tz="UTC") > df.index[0]:
+                df, cut = df[df.index >= pd.Timestamp(joined, tz="UTC")], cut + 1  # no history before joining
+            if len(df):
+                data[sym] = df
+        if log and cut:
+            log(f"{cut} acciones recortadas a su fecha de entrada en el S&P 500 (evita usar su pasado previo)")
+        bench = None
+        try:
+            bench = self.research_frame(self.settings.benchmark)["close"]
+        except (DataQualityError, KeyError):
+            pass
         ai = None
         if cfg.use_ai and self.settings.gemini_api_key:
             from qsts.ai.providers import GeminiProvider
@@ -84,7 +98,7 @@ class AppContext:
             ai = AIResearchService(GeminiProvider(self.settings.gemini_api_key.get_secret_value(),
                                                   model=self.settings.gemini_model),
                                    self.sf, max_calls_per_day=self.settings.ai_max_calls_per_day)
-        return AutoResearcher(self.sf, data, cfg, ai=ai, log=log, stop_event=stop_event)
+        return AutoResearcher(self.sf, data, cfg, ai=ai, log=log, stop_event=stop_event, benchmark=bench)
 
     def symbols(self) -> list[str]:
         with self.sf() as s:

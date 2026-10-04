@@ -248,12 +248,16 @@ class CompiledStrategy:
             out |= self._cond(c, df, feats)
         return out
 
+    @staticmethod
+    def _atr(df: pd.DataFrame, n: int) -> pd.Series:
+        # via the feature registry so the research loop's computation cache applies (same values as ind.atr)
+        return FeatureSet([FeatureSpec("atr", {"n": n})]).compute(df).iloc[:, 0]
+
     def stop_distance(self, df: pd.DataFrame) -> pd.Series:
-        from qsts.indicators.core import atr
         from qsts.indicators.structure import swing_points
         s, r = self.sd.stop, self.sd.resolve
         if s.kind == "atr":
-            return atr(df, int(r(s.atr_n))) * float(r(s.mult))
+            return self._atr(df, int(r(s.atr_n))) * float(r(s.mult))
         if s.kind == "percent":
             return df["close"] * float(r(s.mult))
         sp = swing_points(df, int(r(s.structure_k)))
@@ -281,8 +285,7 @@ class CompiledStrategy:
         if tp.kind == "r_multiple":
             out["tp_dist"] = out["stop_dist"] * float(sd.resolve(tp.value))
         elif tp.kind == "atr":
-            from qsts.indicators.core import atr
-            out["tp_dist"] = atr(df, int(sd.resolve(sd.stop.atr_n))) * float(sd.resolve(tp.value))
+            out["tp_dist"] = self._atr(df, int(sd.resolve(sd.stop.atr_n))) * float(sd.resolve(tp.value))
         else:
             out["tp_dist"] = np.nan
         if sd.rank_by is not None:
