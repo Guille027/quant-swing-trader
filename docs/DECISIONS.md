@@ -62,3 +62,10 @@
     holding the port for versions that predate it); the UI is served with `Cache-Control: no-store` and shows its
     version. With the earnings rules off the ranking id is unchanged from before earnings existed; a new ranking
     re-scores the best strategies of earlier rankings first (counted as trials) instead of starting from zero.
+24. **The final test must beat doing nothing.** The first final-test rule only required a positive OOS return and Sharpe,
+    so a strategy that earned +9% while simply holding the same stocks earned about +80% in the same years was labelled
+    "approved". A pass now requires (a) a positive OOS return, (b) an OOS Sharpe at least that of equal-weight buy & hold
+    of the same stocks over the same OOS window and (c) an OOS Sharpe of at least half the research Sharpe (a larger
+    decay means the research result was mostly selection luck). The passive and SPY OOS figures are computed only when
+    judging and never reach the search or the AI. Earlier passes are re-judged from their stored OOS metrics (the vault
+    is not reopened); those that fail are moved to REJECTED and any active paper session of them is stopped.

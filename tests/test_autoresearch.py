@@ -134,6 +134,54 @@ def test_final_test_only_after_validation_and_only_once(sf, data, monkeypatch):
     assert "final" not in json.dumps(r.ai_context()).lower()
 
 
+def test_final_verdict_needs_more_than_making_money():
+    passive = {"sharpe": 1.0}
+    # made money but far less risk-adjusted than holding the same stocks, and lost most of its research Sharpe
+    v = ar.final_verdict({"total_return": 0.09, "sharpe": 0.3}, research_sharpe=1.2, passive=passive)
+    assert v["passed"] is False and v["checks"] == {"positive": True, "beats_passive": False, "limited_decay": False}
+    v = ar.final_verdict({"total_return": 0.5, "sharpe": 1.1}, research_sharpe=1.2, passive=passive)
+    assert v["passed"] is True
+    v = ar.final_verdict({"total_return": 0.5, "sharpe": 1.1}, research_sharpe=3.0, passive=passive)
+    assert v["passed"] is False and v["checks"]["limited_decay"] is False  # decayed by more than half
+    assert ar.final_verdict({"total_return": 0.5, "sharpe": 1.1}, research_sharpe=1.2, passive=None)["passed"] is False
+
+
+def test_old_lenient_final_pass_is_rejudged_without_reopening_the_vault(sf, data, monkeypatch):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    r.seed_baselines()
+    r.engine().run()
+    vid = r.leaderboard(1)["rows"][0]["id"]
+    monkeypatch.setattr(ar, "strategy_score", lambda **kw: {"gates": {}, "score": 0.5})
+    monkeypatch.setattr(ar, "cost_sensitivity", lambda *a, **k: [{"cost_multiplier": 2.0, "sharpe": 1.0}])
+    monkeypatch.setattr(ar, "parameter_robustness",
+                        lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
+    monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": -99.0, "sharpe": -99.0})
+    assert r.validate(vid)["passed"] is True
+    with monkeypatch.context() as mp:  # pass it the way the old rule could
+        mp.setattr(ar, "final_verdict", lambda *a, **k: {"checks": {"positive": True}, "passed": True})
+        final = r.final_test(vid)
+    assert final["decision"] == "FINAL_PASS" and {"passive", "benchmark", "criteria_version"} <= set(final)
+    sid = r.get_row(vid).strategy_id
+    assert r.registry.status(sid) is ar.Status.CANDIDATE
+    # turn the stored result into an old-format approval: small gain, Sharpe far below its research Sharpe
+    with sf() as s, s.begin():
+        row = s.get(m.ResearchCandidate, vid)
+        row.final = {"oos": {"total_return": 0.01, "sharpe": 0.05}, "period": final["period"], "decision": "FINAL_PASS"}
+        row.validation = {**row.validation, "is_metrics": {**row.validation["is_metrics"], "sharpe": 1.0}}
+        s.add(m.PaperSession(strategy_id=sid, version_id=vid, symbols=sorted(data), start=pd.Timestamp("2023-06-01").date(),
+                             capital=10_000.0, config={}, status="ACTIVE"))
+    accesses = count(sf, m.OOSAccessLog)
+    assert r.rejudge_finals() == 1
+    row = r.get_row(vid)
+    assert row.status == "FINAL_FAIL" and row.final["decision"] == "FINAL_FAIL" and "rejudged" in row.final
+    assert row.final["checks"]["limited_decay"] is False and row.final["criteria_version"] == ar.FINAL_CRITERIA_VERSION
+    assert r.registry.status(sid) is ar.Status.REJECTED
+    with sf() as s:
+        assert s.scalars(select(m.PaperSession).where(m.PaperSession.strategy_id == sid)).one().status == "STOPPED"
+    assert count(sf, m.OOSAccessLog) == accesses  # judged from stored metrics: the vault was not opened again
+    assert r.rejudge_finals() == 0  # idempotent
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition
@@ -189,20 +237,6 @@ def test_passive_benchmark_is_a_validation_gate(sf, data, monkeypatch):
     with pytest.raises(ValueError):
         r.final_test(vid)
     assert count(sf, m.OOSAccessLog) == 0
-
-
-def test_swing_horizon_enforced(sf, data):
-    r = researcher(sf, data)
-    r.run_cycle(1)
-    with sf() as s:
-        rows = s.scalars(select(m.ResearchCandidate).where(m.ResearchCandidate.origin != "baseline")).all()
-    assert rows and all(row.definition["max_holding_bars"] is not None and
-                        1 <= int(row.definition["max_holding_bars"]) <= CFG.max_holding_days for row in rows)
-    no_limit = StrategyDefinition(name="hold_forever", family="t", hypothesis="h",
-                                  entry_long=(Condition(F("rsi", n=14), "<", V(40.0)),), stop=StopRule("atr", 14, 2.0),
-                                  take_profit=TakeProfitRule("none"))
-    assert r.holding_ok(no_limit) is False
-    assert "holding_period" in r.ai_context()
 
 
 def test_swing_horizon_enforced(sf, data):

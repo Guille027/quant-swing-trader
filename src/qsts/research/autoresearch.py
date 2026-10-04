@@ -75,6 +75,36 @@ class StopRequested(Exception):
     pass
 
 
+FINAL_CRITERIA_VERSION = 2
+FINAL_MIN_SHARPE_RETENTION = 0.5  # OOS Sharpe must keep at least half of the research Sharpe
+
+
+def window_stats(rets: pd.Series, bars_per_year: int = 252) -> dict:
+    rets = pd.Series(rets).fillna(0.0)
+    if len(rets) < 2:
+        return {"total_return": None, "cagr": None, "sharpe": None, "max_drawdown": None}
+    eq = (1 + rets).cumprod()
+    sd = rets.std(ddof=1)
+    return {"total_return": float(eq.iloc[-1] - 1),
+            "cagr": float(eq.iloc[-1] ** (bars_per_year / len(rets)) - 1) if eq.iloc[-1] > 0 else -1.0,
+            "sharpe": float(rets.mean() / sd * np.sqrt(bars_per_year)) if sd > 0 else 0.0,
+            "max_drawdown": float((eq / eq.cummax() - 1).min())}
+
+
+def final_verdict(oos: dict, research_sharpe: float | None, passive: dict | None) -> dict:
+    """The one-time out-of-sample test passes only if the strategy (1) made money, (2) beat holding the same stocks
+    and doing nothing (risk-adjusted), and (3) kept at least half of its research Sharpe."""
+    sh, ret = oos.get("sharpe"), oos.get("total_return")
+    checks = {
+        "positive": ret is not None and ret > 0,
+        "beats_passive": sh is not None and passive is not None and passive.get("sharpe") is not None
+                         and sh >= passive["sharpe"],
+        "limited_decay": sh is not None and research_sharpe is not None and research_sharpe > 0
+                         and sh >= FINAL_MIN_SHARPE_RETENTION * research_sharpe,
+    }
+    return {"checks": checks, "passed": all(checks.values())}
+
+
 # ---------------------------------------------------------------------- human-readable rules
 _OPS = {"<": "<", ">": ">", "<=": "≤", ">=": "≥", "cross_above": "cruza por encima de", "cross_below": "cruza por debajo de"}
 
@@ -237,6 +267,7 @@ class AutoResearcher:
         self._last_ai_rejections: list[str] = []
         self._imported = False
         self._adopt_legacy_rows()
+        self.rejudge_finals()
 
     def _adopt_legacy_rows(self) -> None:
         """Rows stored before rankings were scoped by universe were scored by engine v1: they keep counting as trials
@@ -267,6 +298,71 @@ class AutoResearcher:
                 "blocks": [{"start": str(b.index[0].date()), "end": str(b.index[-1].date()), "sharpe": sharpe(b),
                             "return": float((1 + b).prod() - 1)} for b in blocks]})
         return self._passive
+
+    def oos_benchmarks(self) -> dict:
+        """Buy & hold references over the OOS period (same stocks equal weight; benchmark). Only used to judge a
+        final test; never shown to the search or the AI."""
+        if getattr(self, "_oos_bench", None) is None:
+            oos = pd.Timestamp(self.cfg.oos_start, tz="UTC")
+            end = max(v.index.max() for v in self.full.values())
+            rets = pd.concat({k: v["close"].pct_change() for k, v in self.full.items()}, axis=1)
+            rets = rets[(rets.index >= oos) & (rets.index <= end)].mean(axis=1, skipna=True)
+            out = {"passive": window_stats(rets, self.bt.bars_per_year)}
+            if self.benchmark is not None:
+                b = self.benchmark.pct_change()
+                out["benchmark"] = window_stats(b[(b.index >= oos) & (b.index <= end)], self.bt.bars_per_year)
+            self._oos_bench = _clean(out)
+        return self._oos_bench
+
+    def _judge(self, row, oos: dict) -> dict:
+        bench = self.oos_benchmarks()
+        research_sharpe = ((row.validation or {}).get("is_metrics") or {}).get("sharpe") or (row.metrics or {}).get("sharpe")
+        v = final_verdict(oos, research_sharpe, bench.get("passive"))
+        return {**v, "research_sharpe": research_sharpe, "passive": bench.get("passive"),
+                "benchmark": bench.get("benchmark"), "criteria_version": FINAL_CRITERIA_VERSION}
+
+    def rejudge_finals(self) -> int:
+        """Final tests judged under the old, too lenient rule (only 'made money') are re-judged with the current
+        criteria from their STORED out-of-sample metrics (the vault is not opened again)."""
+        R = m.ResearchCandidate
+        with self.sf() as s:
+            rows = s.scalars(select(R).where(R.universe_id == self.universe_id,
+                                             R.status.in_(("FINAL_PASS", "FINAL_FAIL")))).all()
+        changed = 0
+        for row in rows:
+            fin = dict(row.final or {})
+            if fin.get("criteria_version") == FINAL_CRITERIA_VERSION or not fin.get("oos"):
+                continue
+            j = self._judge(row, fin["oos"])
+            decision = "FINAL_PASS" if j["passed"] else "FINAL_FAIL"
+            fin.update(_clean(j))
+            if decision != fin.get("decision"):
+                fin["rejudged"] = f"{fin.get('decision')} -> {decision} (criterios del test final endurecidos)"
+                changed += 1
+                self._demote(row.strategy_id)
+            fin["decision"] = decision
+            with self.sf() as s, s.begin():
+                r = s.get(R, row.id)
+                r.final, r.status = fin, decision
+        if changed:
+            self.log(f"{changed} estrategia(s) aprobadas con el criterio antiguo ya no pasan el test final")
+        return changed
+
+    def _demote(self, sid: str | None) -> None:
+        if not sid:
+            return
+        try:
+            st = self.registry.status(sid)
+        except Exception:  # noqa: BLE001
+            return
+        if st in (Status.CANDIDATE, Status.PAPER, Status.UNDER_REVIEW):
+            with self.sf() as s, s.begin():
+                for ps in s.scalars(select(m.PaperSession).where(m.PaperSession.strategy_id == sid,
+                                                                 m.PaperSession.status == "ACTIVE")).all():
+                    ps.status, ps.stop_reason = "STOPPED", "suspende el test final con los criterios corregidos"
+                    ps.stopped_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            self.registry.transition(sid, Status.REJECTED, actor="system",
+                                     reason="final OOS test re-judged: does not beat holding the same stocks / decays")
 
     def _row_id(self, vid: str) -> str:
         return hash_obj({"version": vid, "universe": self.universe_id}, 32)
@@ -578,7 +674,8 @@ class AutoResearcher:
         oos_full = self.vault.evaluate(sd, self.full, self.bt, purpose=f"autoresearch final test {vid}")
         oos = {k: v for k, v in oos_full.items() if not k.startswith("_")}
         val = row.validation or {}
-        ok = (oos.get("total_return") or 0) > 0 and (oos.get("sharpe") or 0) > 0
+        judged = self._judge(row, oos)
+        ok = judged["passed"]
         decision = "FINAL_PASS" if ok else "FINAL_FAIL"
         sid = row.strategy_id
         if ok:
@@ -592,7 +689,7 @@ class AutoResearcher:
         final = _clean({"oos": {k: oos.get(k) for k in ("total_return", "cagr", "sharpe", "max_drawdown", "n_trades",
                                                         "win_rate", "profit_factor")},
                         "period": [self.cfg.oos_start, str(max(v.index.max() for v in self.full.values()).date())],
-                        "decision": decision, "at": datetime.now(timezone.utc).isoformat()})
+                        "decision": decision, "at": datetime.now(timezone.utc).isoformat(), **judged})
         with self.sf() as s, s.begin():
             r = s.get(m.ResearchCandidate, vid)
             r.final, r.status = final, decision

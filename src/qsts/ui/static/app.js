@@ -280,14 +280,21 @@ function showDetail(r) {
   } else if (r.origin === "baseline") h += `<p class="muted">Estrategia de referencia (muy simple): no se valida ni se opera; sirve de listón. Una estrategia nueva tiene que superarla.</p>`;
   else h += `<p class="muted">Aún no validada (se validan automáticamente las mejores de cada ciclo).</p>`;
   if (r.final) {
-    const o = r.final.oos || {};
-    h += `<h4>Test final con datos guardados (${r.final.period.join(" → ")}): ${r.final.decision === "FINAL_PASS" ? '<span class="good">APROBADA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>` +
-      `<p>Rentabilidad ${pct(o.total_return)} · Sharpe ${fmt(o.sharpe)} · Caída máx. ${pct(o.max_drawdown)} · Operaciones ${o.n_trades ?? "—"}</p>`;
+    const f = r.final, o = f.oos || {}, pv = f.passive || {}, bm = f.benchmark || {};
+    const FC = { positive: "gana dinero", beats_passive: "supera a mantener las mismas acciones sin hacer nada (Sharpe)",
+      limited_decay: `conserva al menos la mitad de su Sharpe de investigación (${fmt(f.research_sharpe)})` };
+    h += `<h4>Test final con datos guardados (${f.period.join(" → ")}): ${f.decision === "FINAL_PASS" ? '<span class="good">APROBADA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>` +
+      (f.rejudged ? `<p class="warn small">Re-evaluada: ${esc(f.rejudged)}.</p>` : "") +
+      `<table><tr><th></th><th>Rentabilidad</th><th>Sharpe</th><th>Caída máx.</th></tr>
+        <tr><td><b>Esta estrategia</b></td><td>${pct(o.total_return)}</td><td>${fmt(o.sharpe)}</td><td>${pct(o.max_drawdown)}</td></tr>
+        <tr><td>Mismas acciones sin hacer nada</td><td>${pct(pv.total_return)}</td><td>${fmt(pv.sharpe)}</td><td>${pct(pv.max_drawdown)}</td></tr>
+        <tr><td>SPY</td><td>${pct(bm.total_return)}</td><td>${fmt(bm.sharpe)}</td><td>${pct(bm.max_drawdown)}</td></tr></table>` +
+      (f.checks ? "<ul>" + Object.entries(f.checks).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${FC[k] || k}</li>`).join("") + "</ul>" : "");
   }
   $("#ar-detail").classList.remove("muted"); $("#ar-detail").innerHTML = h;
 }
 window.finalTest = async (id) => {
-  if (!confirm("TEST FINAL: se probará esta estrategia con los datos guardados bajo llave.\n\nSolo se puede hacer UNA vez por estrategia y el resultado no se puede usar para seguir ajustándola. Úsalo solo con la estrategia que de verdad elegirías.\n\n¿Continuar?")) return;
+  if (!confirm("TEST FINAL: se probará esta estrategia con los datos guardados bajo llave.\n\nPara aprobar tiene que: ganar dinero, superar a mantener las mismas acciones sin hacer nada (Sharpe) y conservar al menos la mitad de su Sharpe de investigación.\n\nSolo se puede hacer UNA vez por estrategia y el resultado no se puede usar para seguir ajustándola. Úsalo solo con la estrategia que de verdad elegirías.\n\n¿Continuar?")) return;
   try { const f = await post(`/api/autoresearch/${id}/final-test`); arSel = id;
     alert(f.decision === "FINAL_PASS" ? "APROBADA en el test final. Pasa a estado CANDIDATE." : "SUSPENDE el test final. Se marca como rechazada.");
   } catch (e) { alert(e.message); }
