@@ -74,3 +74,9 @@
     so a strategy no better than holding its own stocks could show ~80% "reliability". The null is now the Sharpe of
     equal-weight buy & hold of the same stocks over the research window (floored at 0 = cash) plus the expected best
     Sharpe of n unskilled tries: Fiabilidad = P(it truly beats holding the same stocks, after all the trials).
+26. **A new ranking never looks like lost work.** A ranking only compares strategies scored on the same inputs (symbols,
+    window, rules, earnings data), so downloading stocks or quarterly results starts a new one. The inputs of each
+    ranking are now recorded (`research_universes`) and the UI says how many earlier strategies are kept, what changed,
+    and that starting the search first re-scores the best 30 on the current data. Strategies that already had their
+    one-time final test are not brought back. The options of the last search (e.g. avoid earnings) are remembered so
+    the ranking shown after a restart uses the same rules.

@@ -39,6 +39,17 @@ document.querySelectorAll("[data-goto]").forEach(b => b.onclick = () => {
 
 // ---------------------------------------------------------------- home (guided steps)
 let homeBest = null;
+// strategies of an earlier ranking (other data or rules) are kept: explain why they are not listed and how to recover them
+function previousNote(lb) {
+  const p = lb.previous;
+  if (!p || lb.rows.some(r => r.origin !== "baseline")) return "";
+  const why = p.changes == null ? "los datos o las reglas han cambiado desde entonces (por ejemplo, has descargado acciones o resultados trimestrales)"
+    : p.changes.length ? "desde entonces hay " + p.changes.map(esc).join(", ") : "las reglas han cambiado";
+  return `<p class="warn">Tus <b>${p.n}</b> estrategias anteriores siguen guardadas (última: ${esc(p.last || "—")}), pero no aparecen aquí porque ` +
+    `se puntuaron con otros datos: ${why}. Un ranking solo compara estrategias puntuadas con los mismos datos.<br>` +
+    `<b>Pulsa ▶ Empezar a investigar</b> (en 2 · Investigación IA): lo primero que hace es volver a puntuar las 30 mejores con los datos actuales ` +
+    `(unos minutos) y luego sigue buscando a partir de ellas. No empiezas de cero.</p>`;
+}
 async function loadHome() {
   try {
     const d = await api("/api/data/summary");
@@ -66,7 +77,7 @@ async function loadHome() {
     const best = lb.rows.find(r => r.origin !== "baseline"), ref = lb.rows.find(r => r.origin === "baseline");
     homeBest = best || null;
     const el = $("#step-best");
-    if (!best) { el.querySelector(".body").innerHTML = `Aún no hay resultados con tus datos actuales (${lb.universe.n_symbols} acciones). Lanza la investigación.`; return; }
+    if (!best) { el.querySelector(".body").innerHTML = previousNote(lb) || `Aún no hay resultados con tus datos actuales (${lb.universe.n_symbols} acciones). Lanza la investigación.`; return; }
     const pv = lb.passive || {};
     const bar = Math.max(ref ? ref.consistency : -Infinity, pv.consistency ?? -Infinity);
     const beats = best.consistency > bar;
@@ -178,12 +189,18 @@ const GATES = { min_trades: "suficientes operaciones", overfit_risk: "riesgo de 
   walk_forward: "funciona en ventanas móviles (walk-forward)", beats_baselines: "supera a las estrategias de referencia",
   robustness: "aguanta pequeños cambios de parámetros", costs_2x: "sigue ganando con el doble de costes",
   beats_passive: "supera a mantener todas las acciones sin hacer nada (consistencia y Sharpe)" };
+let optsRestored = false;
 function openAuto() { loadAuto(true); autoTimer = setInterval(() => loadAuto(false), 3000); }
 async function loadAuto(full) {
   let st;
   try { st = await api("/api/autoresearch/status"); } catch (e) { $("#ar-msg").textContent = e.message; return; }
   $("#ar-oos").textContent = st.oos_start;
   $("#ar-start").disabled = st.running; $("#ar-stop").disabled = !st.running;
+  if (!optsRestored && st.last_options) {  // same options as the last search (the ranking depends on them)
+    optsRestored = true;
+    if (st.last_options.avoid_earnings != null) $("#ar-earn").checked = !!st.last_options.avoid_earnings;
+    if (st.last_options.use_ai != null) $("#ar-ai").checked = !!st.last_options.use_ai;
+  }
   if (!st.ai_available) { $("#ar-ai").checked = false; $("#ar-ai").disabled = true; $("#ar-ai").parentElement.title = "Pon QSTS_GEMINI_API_KEY en .env"; }
   dl($("#ar-state"), { "Estado": st.running ? '<span class="good">investigando…</span>' : "parado", "Fase": esc(st.phase),
     "Ciclos (esta sesión)": st.cycles_done, "Probadas (esta sesión)": st.session_trials,
@@ -196,7 +213,7 @@ async function loadBoard() {
   let lb; finalsUsed = null;
   try { lb = await api("/api/autoresearch/leaderboard?limit=25"); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
   $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
-  $("#ar-board-note").innerHTML = `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
+  $("#ar-board-note").innerHTML = previousNote(lb) + `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
     `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${(finalsUsed = lb.final_tests_used)}</b>. ` +
     `<b>Pulsa una fila para ver su backtest.</b> ` +
     (lb.equivalents_hidden ? `Ocultadas ${lb.equivalents_hidden} variantes equivalentes (mismas operaciones). ` : "") +

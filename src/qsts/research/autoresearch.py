@@ -79,6 +79,35 @@ FINAL_CRITERIA_VERSION = 2
 FINAL_MIN_SHARPE_RETENTION = 0.5  # OOS Sharpe must keep at least half of the research Sharpe
 
 
+def universe_changes(old: dict | None, new: dict) -> list[str] | None:
+    """Plain-language reasons why two rankings differ (None if the old ranking's inputs were not recorded)."""
+    if old is None:
+        return None
+    out = []
+    so, sn = old.get("symbols") or {}, new.get("symbols") or {}
+    added, removed = set(sn) - set(so), set(so) - set(sn)
+    moved = [k for k in set(so) & set(sn) if so[k] != sn[k]]
+    n = lambda k, one, many: f"{k} {one if k == 1 else many}"  # noqa: E731
+    if added:
+        out.append(n(len(added), "acción nueva", "acciones nuevas"))
+    if removed:
+        out.append(n(len(removed), "acción menos", "acciones menos"))
+    if moved:
+        out.append(n(len(moved), "acción cuyo historial empieza en otra fecha", "acciones cuyo historial empieza en otra fecha"))
+    if ("earnings_data" in old) != ("earnings_data" in new):
+        out.append("la casilla 'evitar resultados trimestrales' está " + ("marcada" if "earnings_data" in new else "desmarcada"))
+    elif old.get("earnings_data") != new.get("earnings_data"):
+        out.append("datos de resultados trimestrales distintos (por ejemplo, recién descargados)")
+    off = ("earnings_blackout_days", "exit_before_earnings")
+    eng = lambda k: {a: b for a, b in (k.get("engine") or {}).items() if a not in off}  # noqa: E731
+    if eng(old) != eng(new) or old.get("engine_version") != new.get("engine_version"):
+        out.append("una versión nueva del simulador")
+    if any(old.get(k) != new.get(k) for k in ("oos_start", "warmup", "blocks", "min_trades", "min_block_trades",
+                                              "complexity_penalty")):
+        out.append("reglas de puntuación distintas")
+    return out
+
+
 def window_stats(rets: pd.Series, bars_per_year: int = 252) -> dict:
     rets = pd.Series(rets).fillna(0.0)
     if len(rets) < 2:
@@ -257,7 +286,7 @@ class AutoResearcher:
             # the earnings rules make scores depend on the earnings data; with the rules off, strategies that do not
             # use earnings features score identically, so earlier rankings stay valid
             key["earnings_data"] = _earnings_key(self.research)
-        self.universe_id = hash_obj(key, 32)
+        self.universe_id, self.universe_key = hash_obj(key, 32), _clean(key)
         self.registry, self.tracker = StrategyRegistry(sf), ExperimentTracker(sf)
         self.log = log or (lambda msg: None)
         self.stop_event = stop_event or threading.Event()
@@ -267,7 +296,29 @@ class AutoResearcher:
         self._last_ai_rejections: list[str] = []
         self._imported = False
         self._adopt_legacy_rows()
+        self._record_universe()
         self.rejudge_finals()
+
+    def _record_universe(self) -> None:
+        with self.sf() as s, s.begin():
+            if s.get(m.ResearchUniverse, self.universe_id) is None:
+                s.add(m.ResearchUniverse(id=self.universe_id, key=self.universe_key))
+
+    def previous_ranking(self) -> dict | None:
+        """The most recently used OTHER ranking with searched strategies: they are kept, and the first thing a new
+        search does is re-score the best of them on the current data (import_previous)."""
+        R = m.ResearchCandidate
+        with self.sf() as s:
+            row = s.execute(select(R.universe_id, func.count(), func.max(R.created_at), func.max(R.fitness))
+                            .where(R.universe_id.is_not(None), R.universe_id != self.universe_id,
+                                   R.origin.in_(("evolution", "ai")))
+                            .group_by(R.universe_id).order_by(func.max(R.created_at).desc()).limit(1)).first()
+            if row is None:
+                return None
+            old = s.get(m.ResearchUniverse, row[0])
+            n_old = len((old.key or {}).get("symbols") or {}) if old else None
+        return {"n": int(row[1]), "last": str(row[2])[:16] if row[2] else None, "best_consistency": row[3],
+                "n_symbols": n_old, "changes": universe_changes(old.key if old else None, self.universe_key)}
 
     def _adopt_legacy_rows(self) -> None:
         """Rows stored before rankings were scoped by universe were scored by engine v1: they keep counting as trials
@@ -470,7 +521,9 @@ class AutoResearcher:
                 return 0
             prev = s.scalars(select(R).where(R.universe_id != self.universe_id, R.fitness.is_not(None),
                                             R.origin.in_(("evolution", "ai"))).order_by(R.fitness.desc()).limit(n * 4)).all()
-        seen, picked = set(), []
+            # a version that already had its one-time final test is finished (passed -> Simulación; failed -> rejected)
+            seen = set(s.scalars(select(R.version_id).where(R.status.in_(("FINAL_PASS", "FINAL_FAIL")))).all())
+        picked = []
         for r in prev:
             vid = r.version_id or r.id
             if vid not in seen:
@@ -778,7 +831,7 @@ class AutoResearcher:
                                     "with_earnings": sum("earn_days_to" in v.columns for v in self.research.values())},
                        "earnings_rule": {"blackout_days": self.bt.earnings_blackout_days,
                                          "exit_before": self.bt.exit_before_earnings},
-                       "passive": passive,
+                       "passive": passive, "previous": self.previous_ranking(),
                        "by_status": by_status, "equivalents_hidden": hidden,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,
                        "rows": rows})

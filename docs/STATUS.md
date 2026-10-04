@@ -109,6 +109,8 @@ because concurrent positions are not independent.
 - [x] Every evaluated strategy persisted and counted once (re-proposals of a known version are not re-counted)
 - [x] Leaderboard DSR is deflated by the total number of trials (more trials -> lower DSR, tested)
 - [x] DSR null = Sharpe of holding the same stocks (floored at 0), not zero: "Fiabilidad" means beating doing nothing (tested)
+- [x] New ranking (data/rules changed): earlier strategies reported with the reason, best 30 re-scored on start,
+      final-tested versions not re-imported, last search options remembered across restarts (tested)
 - [x] Final test only for research-validated candidates, once per version; its results never reach the AI context
 - [x] Final test verdict (criteria v2): OOS return > 0 AND OOS Sharpe >= buy & hold of the same stocks over the same
       OOS window AND OOS Sharpe >= 50% of the research Sharpe; old lenient passes re-judged from stored metrics

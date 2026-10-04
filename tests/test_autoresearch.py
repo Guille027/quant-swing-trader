@@ -193,6 +193,29 @@ def test_reliability_is_measured_against_holding_the_same_stocks(sf, data, monke
     assert common and all(vs_hold[k] < vs_cash[k] for k in common)
 
 
+def test_new_ranking_explains_the_previous_one_and_skips_final_tested(sf, data):
+    cfg = AutoResearchConfig(**{**CFG.__dict__, "use_ai": False})
+    r1 = researcher(sf, {k: data[k] for k in ("AAA", "BBB")}, cfg=cfg)
+    r1.engine().run()
+    old = [x for x in r1.leaderboard(50)["rows"] if x["origin"] != "baseline"]
+    assert old and r1.leaderboard()["previous"] is None
+    with sf() as s, s.begin():  # one of them already had its one-time final test
+        row = s.get(m.ResearchCandidate, old[0]["id"])
+        row.status, done = "FINAL_FAIL", row.version_id
+    r2 = researcher(sf, data, cfg=cfg)  # one more stock -> a new ranking
+    lb = r2.leaderboard()
+    assert r2.universe_id != r1.universe_id and not [x for x in lb["rows"] if x["origin"] != "baseline"]
+    assert lb["previous"]["n"] >= len(old) and lb["previous"]["changes"] == ["1 acción nueva"]
+    assert r2.import_previous() > 0
+    with sf() as s:
+        vids = set(s.scalars(select(m.ResearchCandidate.version_id)
+                             .where(m.ResearchCandidate.universe_id == r2.universe_id)).all())
+    assert vids and done not in vids  # a finished strategy is not brought back for a second final test
+    r3 = AutoResearcher(sf, data, cfg, BacktestConfig(earnings_blackout_days=3))  # rules changed, same stocks
+    assert "una versión nueva del simulador" not in (r3.previous_ranking()["changes"] or [])
+    assert ar.universe_changes(None, r3.universe_key) is None
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition

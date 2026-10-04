@@ -5,6 +5,7 @@ engines used everywhere else. Nothing is computed or invented in the frontend.
 """
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -439,18 +440,28 @@ def create_app(ctx: AppContext) -> FastAPI:
                 lambda cfg, log, stop: ctx.autoresearcher(cfg, log=log, stop_event=stop))
         return r
 
+    options_file = Path(ctx.settings.state_dir) / "autoresearch_options.json"
+
+    def _last_options() -> dict:
+        """Options of the last research started (the ranking shown after a restart must use the same rules)."""
+        try:
+            return json.loads(options_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
     def _researcher():
         r = _runner().researcher
         if r is None:  # read-only view for the leaderboard / final test when no loop has run yet
             r = ctx.extra.get("autoresearch_view")
             if r is None:
-                r = ctx.extra["autoresearch_view"] = ctx.autoresearcher(
-                    AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=False))
+                r = ctx.extra["autoresearch_view"] = ctx.autoresearcher(AutoResearchConfig(
+                    oos_start=ctx.settings.oos_start, use_ai=False,
+                    avoid_earnings=bool(_last_options().get("avoid_earnings", True))))
         return r
 
     @app.get("/api/autoresearch/status")
     def ar_status():
-        return _j(_runner().status() | {"ai_available": bool(ctx.settings.gemini_api_key),
+        return _j(_runner().status() | {"ai_available": bool(ctx.settings.gemini_api_key), "last_options": _last_options(),
                                         "earnings_symbols": len(ctx.repo.earnings_summary()),
                                         "oos_start": ctx.settings.oos_start})
 
@@ -460,7 +471,16 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(400, "no hay datos: ejecuta primero `qsts ingest`")
         cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai, avoid_earnings=body.avoid_earnings,
                                  population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)))
-        return {"started": _runner().start(cfg, max(0, body.max_cycles))}
+        started = _runner().start(cfg, max(0, body.max_cycles))
+        if started:
+            try:
+                options_file.parent.mkdir(parents=True, exist_ok=True)
+                options_file.write_text(json.dumps({"use_ai": body.use_ai, "avoid_earnings": body.avoid_earnings}),
+                                        encoding="utf-8")
+            except OSError:
+                pass
+            ctx.extra.pop("autoresearch_view", None)
+        return {"started": started}
 
     @app.post("/api/autoresearch/stop")
     def ar_stop():

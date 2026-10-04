@@ -237,6 +237,15 @@ class MonteCarloRun(Base):
     percentiles: Mapped[dict] = mapped_column(JSON)
 
 
+class ResearchUniverse(Base):
+    """What a research ranking was scored on (symbols, window, rules, earnings data), to explain why a new ranking
+    started when any of it changes."""
+    __tablename__ = "research_universes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class ResearchCandidate(Base):
     """Every strategy evaluated by the automatic research loop (one row per strategy version = one trial).
     Kept forever: the row count is the multiple-testing burden used by the Deflated Sharpe Ratio."""

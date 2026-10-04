@@ -117,6 +117,7 @@ def test_autoresearch_endpoints(client):
             break
         time.sleep(0.2)
     assert st["running"] is False and st["error"] is None and st["cycles_done"] == 1, st
+    assert st["last_options"] == {"use_ai": False, "avoid_earnings": True}  # the ranking shown after a restart
     lb = c.get("/api/autoresearch/leaderboard").json()
     assert lb["n_trials"] > 0 and lb["rows"] and lb["final_tests_used"] == 0
     assert c.post("/api/autoresearch/nope/final-test").status_code == 404
