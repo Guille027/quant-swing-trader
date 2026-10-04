@@ -92,3 +92,10 @@
     day (plus a sell alert first when something must be sold or was closed); a day is recorded and never sent twice.
     If the app was closed, the latest close is sent when it opens: the orders are for the next open, so that is early
     enough. The bot token lives only in the git-ignored `.env`, is scrubbed from errors and never sent to the UI.
+29. **Validation speed without changing results.** Validation re-ran every indicator for each of ~54 walk-forward
+    windows because the data was cut at each window end first. Signals are now computed on the research history
+    (cached) and the engine only trades inside the window; since every registered feature is causal (tested) this
+    is bit-identical (tested against cutting first). The reference strategies are computed once per session,
+    prepared price frames are cached while the stored data is unchanged (fingerprint of bars, corporate actions and
+    earnings), validation reports its progress, and "Detener" also interrupts a validation (the candidate is simply
+    validated again later).

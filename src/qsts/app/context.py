@@ -46,7 +46,19 @@ class AppContext:
         """The ONE way research code gets bars: stored RAW data re-validated (ValidatedBars contract), then
         backward-adjusted for splits and dividends from stored corporate actions (`raw_close` kept), plus
         point-in-time earnings columns when results are stored for the symbol.
-        Using the same loader everywhere keeps dataset hashes stable for reproduction."""
+        Using the same loader everywhere keeps dataset hashes stable for reproduction.
+        Prepared frames are cached and reused while the stored data is unchanged (`data_token`); callers get a
+        copy, so the cache can never be modified from outside."""
+        cache = self.extra.setdefault("frame_cache", {})
+        token = self.repo.data_token(symbol, timeframe)
+        hit = cache.get((symbol, timeframe))
+        if hit is not None and hit[0] == token:
+            return hit[1].copy()
+        df = self._research_frame(symbol, timeframe)
+        cache[(symbol, timeframe)] = (token, df)
+        return df.copy()
+
+    def _research_frame(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
         from qsts.data.adjust import adjust
         from qsts.data.quality import validate_and_clean
         raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]

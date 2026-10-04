@@ -30,7 +30,7 @@ from sqlalchemy import func, select
 from qsts.ai.providers import AIProviderError
 from qsts.ai.service import AIBudgetExceeded, AIOutputRejected, AIResearchService
 from qsts.backtest.benchmarks import momentum_baseline, trend_baseline
-from qsts.backtest.engine import ENGINE_VERSION, BacktestConfig
+from qsts.backtest.engine import ENGINE_VERSION, BacktestConfig, signal_cache
 from qsts.backtest.metrics import periodic_returns
 from qsts.core.hashing import hash_obj
 from qsts.core.power import keep_awake
@@ -350,6 +350,13 @@ class AutoResearcher:
                             "return": float((1 + b).prod() - 1)} for b in blocks]})
         return self._passive
 
+    def baseline_sharpes(self) -> dict:
+        """Sharpe of the simple reference strategies on the research window (the same for every validation)."""
+        if getattr(self, "_baselines", None) is None:
+            self._baselines = {b.name: run_window(b, self.research, self.bt, self.start, self.end)[1].get("sharpe")
+                               for b in (momentum_baseline(), trend_baseline())}
+        return dict(self._baselines)
+
     def oos_benchmarks(self, symbols: list[str] | None = None) -> dict:
         """Buy & hold references over the OOS period (the strategy's stocks equal weight; benchmark). Only used to
         judge a final test; never shown to the search or the AI."""
@@ -666,16 +673,26 @@ class AutoResearcher:
     def validate(self, vid: str) -> dict:
         row = self.get_row(vid)
         sd = definition_from_dict(row.definition)
-        self.log(f"Validando {vid[:8]}: {describe(sd)[:90]}")
+        self.log(f"Validando {vid[:8]} (varios minutos; el avance se ve en 'Fase'): {describe(sd)[:90]}")
+        phase0 = self.phase
+        def step(txt):
+            def cb(done, total):
+                self.check_stop()  # "Detener" also works in the middle of a validation
+                self.phase = f"validando {vid[:8]}: {txt} {done + 1}/{total}"
+            return cb
         n_trials, var_sr = self.trial_stats()
         res, mt = run_window(sd, self.research, self.bt, self.start, self.end)
         folds = make_folds(self.index, self.cfg.wf_train, self.cfg.wf_validate, self.cfg.wf_test, self.cfg.embargo)
-        wf = walk_forward(sd, self.research, {k: [v] for k, v in sd.params.items()}, folds, self.bt) if folds else None
-        rob = parameter_robustness(sd, self.research, self.bt, self.start, self.end) if sd.params else None
+        with signal_cache(max_items=2 * len(self.research) + 10):  # one strategy, many windows: signals once
+            wf = walk_forward(sd, self.research, {k: [v] for k, v in sd.params.items()}, folds, self.bt,
+                              progress=step("ventanas móviles")) if folds else None
+        rob = parameter_robustness(sd, self.research, self.bt, self.start, self.end,
+                                   progress=step("cambios de parámetros")) if sd.params else None
+        step("costes dobles y referencias")(0, 1)
         mc = monte_carlo_trades(res.trades, self.bt.initial_capital, self.cfg.mc_sims, self.cfg.seed)
         costs = cost_sensitivity(sd, self.research, self.bt, self.start, self.end, multipliers=(1.0, 2.0))
-        base = {b.name: run_window(b, self.research, self.bt, self.start, self.end)[1].get("sharpe")
-                for b in (momentum_baseline(), trend_baseline())}
+        base = self.baseline_sharpes()
+        self.phase = phase0
         ovf = overfitting_risk(metrics=mt, complexity=sd.complexity(), trades=res.trades, returns=res.returns,
                                n_trials=max(n_trials, 1), var_trial_sr=var_sr,
                                wf_efficiency=wf.summary.get("wf_efficiency") if wf else None,

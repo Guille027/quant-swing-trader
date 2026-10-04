@@ -18,7 +18,10 @@ not create fake gaps. Share-count limits (no fractional) are applied to those pr
 """
 from __future__ import annotations
 
+import threading
 import zlib
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -69,6 +72,40 @@ class BacktestConfig:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+_SIGNALS = threading.local()
+
+
+@contextmanager
+def signal_cache(max_items: int = 1000):
+    """Inside the block, the signals of one strategy on the SAME data objects are computed once and reused
+    (validation backtests one strategy over many windows of the same history). Entries are kept with a reference
+    to their frame and only reused for that very object; least recently used entries are dropped."""
+    prev = getattr(_SIGNALS, "cache", None)
+    if prev is None:
+        _SIGNALS.cache, _SIGNALS.max = OrderedDict(), max_items
+    try:
+        yield
+    finally:
+        if prev is None:
+            _SIGNALS.cache = None
+
+
+def _signals(cs, version: str, df: pd.DataFrame, regime) -> pd.DataFrame:
+    cache = getattr(_SIGNALS, "cache", None)
+    if cache is None:
+        return cs.evaluate(df, regime)
+    key = (version, id(df), id(regime))
+    hit = cache.get(key)
+    if hit is not None and hit[0] is df and hit[1] is regime:
+        cache.move_to_end(key)
+        return hit[2]
+    sig = cs.evaluate(df, regime)
+    cache[key] = (df, regime, sig)
+    while len(cache) > _SIGNALS.max:
+        cache.popitem(last=False)
+    return sig
 
 
 @dataclass
@@ -126,8 +163,9 @@ class BacktestEngine:
         cs = CompiledStrategy(strategy)
         cfg, cm = self.cfg, self.cfg.costs
         frames, sigs = {}, {}
+        version = strategy.version_id if getattr(_SIGNALS, "cache", None) is not None else None
         for sym, df in sorted(data.items()):
-            sig = cs.evaluate(df, regime)  # computed on full history -> warm-up before `start`
+            sig = _signals(cs, version, df, regime)  # computed on full history -> warm-up before `start`
             if start is not None:
                 keep = df.index >= pd.Timestamp(start)
                 df, sig = df[keep], sig[keep]

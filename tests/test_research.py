@@ -145,3 +145,21 @@ def test_ablation_keys(data):
                             stop=StopRule("atr", 14, 2.0))
     out = ablation(sd, data, BacktestConfig(), data["AAA"].index[0], data["AAA"].index[-1])
     assert "FULL" in out and len(out) == 3
+
+
+def test_window_backtest_equals_computing_on_data_cut_at_the_window_end(data):
+    """run_window reuses indicators computed on the whole history (fast walk-forward); because every feature is
+    causal this must be bit-identical to cutting the data at the window end first."""
+    from qsts.backtest.engine import BacktestEngine
+    from qsts.research.validation import run_window
+    sd = StrategyDefinition(name="w", family="t", hypothesis="h",
+                            entry_long=(Condition(F("bb_width", n=20, k=2), "<", V(0.12)),
+                                        Condition(F("close"), ">", F("ema", n=50))),
+                            exit_long=(Condition(F("rsi", n=14), ">", V(65.0)),),
+                            stop=StopRule("atr", 14, 2.5), take_profit=TakeProfitRule("r_multiple", 2.0),
+                            max_holding_bars=12)
+    idx = next(iter(data.values())).index
+    for s, e in ((idx[300], idx[420]), (idx[100], idx[-200]), (idx[250], idx[-1])):
+        res, mt = run_window(sd, data, BacktestConfig(), s, e)
+        cut = BacktestEngine(BacktestConfig()).run(sd, {k: v[v.index <= e] for k, v in data.items()}, start=s, end=e)
+        assert res.equity.equals(cut.equity) and res.trades.equals(cut.trades)

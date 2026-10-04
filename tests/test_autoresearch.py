@@ -218,6 +218,19 @@ def test_new_ranking_explains_the_previous_one_and_skips_final_tested(sf, data):
     assert ar.universe_changes(None, r3.universe_key) is None
 
 
+def test_stop_works_in_the_middle_of_a_validation(sf, data):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    r.seed_baselines()
+    r.engine().run()
+    vid = r.leaderboard(1)["rows"][0]["id"]
+    r.stop_event.set()
+    with pytest.raises(ar.StopRequested):
+        r.validate(vid)
+    assert r.get_row(vid).status == "EVALUATED"  # nothing half-written; it is validated again later
+    r.stop_event.clear()
+    assert r.baseline_sharpes() == r.baseline_sharpes() and len(r.baseline_sharpes()) == 2
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition

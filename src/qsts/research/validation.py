@@ -38,12 +38,12 @@ class Objective:
         return float(s) if s is not None and np.isfinite(s) else -np.inf
 
 
-def _slice(data: dict[str, pd.DataFrame], end) -> dict[str, pd.DataFrame]:
-    return {k: v[v.index <= end] for k, v in data.items()}
-
-
 def run_window(sd, data, cfg, start, end, regime=None):
-    res = BacktestEngine(cfg).run(sd, _slice(data, end), regime=regime, start=start, end=end)
+    """Backtest trading only inside [start, end]. Signals are computed on the history passed in (callers pass the
+    research view, never the out-of-sample period before its final test) and the engine ignores bars after `end`.
+    Every registered feature is causal (tested), so this equals computing on data cut at `end`, and the indicator
+    cache is reused across walk-forward windows instead of recomputing every indicator for every window."""
+    res = BacktestEngine(cfg).run(sd, data, regime=regime, start=start, end=end)
     return res, compute_metrics(res.equity, res.trades, cfg.bars_per_year)
 
 
@@ -88,10 +88,13 @@ class WalkForwardResult:
 
 def walk_forward(sd: StrategyDefinition, data: dict[str, pd.DataFrame], space: dict[str, list], folds: list[Fold],
                  cfg: BacktestConfig = BacktestConfig(), objective: Objective = Objective(), shortlist: int = 5,
-                 regime: pd.Series | None = None) -> WalkForwardResult:
+                 regime: pd.Series | None = None, progress=None) -> WalkForwardResult:
+    """`progress(done, total)` is called before each fold (it may raise to cancel)."""
     rows, chained, level = [], [], 1.0
     grid = param_grid(space)
     for i, f in enumerate(folds):
+        if progress is not None:
+            progress(i, len(folds))
         scored = []
         for p in grid:
             _, mt = run_window(sd.with_params(**p), data, cfg, *f.train, regime)
@@ -196,7 +199,7 @@ def neighborhood(value, rel: float = 0.15, steps: int = 5, integer: bool | None 
 def parameter_robustness(sd: StrategyDefinition, data, cfg: BacktestConfig, start, end,
                          space: dict[str, list] | None = None, objective: Objective = Objective(),
                          tolerance: float = 0.5, min_stability: float = 0.7, max_sharpness: float = 0.5,
-                         regime=None) -> RobustnessResult:
+                         regime=None, progress=None) -> RobustnessResult:
     """One-at-a-time scan of each parameter's neighbourhood (e.g. RSI 30..40 around 35).
 
     tolerance 0.5: a neighbour 'holds' if it keeps >=50% of the centre score -- a deliberate,
@@ -206,11 +209,15 @@ def parameter_robustness(sd: StrategyDefinition, data, cfg: BacktestConfig, star
     ints = sd.integer_params()
     space = space or {k: neighborhood(v, integer=k in ints) for k, v in sd.params.items()}
     nb, held, scores = {}, [], []
+    total, done = sum(len(v) for v in space.values()), 0
     for k, vals in space.items():
         nb[k] = []
         for v in vals:
+            done += 1
             if v == sd.params[k]:
                 continue
+            if progress is not None:
+                progress(done, total)
             _, mt = run_window(sd.with_params(**{k: v}), data, cfg, start, end, regime)
             sc = objective(mt)
             nb[k].append((float(v), sc))

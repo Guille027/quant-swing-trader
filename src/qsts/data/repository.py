@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import and_, delete, func, or_, select
 
@@ -79,6 +80,22 @@ class MarketDataRepository:
                     ["open", "high", "low", "close", "volume", "adj_factor", "source"])
         return len(rows)
 
+    def data_token(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> tuple:
+        """Cheap fingerprint of everything stored for a symbol (bars, corporate actions, earnings): it changes
+        whenever any of them is added or re-downloaded. Used to cache prepared research frames safely."""
+        try:
+            aid = self.asset_id(symbol)
+        except KeyError:
+            return ("missing",)
+        with self.sf() as s:
+            p = s.execute(select(func.count(), func.max(m.Price.ts), func.max(m.Price.ingested_at))
+                          .where(m.Price.asset_id == aid, m.Price.timeframe == Timeframe(timeframe).value)).one()
+            a = s.execute(select(func.count(), func.max(m.CorporateAction.ex_date), func.sum(m.CorporateAction.value))
+                          .where(m.CorporateAction.asset_id == aid)).one()
+            e = s.execute(select(func.count(), func.max(m.EarningsEvent.fetched_at))
+                          .where(m.EarningsEvent.asset_id == aid)).one()
+        return tuple(str(x) for x in (*p, *a, *e))
+
     def load_bars(self, symbol: str, timeframe: Timeframe = Timeframe.D1, start=None, end=None) -> pd.DataFrame:
         aid = self.asset_id(symbol)
         q = select(m.Price.ts, m.Price.open, m.Price.high, m.Price.low, m.Price.close, m.Price.volume,
@@ -90,7 +107,9 @@ class MarketDataRepository:
         with self.sf() as s:
             rows = s.execute(q.order_by(m.Price.ts)).all()
         df = pd.DataFrame(rows, columns=["ts", *OHLCV, "source"])
-        idx = pd.DatetimeIndex(pd.to_datetime(df["ts"])).as_unit("ns")
+        # naive UTC datetimes -> datetime64 in one vectorised step (pd.to_datetime on objects iterates in Python)
+        idx = pd.DatetimeIndex(np.array(df["ts"].to_numpy(), dtype="datetime64[ns]")) if len(df) else \
+            pd.DatetimeIndex(pd.to_datetime(df["ts"])).as_unit("ns")
         df.index = (idx.tz_localize("UTC") if idx.tz is None else idx).rename("ts")
         return df.drop(columns="ts").astype({c: "float64" for c in OHLCV})
 

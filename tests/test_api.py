@@ -1,3 +1,4 @@
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -240,3 +241,15 @@ def test_version_shutdown_and_no_cache(client):
     hit = []
     ctx.extra["shutdown"] = lambda: hit.append(1)
     assert c.post("/api/shutdown").json()["stopping"] and hit == [1]
+
+
+def test_research_frames_are_cached_until_the_data_changes(client):
+    c, ctx = client
+    a = ctx.research_frame("AAA")
+    a.loc[a.index[0], "close"] = -1.0  # a caller modifying its copy must not touch the cache
+    b = ctx.research_frame("AAA")
+    assert b["close"].iloc[0] > 0 and b.equals(ctx._research_frame("AAA"))
+    acts = pd.DataFrame({"ex_date": [b.index[-50]], "kind": ["dividend"], "value": [1.0]})
+    ctx.repo.store_corporate_actions("AAA", acts, "test")
+    after = ctx.research_frame("AAA")  # new corporate action -> recomputed (prices before it adjusted)
+    assert after["close"].iloc[0] < b["close"].iloc[0] and after.equals(ctx._research_frame("AAA"))
