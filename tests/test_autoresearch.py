@@ -182,6 +182,17 @@ def test_old_lenient_final_pass_is_rejudged_without_reopening_the_vault(sf, data
     assert r.rejudge_finals() == 0  # idempotent
 
 
+def test_reliability_is_measured_against_holding_the_same_stocks(sf, data, monkeypatch):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    r.seed_baselines()
+    monkeypatch.setattr(r, "passive_reference", lambda: {"sharpe": -1.0})  # holding loses: the bar is cash (Sharpe 0)
+    vs_cash = {x["id"]: x["dsr"] for x in r.leaderboard()["rows"]}
+    monkeypatch.setattr(r, "passive_reference", lambda: {"sharpe": 0.8})
+    vs_hold = {x["id"]: x["dsr"] for x in r.leaderboard()["rows"]}
+    common = [k for k in vs_cash if vs_cash[k] is not None and vs_hold.get(k) is not None]
+    assert common and all(vs_hold[k] < vs_cash[k] for k in common)
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition

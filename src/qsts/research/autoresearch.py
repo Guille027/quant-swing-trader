@@ -742,7 +742,10 @@ class AutoResearcher:
     # -------------------------------------------------------------- leaderboard
     def leaderboard(self, limit: int = 20) -> dict:
         n, var = self.trial_stats()
-        sr0 = expected_max_sharpe(max(n, 1), var)
+        passive = self.passive_reference()
+        # "No skill" for a long-only stock strategy is not a zero Sharpe: it is the Sharpe of simply holding the same
+        # stocks. Fiabilidad = P(true Sharpe > holding + what the best of n unskilled tries shows by luck).
+        sr0 = max(0.0, (passive.get("sharpe") or 0.0) / np.sqrt(self.bt.bars_per_year)) + expected_max_sharpe(max(n, 1), var)
         with self.sf() as s:
             finals = s.scalar(select(func.count()).select_from(m.OOSAccessLog)) or 0
         rows, seen, hidden = [], set(), 0
@@ -775,7 +778,7 @@ class AutoResearcher:
                                     "with_earnings": sum("earn_days_to" in v.columns for v in self.research.values())},
                        "earnings_rule": {"blackout_days": self.bt.earnings_blackout_days,
                                          "exit_before": self.bt.exit_before_earnings},
-                       "passive": self.passive_reference(),
+                       "passive": passive,
                        "by_status": by_status, "equivalents_hidden": hidden,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,
                        "rows": rows})

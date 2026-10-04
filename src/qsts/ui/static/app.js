@@ -17,6 +17,7 @@ function table(el, rows, cols) {
     rows.map(r => `<tr>${cols.map(c => `<td>${c[1](r)}</td>`).join("")}</tr>`).join("");
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let finalsUsed = null;  // final tests already done (shown in the final-test warning)
 
 // ---------------------------------------------------------------- tabs
 let autoTimer = null;
@@ -192,14 +193,14 @@ async function loadAuto(full) {
   if (full || st.cycles_done !== arLastCycles || (st.running && arPolls % 5 === 0)) { arLastCycles = st.cycles_done; await loadBoard(); }
 }
 async function loadBoard() {
-  let lb;
+  let lb; finalsUsed = null;
   try { lb = await api("/api/autoresearch/leaderboard?limit=25"); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
   $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
   $("#ar-board-note").innerHTML = `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
-    `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${lb.final_tests_used}</b>. ` +
+    `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${(finalsUsed = lb.final_tests_used)}</b>. ` +
     `<b>Pulsa una fila para ver su backtest.</b> ` +
     (lb.equivalents_hidden ? `Ocultadas ${lb.equivalents_hidden} variantes equivalentes (mismas operaciones). ` : "") +
-    `<b>Consistencia</b> = Sharpe del peor de los 3 tramos (más alto = mejor; por encima de 0,5 es bueno). <b>Fiabilidad</b> = probabilidad de que no sea suerte, teniendo en cuenta todas las pruebas hechas.`;
+    `<b>Consistencia</b> = Sharpe del peor de los 3 tramos (más alto = mejor; por encima de 0,5 es bueno). <b>Fiabilidad</b> = probabilidad de que supere de verdad a mantener las mismas acciones sin hacer nada (y no sea suerte), teniendo en cuenta todas las pruebas hechas.`;
   const pv = lb.passive || {};
   const kp = (l, v, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s || ""}</div></div>`;
   $("#ar-passive").innerHTML = kp("Consistencia", fmt(pv.consistency, 3), esc(pv.rules || "")) + kp("Sharpe", fmt(pv.sharpe)) +
@@ -294,7 +295,7 @@ function showDetail(r) {
   $("#ar-detail").classList.remove("muted"); $("#ar-detail").innerHTML = h;
 }
 window.finalTest = async (id) => {
-  if (!confirm("TEST FINAL: se probará esta estrategia con los datos guardados bajo llave.\n\nPara aprobar tiene que: ganar dinero, superar a mantener las mismas acciones sin hacer nada (Sharpe) y conservar al menos la mitad de su Sharpe de investigación.\n\nSolo se puede hacer UNA vez por estrategia y el resultado no se puede usar para seguir ajustándola. Úsalo solo con la estrategia que de verdad elegirías.\n\n¿Continuar?")) return;
+  if (!confirm((finalsUsed ? `Ya has hecho ${finalsUsed} test(s) final(es). Cuantos más hagas, más probable es que alguna estrategia apruebe por pura suerte.\n\n` : "") + "TEST FINAL: se probará esta estrategia con los datos guardados bajo llave.\n\nPara aprobar tiene que: ganar dinero, superar a mantener las mismas acciones sin hacer nada (Sharpe) y conservar al menos la mitad de su Sharpe de investigación.\n\nSolo se puede hacer UNA vez por estrategia y el resultado no se puede usar para seguir ajustándola. Úsalo solo con la estrategia que de verdad elegirías.\n\n¿Continuar?")) return;
   try { const f = await post(`/api/autoresearch/${id}/final-test`); arSel = id;
     alert(f.decision === "FINAL_PASS" ? "APROBADA en el test final. Pasa a estado CANDIDATE." : "SUSPENDE el test final. Se marca como rechazada.");
   } catch (e) { alert(e.message); }

@@ -69,3 +69,8 @@
     decay means the research result was mostly selection luck). The passive and SPY OOS figures are computed only when
     judging and never reach the search or the AI. Earlier passes are re-judged from their stored OOS metrics (the vault
     is not reopened); those that fail are moved to REJECTED and any active paper session of them is stopped.
+25. **Fiabilidad is measured against holding, not against zero.** The leaderboard DSR used the textbook null of a zero
+    Sharpe. A long-only stock strategy invested most of the time gets a clearly positive Sharpe from the market alone,
+    so a strategy no better than holding its own stocks could show ~80% "reliability". The null is now the Sharpe of
+    equal-weight buy & hold of the same stocks over the research window (floored at 0 = cash) plus the expected best
+    Sharpe of n unskilled tries: Fiabilidad = P(it truly beats holding the same stocks, after all the trials).
