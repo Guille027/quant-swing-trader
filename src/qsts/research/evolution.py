@@ -40,6 +40,8 @@ class EvolutionConfig:
     divergence_penalty: float = 0.5  # Sharpe units per unit of |train - val| gap
     direction: str = "long"
     seed: int = 0
+    init_hold_choices: tuple = (5, 10, 20)   # max holding period (bars) sampled for new genomes
+    hold_choices: tuple = (3, 5, 10, 15, 20)  # ... and used by mutation
     objective: Objective = field(default_factory=Objective)
 
 
@@ -100,7 +102,7 @@ class EvolutionEngine:
         k = int(self.rng.integers(1, self.cfg.max_conditions + 1))
         conds = tuple(self._rand_condition(params) for _ in range(k))
         return self._build(conds, params, stop_mult=float(self.rng.choice([1.5, 2.0, 2.5, 3.0])),
-                           tp=float(self.rng.choice([0.0, 1.5, 2.0, 3.0])), hold=int(self.rng.choice([5, 10, 20])))
+                           tp=float(self.rng.choice([0.0, 1.5, 2.0, 3.0])), hold=int(self.rng.choice(list(self.cfg.init_hold_choices))))
 
     def _build(self, conds, params, stop_mult, tp, hold) -> StrategyDefinition:
         used = {c.right.value[1:] for c in conds if isinstance(c.right.value, str)}
@@ -118,7 +120,7 @@ class EvolutionEngine:
     def mutate(self, sd: StrategyDefinition) -> StrategyDefinition:
         conds, params = list(self._conds(sd)), dict(sd.params)
         stop, tp = float(sd.stop.mult), (0.0 if sd.take_profit.kind == "none" else float(sd.take_profit.value))
-        hold = int(sd.max_holding_bars or 10)
+        hold = int(sd.max_holding_bars or max(self.cfg.hold_choices))
         r = self.rng.random()
         if r < 0.4 and params:  # shift a threshold to a neighbouring train quantile
             c = conds[int(self.rng.integers(len(conds)))]
@@ -137,7 +139,7 @@ class EvolutionEngine:
         elif r < 0.9:
             stop = float(np.clip(stop + self.rng.choice([-0.5, 0.5]), 1.0, 4.0))
         else:
-            hold = int(self.rng.choice([3, 5, 10, 15, 20]))
+            hold = int(self.rng.choice(list(self.cfg.hold_choices)))
             tp = float(self.rng.choice([0.0, 1.5, 2.0, 3.0]))
         return self._build(tuple(conds), params, stop, tp, hold)
 
@@ -152,7 +154,8 @@ class EvolutionEngine:
         if not conds:
             return copy.deepcopy(a)
         return self._build(tuple(conds), params, float(a.stop.mult),
-                           0.0 if b.take_profit.kind == "none" else float(b.take_profit.value), int(b.max_holding_bars or 10))
+                           0.0 if b.take_profit.kind == "none" else float(b.take_profit.value),
+                           int(b.max_holding_bars or max(self.cfg.hold_choices)))
 
     # ------------------------------------------------------------------ evaluation
     def evaluate(self, sd: StrategyDefinition) -> Individual:

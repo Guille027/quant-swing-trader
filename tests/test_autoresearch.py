@@ -189,3 +189,31 @@ def test_passive_benchmark_is_a_validation_gate(sf, data, monkeypatch):
     with pytest.raises(ValueError):
         r.final_test(vid)
     assert count(sf, m.OOSAccessLog) == 0
+
+
+def test_swing_horizon_enforced(sf, data):
+    r = researcher(sf, data)
+    r.run_cycle(1)
+    with sf() as s:
+        rows = s.scalars(select(m.ResearchCandidate).where(m.ResearchCandidate.origin != "baseline")).all()
+    assert rows and all(row.definition["max_holding_bars"] is not None and
+                        1 <= int(row.definition["max_holding_bars"]) <= CFG.max_holding_days for row in rows)
+    no_limit = StrategyDefinition(name="hold_forever", family="t", hypothesis="h",
+                                  entry_long=(Condition(F("rsi", n=14), "<", V(40.0)),), stop=StopRule("atr", 14, 2.0),
+                                  take_profit=TakeProfitRule("none"))
+    assert r.holding_ok(no_limit) is False
+    assert "holding_period" in r.ai_context()
+
+
+def test_swing_horizon_enforced(sf, data):
+    r = researcher(sf, data)
+    r.run_cycle(1)
+    with sf() as s:
+        rows = s.scalars(select(m.ResearchCandidate).where(m.ResearchCandidate.origin != "baseline")).all()
+    assert rows and all(row.definition["max_holding_bars"] is not None and
+                        1 <= int(row.definition["max_holding_bars"]) <= CFG.max_holding_days for row in rows)
+    no_limit = StrategyDefinition(name="hold_forever", family="t", hypothesis="h",
+                                  entry_long=(Condition(F("rsi", n=14), "<", V(40.0)),), stop=StopRule("atr", 14, 2.0),
+                                  take_profit=TakeProfitRule("none"))
+    assert r.holding_ok(no_limit) is False and CFG.max_holding_days == 20
+    assert "holding_period" in r.ai_context()

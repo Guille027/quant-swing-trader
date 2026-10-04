@@ -54,6 +54,7 @@ class AutoResearchConfig:
     min_trades: int = 30
     min_block_trades: int = 5
     complexity_penalty: float = 0.03
+    max_holding_days: int = 20      # swing trading: every position is closed after at most this many sessions
     population: int = 20
     generations: int = 4
     elites_from_history: int = 6
@@ -316,8 +317,20 @@ class AutoResearcher:
             self._engine = _ConsistencyEvolution(
                 self, self.research, (self.start, self.end), self.bt,
                 EvolutionConfig(population=self.cfg.population, generations=self.cfg.generations, seed=self.cfg.seed,
+                                init_hold_choices=self._holds(), hold_choices=self._holds(),
                                 complexity_penalty=self.cfg.complexity_penalty))
         return self._engine
+
+    def _holds(self) -> tuple:
+        return tuple(h for h in (2, 3, 5, 7, 10, 15, 20) if h <= self.cfg.max_holding_days) or (self.cfg.max_holding_days,)
+
+    def holding_ok(self, sd: StrategyDefinition) -> bool:
+        if sd.max_holding_bars is None:
+            return False
+        try:
+            return 1 <= int(sd.resolve(sd.max_holding_bars)) <= self.cfg.max_holding_days
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def seed_baselines(self) -> None:
         for sd in (momentum_baseline(), trend_baseline()):
@@ -382,11 +395,15 @@ class AutoResearcher:
             failures[key] = failures.get(key, 0) + 1
         return {"goal": ("Find LONG-ONLY daily swing-trading rules for these US large caps that are CONSISTENT: the "
                          "score is the WORST annualised Sharpe across 3 consecutive sub-periods of the research window, "
-                         "minus 0.03 per complexity point. Few rules, few parameters, at least 30 trades."),
+                         "minus 0.03 per complexity point. Few rules, few parameters, at least 30 trades. Every trade "
+                         f"must close within {self.cfg.max_holding_days} trading days."),
                 "universe": sorted(self.research), "research_period": [str(self.start.date()), str(self.end.date())],
                 "best_so_far": best, "recent_failure_reasons": failures, "trials_so_far": n,
                 "passive_benchmark_to_beat": {k: self.passive_reference()[k] for k in ("consistency", "sharpe")},
                 "your_last_rejected_proposals": self._last_ai_rejections[-5:],
+                "holding_period": f"swing trading: max_holding_bars is REQUIRED, an integer from 1 to "
+                                  f"{self.cfg.max_holding_days} (trading days), 1-10 preferred; exits may come earlier "
+                                  "via stop/target/exit rules",
                 "rules": "direction must be 'long'; operands are objects like {\"feature\": \"rsi\", \"params\": {\"n\": 14}}"
                          " or {\"value\": 30}; never a bare string."}
 
@@ -406,6 +423,10 @@ class AutoResearcher:
             self.check_stop()
             if sd.direction != "long":
                 self.log(f"IA: '{sd.name}' descartada (solo se admiten estrategias de compra)")
+                continue
+            if not self.holding_ok(sd):
+                self._last_ai_rejections.append(f"{sd.name}: max_holding_bars must be 1..{self.cfg.max_holding_days}")
+                self.log(f"IA: '{sd.name}' descartada (no cierra en {self.cfg.max_holding_days} días como máximo)")
                 continue
             fit, met, new = self.evaluate_and_store(sd, "ai", cycle)
             self.log(f"IA: '{sd.name}' → " + (f"consistencia {fit:.3f}" if fit is not None else
@@ -585,6 +606,7 @@ class AutoResearcher:
                          "consistency": r.fitness, "sharpe": mt.get("sharpe"), "cagr": mt.get("cagr"),
                          "max_drawdown": mt.get("max_drawdown"), "n_trades": mt.get("n_trades"),
                          "pct_positive_years": mt.get("pct_positive_years"), "worst_year": mt.get("worst_year"),
+                         "avg_days": mt.get("avg_trade_bars"),
                          "blocks": mt.get("blocks"), "dsr": dsr, "status": r.status, "strategy_id": r.strategy_id,
                          "validation": r.validation, "final": r.final})
         R = m.ResearchCandidate
