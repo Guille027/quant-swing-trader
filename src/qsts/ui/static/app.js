@@ -67,7 +67,7 @@ async function loadHome() {
   try {
     const pv = await api("/api/paper/summary");
     $("#step-paper .body").innerHTML = pv.active
-      ? `<span class="good">En marcha</span> desde el ${pv.start}: ${pct(pv["return"])} sobre ${fmt(pv.capital)} ficticios` +
+      ? `<span class="good">En marcha</span> desde el ${pv.start}: ${pct(pv["return"])} sobre ${fmt(pv.capital)} ${pv.currency === "EUR" ? "€" : "$"}` +
         (pv.last_day ? ` (último día registrado: ${pv.last_day}). Pulsa ⟳ Actualizar en Simulación cada día.` : ".")
       : (pv.candidates ? `Tienes <b>${pv.candidates}</b> estrategia(s) aprobada(s) en el test final: ya puedes simularla.`
         : "Disponible cuando una estrategia apruebe el test final. La app te dirá qué comprar en cada apertura (con dinero ficticio).");
@@ -329,8 +329,14 @@ $("#ar-stop").onclick = async () => { await post("/api/autoresearch/stop"); $("#
 // ---------------------------------------------------------------- paper trading
 let paperChart = null, paperSeries = [];
 const ACTION = { COMPRAR: '<span class="buy">COMPRAR</span>', VENDER: '<span class="sell">VENDER</span>' };
+let paperCur = "USD";
+const amount = (x) => x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money = (x) => x === null || x === undefined || Number.isNaN(x) ? "—" : amount(x) + (paperCur === "EUR" ? " €" : " $");
+const usd = (x) => x === null || x === undefined || Number.isNaN(x) ? "—" : amount(x) + " $";
 async function loadPaper() {
+  loadTelegram();
   let v; try { v = await api("/api/paper"); } catch (e) { $("#paper-msg").textContent = e.message; return; }
+  paperCur = v.currency || "USD";
   $("#paper-on").style.display = v.active ? "block" : "none"; $("#paper-none").style.display = v.active ? "none" : "block";
   if (!v.active) {
     $("#paper-cands").innerHTML = !v.candidates.length
@@ -338,32 +344,35 @@ async function loadPaper() {
          <p class="muted">Es a propósito: simular una estrategia que no ha pasado el examen con datos nuevos no tendría sentido.</p>`
       : `<p>Estrategias aprobadas en el test final:</p>` + v.candidates.map(c => `<div class="card"><p><b>${esc(c.rules)}</b></p>
           <p class="muted">Test final: ${c.final ? `rentabilidad ${pct(c.final.oos?.total_return)} · Sharpe ${fmt(c.final.oos?.sharpe)} · caída máx. ${pct(c.final.oos?.max_drawdown)}` : "—"}</p>
-          <div class="row"><label>Capital ficticio <input id="cap-${esc(c.strategy_id)}" value="10000" size="8"></label>
+          <div class="row"><label>Tu capital <input id="cap-${esc(c.strategy_id)}" placeholder="p. ej. 2363" size="8"></label>
+          <select id="cur-${esc(c.strategy_id)}"><option value="EUR" selected>euros (€)</option><option value="USD">dólares ($)</option></select>
           <button class="primary" onclick="startPaper('${esc(c.strategy_id)}')">▶ Empezar simulación</button></div></div>`).join("");
     return;
   }
-  $("#paper-rules").innerHTML = `<b>${esc(v.session.rules)}</b><br><span class="muted">Desde el ${v.session.start} · ${v.session.n_symbols} acciones · capital ficticio ${fmt(v.session.capital)}</span>`;
+  $("#paper-rules").innerHTML = `<b>${esc(v.session.rules)}</b><br><span class="muted">Desde el ${v.session.start} · ${v.session.n_symbols} acciones · capital ${money(v.session.capital)}` +
+    (paperCur === "EUR" && v.fx ? ` · cambio de hoy 1 € = ${fmt(v.fx, 4)} $ (los precios de las acciones están en dólares)` : "") + `</span>`;
   $("#paper-stale").innerHTML = v.stale_sessions > 0 ? `<span class="warn">Faltan ${v.stale_sessions} día(s) de precios: pulsa ⟳ Actualizar.</span>` : "";
   if (v.revisions && v.revisions.days_changed) $("#paper-stale").innerHTML += ` <span class="warn">Yahoo ha corregido datos antiguos: ${v.revisions.days_changed} día(s) del diario ya no coinciden exactamente.</span>`;
   const k = (l, x, sub) => `<div class="kpi"><div class="l">${l}</div><div class="v">${x}</div><div class="s">${sub || ""}</div></div>`;
-  $("#paper-kpis").innerHTML = k("Valor actual", fmt(v.equity), `efectivo ${fmt(v.cash)}`) +
-    k("Ganancia", `<span class="${v.pnl >= 0 ? "up" : "down"}">${fmt(v.pnl)}</span>`, pct(v["return"])) +
+  $("#paper-kpis").innerHTML = k("Valor actual", money(v.equity), `sin invertir ${money(v.cash)}`) +
+    k("Ganancia", `<span class="${v.pnl >= 0 ? "up" : "down"}">${money(v.pnl)}</span>`, pct(v["return"]) +
+      (paperCur === "EUR" ? ` · en dólares ${pct(v.return_usd)}` : "")) +
     k("Mercado (SPY) en el mismo periodo", v.benchmark ? pct(v.benchmark["return"]) : "—") +
     k("Días de simulación", v.days) + k("Operaciones cerradas", v.n_closed, v.win_rate == null ? "" : `ganadoras ${pct(v.win_rate)}`) +
     k("Posiciones abiertas", v.positions.length);
   $("#paper-asof").textContent = v.as_of;
   $("#paper-next").textContent = v.next_open ? "· " + new Date(v.next_open).toLocaleString(undefined, { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }) + " (tu hora)" : "";
-  table($("#paper-orders"), v.orders, [["", o => ACTION[o.action]], ["Acción", o => o.symbol], ["Cantidad aprox.", o => fmt(o.qty, 3)],
-    ["Importe aprox.", o => fmt(o.approx_value)], ["Precio último cierre", o => fmt(o.last_close)], ["Stop aprox.", o => fmt(o.approx_stop)],
-    ["Objetivo aprox.", o => fmt(o.approx_target)],
+  table($("#paper-orders"), v.orders, [["", o => ACTION[o.action]], ["Acción", o => o.symbol], ["Acciones aprox.", o => fmt(o.qty, 3)],
+    ["Importe aprox.", o => `<b>${money(o.approx_value)}</b>`], ["Precio último cierre", o => usd(o.last_close)], ["Stop aprox.", o => usd(o.approx_stop)],
+    ["Objetivo aprox.", o => usd(o.approx_target)],
     ["Resultados", o => o.earnings_in == null ? '<span class="muted">—</span>' : `en ${o.earnings_in} sesión(es)`],
     ["Motivo", o => o.action === "VENDER" ? (EXIT[o.reason] || o.reason)
       : o.likely === false ? '<span class="muted">señal, pero probablemente sin efectivo suficiente</span>'
       : o.partial ? "señal de entrada (parcial: se acaba el efectivo)" : "señal de entrada"]]);
   if (!v.orders.length) $("#paper-orders").innerHTML = `<tr><td class="muted">Nada que hacer en la próxima apertura (NO TRADE es un resultado normal).</td></tr>`;
-  table($("#paper-positions"), v.positions, [["Acción", p => p.symbol], ["Desde", p => p.entry_ts], ["Cantidad", p => fmt(p.qty, 3)],
-    ["Precio compra", p => fmt(p.entry_price)], ["Último cierre", p => fmt(p.last_close)], ["Stop", p => fmt(p.stop)], ["Objetivo", p => fmt(p.target)],
-    ["Resultado", p => `<span class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${fmt(p.unrealized_pnl)}</span>`], ["Días", p => p.bars_held],
+  table($("#paper-positions"), v.positions, [["Acción", p => p.symbol], ["Desde", p => p.entry_ts], ["Acciones", p => fmt(p.qty, 3)],
+    ["Valor", p => money(p.market_value)], ["Precio compra", p => usd(p.entry_price)], ["Último cierre", p => usd(p.last_close)], ["Stop", p => usd(p.stop)], ["Objetivo", p => usd(p.target)],
+    ["Resultado", p => `<span class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${money(p.unrealized_pnl)} (${pct(p.pnl_pct)})</span>`], ["Días", p => p.bars_held],
     ["Próximos resultados", p => p.earnings_in == null ? '<span class="muted">—</span>' : `en ${p.earnings_in} sesión(es)`]]);
   if (!paperChart) paperChart = LightweightCharts.createChart($("#paper-chart"), opts());
   paperSeries.forEach(x => paperChart.removeSeries(x)); paperSeries = [];
@@ -371,19 +380,42 @@ async function loadPaper() {
   const sc = paperChart.addLineSeries({ color: "#4c8dff", lineWidth: 2, title: "simulación" }); sc.setData(v.curve); paperSeries.push(sc);
   paperChart.timeScale().fitContent();
   table($("#paper-closed"), v.closed.slice().reverse(), [["Acción", t => t.symbol], ["Compra", t => t.entry], ["Venta", t => t.exit],
-    ["Precio compra", t => fmt(t.entry_price)], ["Precio venta", t => fmt(t.exit_price)],
-    ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${fmt(t.pnl)}</span>`], ["Motivo", t => EXIT[t.reason] || t.reason]]);
+    ["Precio compra", t => usd(t.entry_price)], ["Precio venta", t => usd(t.exit_price)],
+    ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${money(t.pnl)} (${pct(t.pnl_pct)})</span>`], ["Motivo", t => EXIT[t.reason] || t.reason]]);
   const j = await api("/api/paper/journal");
-  table($("#paper-journal"), j.slice().reverse(), [["Día", d => d.day], ["Valor", d => fmt(d.equity)], ["Posiciones", d => d.n_positions],
+  table($("#paper-journal"), j.slice().reverse(), [["Día", d => d.day], ["Valor", d => money(d.equity)], ["Posiciones", d => d.n_positions],
     ["Órdenes para la apertura siguiente", d => d.orders == null ? '<span class="muted">(día recuperado al ponerse al día)</span>'
       : d.orders.length ? d.orders.map(o => `${o.action} ${o.symbol}`).join(", ") : "ninguna"]]);
 }
 window.startPaper = async (sid) => {
-  const cap = +($("#cap-" + CSS.escape(sid)) || {}).value || 10000;
-  if (!confirm(`Empezar a simular con ${cap} de dinero FICTICIO desde hoy. No se envía nada a ningún bróker. ¿Continuar?`)) return;
-  try { await post("/api/paper/start", { strategy_id: sid, capital: cap }); } catch (e) { alert(e.message); }
+  const cap = +String(($("#cap-" + CSS.escape(sid)) || {}).value || "").replace(",", ".");
+  const cur = ($("#cur-" + CSS.escape(sid)) || {}).value || "EUR";
+  if (!(cap > 0)) { alert("Escribe tu capital (por ejemplo 2363)."); return; }
+  if (!confirm(`Empezar a simular con ${fmt(cap)} ${cur === "EUR" ? "€" : "$"} desde hoy.\n\nLa app te dirá cuánto meter en cada acción, pero NO opera: no se envía nada a ningún bróker. ¿Continuar?`)) return;
+  try { await post("/api/paper/start", { strategy_id: sid, capital: cap, currency: cur }); } catch (e) { alert(e.message); }
   loadPaper();
 };
+// ---------------------------------------------------------------- Telegram
+async function loadTelegram() {
+  let t; try { t = await api("/api/telegram"); } catch (e) { $("#tg-status").textContent = e.message; return; }
+  $("#tg-status").innerHTML = t.configured ? `<span class="good">✔ Conectado</span> (chat ${esc(t.chat_id)}). Estado del aviso diario: ${esc(t.state)}.`
+    : t.token_set ? '<span class="bad">Falta el paso 3–4</span>: abre tu bot, pulsa Iniciar y luego "Detectar mi chat".'
+    : '<span class="bad">No configurado.</span> Sigue estos pasos (una sola vez):';
+  $("#tg-setup").style.display = t.configured ? "none" : "block";
+  $("#tg-test").disabled = $("#tg-report").disabled = !t.configured;
+  table($("#tg-log"), t.last, [["Enviado", n => n.sent_at], ["Día", n => n.day], ["Tipo", n => ({ daily: "diario", manual: "manual" }[n.kind] || n.kind)],
+    ["", n => n.ok ? '<span class="good">✔</span>' : `<span class="bad">✘ ${esc(n.error || "")}</span>`]]);
+  if (!t.last.length) $("#tg-log").innerHTML = "";
+}
+const tgDo = async (path, body, okMsg) => {
+  $("#tg-msg").textContent = "…";
+  try { const r = await post(path, body); $("#tg-msg").textContent = okMsg(r); } catch (e) { $("#tg-msg").textContent = e.message; }
+  loadTelegram();
+};
+$("#tg-save").onclick = () => tgDo("/api/telegram/token", { token: $("#tg-token").value }, r => { $("#tg-token").value = ""; return `Token guardado (bot @${r.bot}). Ahora el paso 3.`; });
+$("#tg-detect").onclick = () => tgDo("/api/telegram/detect", {}, r => `Chat detectado: ${r.name}. Pulsa "Enviar mensaje de prueba".`);
+$("#tg-test").onclick = () => tgDo("/api/telegram/test", {}, () => "Enviado: mira Telegram.");
+$("#tg-report").onclick = () => tgDo("/api/telegram/report", {}, r => `Resumen del ${r.day} enviado (${r.messages} mensaje/s).`);
 $("#paper-stop").onclick = async () => {
   const r = prompt("¿Detener la simulación? Motivo:", "detenida por el usuario"); if (r === null) return;
   try { await post("/api/paper/stop", { reason: r }); } catch (e) { alert(e.message); }

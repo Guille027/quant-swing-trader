@@ -1,4 +1,5 @@
 """Paper trading = the backtest engine run forward. SYNTHETIC random-walk data only."""
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -95,3 +96,54 @@ def test_paper_uses_the_rules_the_strategy_was_validated_with(sf):
         cfg = s.get(m.PaperSession, sid).config
     assert cfg["earnings_blackout_days"] == 3 and cfg["exit_before_earnings"] is True and cfg["initial_capital"] == 7000
     assert pt.view(until="2022-06-10")["earnings_rule"] == {"blackout_days": 3, "exit_before": True}
+
+
+def _fx():
+    """SYNTHETIC euro/dollar rate: 1.10 until July 2022, then 1.20."""
+    idx = DATA["AAA"].index
+    return pd.Series(np.where(idx < pd.Timestamp("2022-07-01", tz="UTC"), 1.10, 1.20), index=idx)
+
+
+def test_eur_account_sizes_in_euros(sf):
+    candidate(sf)
+    with pytest.raises(PaperError):  # no exchange rate stored yet
+        PaperTrading(sf, load).start("s1", 2363, currency="EUR", asof="2022-06-01 21:00")
+    pt = PaperTrading(sf, load, fx=_fx)
+    with pytest.raises(PaperError):
+        pt.start("s1", 2363, currency="GBP", asof="2022-06-01 21:00")
+    pt.start("s1", 2363, currency="EUR", asof="2022-06-01 21:00")
+    v0 = pt.view(until="2022-06-01 21:00")
+    assert v0["currency"] == "EUR" and v0["equity"] == pytest.approx(2363) and v0["fx"] == pytest.approx(1.10)
+    for o in v0["orders"]:
+        assert o["approx_value"] == pytest.approx(o["approx_value_usd"] / 1.10)
+    assert sum(o["approx_value"] for o in v0["orders"] if o["action"] == "COMPRAR") <= 2363 + 1e-6
+    v1 = pt.view(until="2022-09-30")
+    # the engine runs in dollars (2363 * 1.10); euros at each day's rate
+    assert v1["equity"] == pytest.approx(2363 * 1.10 * (1 + v1["return_usd"]) / 1.20)
+    assert v1["curve"][0]["value"] == pytest.approx(2363) and pt.summary()["currency"] == "EUR"
+    assert pt.journal()[0]["equity"] == pytest.approx(2363)
+
+
+def test_daily_telegram_report_once_per_close(sf):
+    from types import SimpleNamespace
+    from qsts.app.daily import DailyReporter
+    candidate(sf)
+    pt = PaperTrading(sf, load)
+    sent = []
+    tg = SimpleNamespace(send=lambda text: sent.append(text) or 1)
+    runner = SimpleNamespace(state=SimpleNamespace(running=False), calls=[])
+    runner.start = lambda kind, symbols, incremental: runner.calls.append(symbols) or True
+    last = {"bar": pd.Timestamp("2022-12-29", tz="UTC")}
+    rep = DailyReporter(sf, lambda: pt, lambda: tg, lambda: runner, lambda s: last["bar"], delay_min=45)
+    now = pd.Timestamp("2022-12-30 23:00", tz="UTC")  # after the NYSE close of 2022-12-30 + 45 min
+    assert rep.tick(now).startswith("sin simulación") and not sent
+    pt.start("s1", 10_000, asof="2022-06-01 21:00")
+    assert DailyReporter(sf, lambda: pt, lambda: None).tick(now) == "Telegram no configurado"
+    assert rep.tick(now).startswith("descargando") and runner.calls and "SPY" in runner.calls[0] and not sent
+    assert rep.tick(now).startswith("esperando")  # retried only every few minutes
+    last["bar"] = pd.Timestamp("2022-12-30", tz="UTC")
+    assert rep.tick(now) == "aviso del 2022-12-30 enviado" and sent
+    assert any("QSTS · cierre del viernes 30 dic" in t for t in sent)
+    n = len(sent)
+    assert rep.tick(now) == "aviso del 2022-12-30 ya enviado" and len(sent) == n  # never twice
+    assert rep.tick(pd.Timestamp("2022-12-31 12:00", tz="UTC")) == "aviso del 2022-12-30 ya enviado"  # weekend

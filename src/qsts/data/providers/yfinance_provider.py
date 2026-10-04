@@ -96,6 +96,16 @@ class YFinanceProvider(MarketDataProvider):
                             "surprise_pct": col("Surprise(%)")})
         return out.drop_duplicates("announced_at").sort_values("announced_at").reset_index(drop=True)
 
+    def get_fx(self, pair: str = "EURUSD=X", period: str = "3mo") -> pd.Series:
+        """Daily closes of a Yahoo FX pair (EURUSD=X = US dollars per euro), indexed by date (UTC midnight)."""
+        h = self._ticker(pair).history(period=period, interval="1d", auto_adjust=False)
+        if h is None or h.empty:
+            return pd.Series(dtype=float)
+        idx = pd.DatetimeIndex(h.index)
+        local = idx if idx.tz is None else idx.tz_localize(None)  # the pair's own trading date
+        days = local.normalize().tz_localize("UTC")
+        return pd.Series(h["Close"].to_numpy(dtype=float), index=days).dropna()
+
     def get_corporate_actions(self, symbol: str) -> pd.DataFrame:
         a = self._yahoo_actions(symbol)
         if a.empty:

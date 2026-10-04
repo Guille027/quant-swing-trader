@@ -15,7 +15,8 @@ python -m pytest
 ## Desktop app (easiest)
 `python -m qsts.cli desktop` → tab **Inicio** guides you: 1 · Datos (download S&P 500 stocks), 2 · Investigación IA
 (automatic search), click a ranked strategy to see its backtest, Test final, then 3 · Simulación (paper trading:
-what it would buy at the next open, with fictitious money).
+what it would buy at the next open, with your capital in euros or dollars; nothing is sent to a broker). Optional:
+a Telegram bot sends the next-open orders every evening (set up in 3 · Simulación → Avisos por Telegram).
 
 ## Windows: open it from the desktop
 Once: double-click **`Crear acceso directo.bat`** in the project folder (or run `python -m qsts.cli shortcut`).

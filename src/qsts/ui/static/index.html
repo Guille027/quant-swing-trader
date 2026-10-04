@@ -106,7 +106,9 @@
       <li><b>Cuándo decide:</b> con el <b>cierre</b> de la bolsa de Nueva York (normalmente 22:00 hora de España). <b>Cuándo ejecuta:</b> en la <b>apertura</b> siguiente (normalmente 15:30).
         Por eso funciona <b>con el mercado cerrado</b>: no usa precios de premercado. Si la abres durante la sesión, verás lo que decidió con el cierre de ayer.</li>
       <li><b>Rutina diaria:</b> abre la app después de las 22:00 o por la mañana, pulsa <b>⟳ Actualizar</b> y mira <b>"Qué hará en la próxima apertura"</b>. Si un día no la abres, al actualizar se pone al día sola.</li>
-      <li>Déjala varias semanas o meses y compara con el backtest. Solo si se parece, tendría sentido pensar en dinero real (aún no disponible).</li>
+      <li><b>Con tu dinero:</b> al empezar, pon tu capital en <b>euros</b>: te dirá cuántos euros meter en cada acción (Trading 212 permite comprar fracciones de acción por importe).</li>
+      <li><b>Telegram:</b> conecta tu bot abajo y cada tarde (o al abrir la app, si estaba cerrada) recibirás qué comprar o vender en la próxima apertura.</li>
+      <li>Déjala varias semanas o meses y compara con el backtest. La app nunca opera por ti: tú decides si copias las órdenes.</li>
     </ul>
   </div>
   <div id="paper-none" style="display:none">
@@ -126,6 +128,24 @@
       <p class="muted"><span class="sw" style="background:#4c8dff"></span> simulación &nbsp; <span class="sw" style="background:#8b93a1"></span> comprar y mantener SPY desde el mismo día</p></div>
     <div class="card"><h3>Operaciones cerradas</h3><div class="scroll"><table id="paper-closed"></table></div></div>
     <div class="card"><h3>Diario (lo que dijo cada tarde)</h3><div class="scroll"><table id="paper-journal"></table></div></div>
+  </div>
+  <div class="card" id="tg-card"><h3>Avisos por Telegram</h3>
+    <p id="tg-status" class="muted">Cargando…</p>
+    <div id="tg-setup">
+      <ol>
+        <li>En Telegram busca <b>@BotFather</b>, escríbele <code>/newbot</code>, ponle un nombre y un usuario que acabe en <code>bot</code>. Te dará un <b>token</b> (números:letras).</li>
+        <li>Pega el token aquí: <input id="tg-token" type="password" size="48" placeholder="123456789:ABC…" autocomplete="off">
+          <button id="tg-save">Guardar token</button> <span class="muted small">(se guarda solo en tu ordenador, en el archivo .env)</span></li>
+        <li>Abre tu bot en Telegram (el enlace te lo da BotFather), pulsa <b>Iniciar</b> y escríbele cualquier cosa.</li>
+        <li><button id="tg-detect">Detectar mi chat</button></li>
+      </ol>
+    </div>
+    <div class="row"><button id="tg-test">Enviar mensaje de prueba</button> <button id="tg-report">Enviar ahora el resumen de hoy</button>
+      <span id="tg-msg" class="muted"></span></div>
+    <p class="muted small">Cada día, unos minutos después del cierre de Nueva York (≈ 22:45 hora de España), la app descarga los precios, recalcula la simulación y te envía un mensaje.
+      El ordenador tiene que estar encendido con la app abierta; si no lo está, el mensaje llega al abrirla (basta antes de las 15:30, que es cuando se ejecutan las órdenes).
+      Los stops y objetivos se tocan <i>durante</i> el día: ponlos en Trading 212 como órdenes stop y límite al comprar; el mensaje de la tarde te dirá si alguno se ejecutó.</p>
+    <div class="scroll"><table id="tg-log"></table></div>
   </div>
 </section>
 

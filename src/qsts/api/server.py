@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
@@ -14,11 +15,13 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from sqlalchemy import select
 
 from qsts.app.context import AppContext
-from qsts.app.datajobs import DataJobRunner, sample_symbols
+from qsts.app.daily import DailyReporter
+from qsts.app.datajobs import FX_SERIES, DataJobRunner, sample_symbols
+from qsts.app.envfile import set_env_values
 from qsts.app.scanner import MarketScanner, StrategySlot, render_report
 from qsts.backtest.engine import BacktestConfig, CostModel
 from qsts.core.modes import ModeTransitionError, SystemMode
@@ -29,6 +32,7 @@ from qsts.data.universe import UniverseList, fetch_sp500
 from qsts.db import models as m
 from qsts.execution.paper import PaperError, PaperTrading
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
+from qsts.notify.telegram import Telegram, TelegramError
 from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
 from qsts.research.validation import OOSAccessDenied
 from qsts.risk.engine import PortfolioState
@@ -97,6 +101,11 @@ class IngestBody(BaseModel):
 class PaperStartBody(BaseModel):
     strategy_id: str
     capital: float = 10_000.0
+    currency: str = "USD"
+
+
+class TelegramTokenBody(BaseModel):
+    token: str
 
 
 class PaperStopBody(BaseModel):
@@ -121,7 +130,16 @@ def portfolio_state(ctx: AppContext) -> PortfolioState:
 
 
 def create_app(ctx: AppContext) -> FastAPI:
-    app = FastAPI(title="QSTS", docs_url="/api/docs")
+    @asynccontextmanager
+    async def lifespan(_app):
+        if ctx.extra.get("daily_reporter_autostart", True):
+            _reporter().start()  # evening Telegram message of the paper-trading session
+        yield
+        rep = ctx.extra.get("daily_reporter")
+        if rep is not None:
+            rep.stop()
+
+    app = FastAPI(title="QSTS", docs_url="/api/docs", lifespan=lifespan)
     if "code_version" not in ctx.extra:
         from qsts.research.experiments import code_version
         ctx.extra["code_version"] = code_version()
@@ -402,7 +420,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     def _paper() -> PaperTrading:
         p = ctx.extra.get("paper")
         if p is None:
-            p = ctx.extra["paper"] = PaperTrading(ctx.sf, ctx.research_frame, ctx.settings.benchmark)
+            p = ctx.extra["paper"] = PaperTrading(ctx.sf, ctx.research_frame, ctx.settings.benchmark,
+                                                  fx=lambda: ctx.repo.fx_series(FX_SERIES))
         return p
 
     @app.get("/api/paper")
@@ -420,7 +439,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.post("/api/paper/start")
     def paper_start(body: PaperStartBody):
         try:
-            return {"session_id": _paper().start(body.strategy_id, body.capital)}
+            return {"session_id": _paper().start(body.strategy_id, body.capital, currency=body.currency)}
         except (PaperError, LifecycleError) as e:
             raise HTTPException(400, str(e))
 
@@ -431,6 +450,84 @@ def create_app(ctx: AppContext) -> FastAPI:
         except (PaperError, LifecycleError) as e:
             raise HTTPException(400, str(e))
         return {"stopped": True}
+
+    # ------------------------------------------------------------------ Telegram messages of the simulation
+    def _tg_client(token: str | None = None, with_chat: bool = True):
+        tok = token or (ctx.settings.telegram_bot_token.get_secret_value() if ctx.settings.telegram_bot_token else None)
+        if not tok:
+            return None
+        chat = ctx.settings.telegram_chat_id if with_chat else None
+        return (ctx.extra.get("telegram_factory") or Telegram)(tok, chat)
+
+    def _telegram():
+        return _tg_client() if ctx.settings.telegram_chat_id else None
+
+    def _reporter() -> DailyReporter:
+        r = ctx.extra.get("daily_reporter")
+        if r is None:
+            r = ctx.extra["daily_reporter"] = DailyReporter(
+                ctx.sf, _paper, _telegram, _data_runner, ctx.repo.last_bar, benchmark=ctx.settings.benchmark,
+                delay_min=ctx.settings.daily_report_delay_min)
+        return r
+
+    def _save_env(values: dict) -> None:
+        set_env_values(values, ctx.extra.get("env_path", ".env"))
+
+    @app.get("/api/telegram")
+    def tg_status():
+        rep = _reporter()
+        with ctx.sf() as s:
+            last = s.scalars(select(m.PaperNotification).order_by(m.PaperNotification.sent_at.desc()).limit(10)).all()
+            last = [{"day": str(n.day), "kind": n.kind, "ok": n.ok, "error": n.error, "sent_at": str(n.sent_at)[:16]}
+                    for n in last]
+        return _j({"token_set": ctx.settings.telegram_bot_token is not None, "chat_id": ctx.settings.telegram_chat_id,
+                   "configured": _telegram() is not None, "state": rep.state, "log": list(rep.logs)[-12:],
+                   "last": last, "delay_min": ctx.settings.daily_report_delay_min})
+
+    @app.post("/api/telegram/token")
+    def tg_token(body: TelegramTokenBody):
+        tok = body.token.strip()
+        try:
+            me = _tg_client(tok, with_chat=False).me()
+        except TelegramError as e:
+            raise HTTPException(400, f"Telegram no acepta ese token: {e}")
+        _save_env({"QSTS_TELEGRAM_BOT_TOKEN": tok})
+        ctx.settings.telegram_bot_token = SecretStr(tok)
+        return {"bot": (me or {}).get("username"), "name": (me or {}).get("first_name")}
+
+    @app.post("/api/telegram/detect")
+    def tg_detect():
+        tg = _tg_client(with_chat=False)
+        if tg is None:
+            raise HTTPException(400, "primero guarda el token del bot")
+        try:
+            chat = tg.find_chat()
+        except TelegramError as e:
+            raise HTTPException(400, str(e))
+        if chat is None:
+            raise HTTPException(400, "no encuentro ningún mensaje: abre tu bot en Telegram, pulsa Iniciar (o escríbele "
+                                     "cualquier cosa) y vuelve a pulsar este botón")
+        _save_env({"QSTS_TELEGRAM_CHAT_ID": str(chat["id"])})
+        ctx.settings.telegram_chat_id = str(chat["id"])
+        return chat
+
+    @app.post("/api/telegram/test")
+    def tg_test():
+        tg = _telegram()
+        if tg is None:
+            raise HTTPException(400, "Telegram no está configurado")
+        try:
+            tg.send("✅ <b>QSTS conectado.</b> Aquí recibirás cada tarde el resumen de la simulación y los avisos de venta.")
+        except TelegramError as e:
+            raise HTTPException(400, str(e))
+        return {"sent": True}
+
+    @app.post("/api/telegram/report")
+    def tg_report():
+        try:
+            return _reporter().send_report("manual")
+        except TelegramError as e:
+            raise HTTPException(400, str(e))
 
     # ------------------------------------------------------------------ automatic research ("Investigación IA")
     def _runner() -> AutoResearchRunner:

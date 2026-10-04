@@ -152,6 +152,28 @@ class MarketDataRepository:
                         ["time_known", "eps_estimate", "eps_reported", "surprise_pct", "source", "fetched_at"])
         return len(rows)
 
+    # ---------------------------------------------------------------- exchange rates (display of EUR accounts)
+    def store_fx(self, series: str, rates: pd.Series, source: str) -> int:
+        """Daily closes of an exchange rate (e.g. EURUSD = USD per EUR), keyed by date. Re-fetches overwrite."""
+        rates = pd.Series(rates).dropna()
+        if rates.empty:
+            return 0
+        now = _naive_utc(pd.Timestamp.now(tz="UTC"))
+        days = [pd.Timestamp(d).date() for d in rates.index]
+        with self.sf() as s, s.begin():
+            s.execute(delete(m.MacroData).where(m.MacroData.series == series, m.MacroData.observation_date.in_(days)))
+            s.add_all([m.MacroData(series=series, observation_date=d, value=float(v), available_at=now, source=source)
+                       for d, v in zip(days, rates.to_numpy())])
+        return len(days)
+
+    def fx_series(self, series: str) -> pd.Series:
+        with self.sf() as s:
+            rows = s.execute(select(m.MacroData.observation_date, m.MacroData.value)
+                             .where(m.MacroData.series == series).order_by(m.MacroData.observation_date)).all()
+        if not rows:
+            return pd.Series(dtype=float)
+        return pd.Series([r[1] for r in rows], index=pd.DatetimeIndex([pd.Timestamp(r[0], tz="UTC") for r in rows]))
+
     def load_earnings(self, symbol: str) -> pd.DataFrame:
         cols = ["announced_at", "time_known", "eps_estimate", "eps_reported", "surprise_pct"]
         try:

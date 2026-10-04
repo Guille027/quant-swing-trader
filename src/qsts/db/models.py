@@ -283,6 +283,22 @@ class PaperSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
     stop_reason: Mapped[str | None] = mapped_column(Text)
+    # account currency. For EUR the engine runs in USD (capital * fx_start) and amounts are shown in EUR
+    currency: Mapped[str | None] = mapped_column(String(8))
+    fx_start: Mapped[float | None] = mapped_column(Float)  # USD per EUR used to convert the starting capital
+
+
+class PaperNotification(Base):
+    """Messages sent about a paper session (one 'daily' message per session and day: never sent twice)."""
+    __tablename__ = "paper_notifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("paper_sessions.id"), index=True)
+    day: Mapped[datetime] = mapped_column(Date)  # the session close the message is about
+    kind: Mapped[str] = mapped_column(String(16))  # daily | manual | test
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    ok: Mapped[bool] = mapped_column(Boolean)
+    error: Mapped[str | None] = mapped_column(Text)
+    text: Mapped[str | None] = mapped_column(Text)
 
 
 class PaperDay(Base):

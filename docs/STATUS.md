@@ -22,8 +22,8 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 9/10 | Automatic research loop ("Investigación IA"): evolution seeded with past elites + Gemini proposals fed with research-only results → consistency score (worst of 3 sub-period Sharpes) → auto-validation of top candidates → leaderboard with global-trial DSR; one-time manual final OOS test; UI tab + `qsts autoresearch` | IMPLEMENTED (tested on synthetic data; smoke-run on real data, no strategy found yet) |
 | 12 | Strategy allocation (risk parity/inverse vol/min-var with shrinkage, health, cash), correlation clusters, effective bets, beta, sector exposure, confidence calibration, decay detection | IMPLEMENTED |
 | 13/16 | BrokerAdapter, PaperBroker (same fill model as backtest), ExecutionService | IMPLEMENTED |
-| 16 | Paper trading ("Simulación", 2026-10-04): a CANDIDATE strategy (passed final test) is run FORWARD from today with the unchanged backtest engine (`close_at_end=False`), fictitious capital, orders for the next open (decided at the close, cash-limited), open positions, equity vs SPY, append-only evening journal with data-revision check; CANDIDATE→PAPER by a human only | IMPLEMENTED (tested on synthetic data; UI smoke-tested) |
-| 15 | NotificationService: log, email IMPLEMENTED; Telegram, Discord UNVERIFIED; WhatsApp PLACEHOLDER | PARTIAL |
+| 16 | Paper trading ("Simulación", 2026-10-04): a CANDIDATE strategy (passed final test) is run FORWARD from today with the unchanged backtest engine (`close_at_end=False`), fictitious capital, orders for the next open (decided at the close, cash-limited), open positions, equity vs SPY, append-only evening journal with data-revision check; CANDIDATE→PAPER by a human only. Capital in EUR or USD (EUR: engine in USD at the start rate, values shown at each day's EURUSD close). Daily Telegram message (+ sell alert) after each close, with catch-up when the app was closed | IMPLEMENTED (tested on synthetic data; UI smoke-tested; Telegram UNVERIFIED live: api.telegram.org blocked from the build environment) |
+| 15 | NotificationService: log, email IMPLEMENTED; Telegram client (sendMessage/getUpdates/getMe, setup from the UI) implemented and tested offline, UNVERIFIED live; Discord UNVERIFIED; WhatsApp PLACEHOLDER | PARTIAL |
 | 18/19 | Manual approval queue, semi-automatic thresholds | IMPLEMENTED |
 | 20/21 | LiveSafetyGate (config, mode, user confirmation, kill switch, approved strategy, paper report, data, errors), MICRO_LIVE | IMPLEMENTED (no live adapter exists) |
 | 17 | Trading 212 adapter | NOT STARTED — official API docs read 2026-10-03 (v0 beta), summary + implications in [TRADING212_API.md](TRADING212_API.md); awaiting go-ahead |
@@ -128,6 +128,9 @@ because concurrent positions are not independent.
 - [x] At the open: exits first, then entries in decision order; entry sizing no longer sees other symbols' same-day close
 - [x] Rankings include the engine version: results from different engine versions are never mixed
 - [x] Paper trading: evening orders = next-open fills; the past does not change when new days arrive (tests)
+- [x] EUR accounts: amounts per stock in euros (fractional shares), prices in dollars, EURUSD stored daily (tests)
+- [x] Telegram: one daily message per close (never twice), sell alert for exits / targets / stops, prices updated
+      first, catch-up after a restart, token only in .env and never returned to the UI (tests with a fake Bot API)
 
 ### Phases 9–21 (implemented parts)
 - [x] AI output rejected when it invents features, adds unexpected fields (e.g. performance claims) or breaks numeric ranges; cached; budgeted

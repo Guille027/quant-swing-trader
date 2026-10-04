@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     exit_before_earnings: bool = True
     gemini_model: str = "gemini-2.5-flash"
     ai_max_calls_per_day: int = 50
+    # Telegram (paper-trading messages). The token comes from @BotFather; never commit it (.env only).
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
+    # daily message: minutes after the NYSE close (the vendor needs a little time to publish the day's bar)
+    daily_report_delay_min: int = 45
 
     @model_validator(mode="after")
     def _check_environment_separation(self) -> "Settings":

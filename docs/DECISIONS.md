@@ -80,3 +80,15 @@
     and that starting the search first re-scores the best 30 on the current data. Strategies that already had their
     one-time final test are not brought back. The options of the last search (e.g. avoid earnings) are remembered so
     the ranking shown after a restart uses the same rules.
+27. **EUR accounts in a USD engine.** US stocks are quoted in dollars, so the simulation runs in USD with the starting
+    euros converted at that day's EURUSD close, and values are shown in euros at each day's close (stored with the
+    price downloads). Simplification, stated in the UI and code: the whole account is treated as dollars (at a broker
+    with a EUR account, uninvested cash stays in euros) and currency conversion fees are not modelled, because they
+    are not part of the cost model the strategy was validated with. Orders are given as euro amounts plus an
+    approximate fractional share count; stops and targets stay in dollars, as the broker shows them.
+28. **Telegram messages come from daily data.** Only daily bars are available, so stops and profit targets (hit during
+    the day) are reported after the close, and the user is told to leave them at the broker as stop / limit orders.
+    After each close (+45 min for the vendor) the app updates prices, recomputes the session and sends one message per
+    day (plus a sell alert first when something must be sold or was closed); a day is recorded and never sent twice.
+    If the app was closed, the latest close is sent when it opens: the orders are for the next open, so that is early
+    enough. The bot token lives only in the git-ignored `.env`, is scrubbed from errors and never sent to the UI.

@@ -21,6 +21,9 @@ from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.data.repository import MarketDataRepository
 
 
+FX_SERIES, FX_PAIR = "EURUSD", "EURUSD=X"  # US dollars per euro
+
+
 def ingest_one(repo: MarketDataRepository, prov, symbol: str, start, end, asset_fields: dict | None = None) -> dict:
     raw = prov.get_bars(symbol, Timeframe.D1, pd.Timestamp(start), pd.Timestamp(end))
     vb = validate_and_clean(raw, symbol, Timeframe.D1)
@@ -153,6 +156,11 @@ class DataJobRunner:
                         self.log(f"{sym}: FALLO ({e!r})"[:200])
                 self.state.done += 1
                 time.sleep(self.pause)
+            if hasattr(prov, "get_fx") and not self._stop.is_set():
+                try:  # euro/dollar rate, to show amounts of EUR accounts in euros
+                    self.repo.store_fx(FX_SERIES, prov.get_fx(FX_PAIR), prov.name)
+                except Exception as e:  # noqa: BLE001 - optional
+                    self.log(f"Cambio euro/dólar no disponible ({e!r})"[:200])
             if memberships is not None:
                 universe, rows, source = memberships
                 n = self.repo.set_memberships(universe, rows, source)
