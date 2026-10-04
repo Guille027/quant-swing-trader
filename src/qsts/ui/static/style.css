@@ -54,3 +54,6 @@ button.ghost { background:transparent; }
 .scroll { max-height:360px; overflow:auto; }
 h4 { margin:14px 0 6px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.5px; }
 code { background:#0b0e12; padding:1px 4px; border-radius:4px; }
+.callout { border-color:#2b5d8f; background:#121b27; }
+.callout h3 { color:#8fbaff; }
+.buy { color:var(--up); font-weight:600; } .sell { color:var(--down); font-weight:600; }

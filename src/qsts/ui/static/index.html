@@ -15,6 +15,7 @@
     <button data-tab="home" class="active">🏠 Inicio</button>
     <button data-tab="data">1 · Datos</button>
     <button data-tab="auto">2 · Investigación IA</button>
+    <button data-tab="paper">3 · Simulación</button>
     <button data-tab="charts">Gráficos</button>
     <button id="adv-toggle" class="ghost" title="Herramientas para usuarios avanzados">Avanzado ▾</button>
     <span id="adv" class="adv">
@@ -45,8 +46,9 @@
       <button data-goto="auto" data-open="best">Ver su backtest →</button></div>
     <div class="card step"><div class="num">4</div><h3>Test final</h3><div class="body">
       Cuando una estrategia esté <span class="good">✔ validada</span>, pulsa <b>Test final</b> en el ranking: se prueba
-      con los años más recientes, que la búsqueda nunca ha visto. Solo se puede hacer una vez por estrategia.
-      <p class="muted">Después vendrá la simulación con dinero ficticio (aún no disponible).</p></div></div>
+      con los años más recientes, que la búsqueda nunca ha visto. Solo se puede hacer una vez por estrategia.</div></div>
+    <div class="card step" id="step-paper"><div class="num">5</div><h3>Simulación (paper trading)</h3><div class="body">Cargando…</div>
+      <button data-goto="paper" class="primary">Ir a Simulación →</button></div>
   </div>
   <div class="card"><h3>Palabras clave</h3>
     <dl class="glossary">
@@ -91,6 +93,37 @@
   <div class="card"><h3>Acciones cargadas</h3><input id="data-filter" placeholder="Buscar…"><table id="data-table"></table></div>
 </section>
 
+<section id="tab-paper" class="tab">
+  <div class="card">
+    <h3>Simulación con dinero ficticio: ¿cómo funciona?</h3>
+    <ul class="steps">
+      <li>La app opera <b>sola y de mentira</b> con la estrategia elegida, desde hoy en adelante, con las mismas reglas y costes que el backtest. No toca tu bróker.</li>
+      <li><b>Cuándo decide:</b> con el <b>cierre</b> de la bolsa de Nueva York (normalmente 22:00 hora de España). <b>Cuándo ejecuta:</b> en la <b>apertura</b> siguiente (normalmente 15:30).
+        Por eso funciona <b>con el mercado cerrado</b>: no usa precios de premercado. Si la abres durante la sesión, verás lo que decidió con el cierre de ayer.</li>
+      <li><b>Rutina diaria:</b> abre la app después de las 22:00 o por la mañana, pulsa <b>⟳ Actualizar</b> y mira <b>"Qué hará en la próxima apertura"</b>. Si un día no la abres, al actualizar se pone al día sola.</li>
+      <li>Déjala varias semanas o meses y compara con el backtest. Solo si se parece, tendría sentido pensar en dinero real (aún no disponible).</li>
+    </ul>
+  </div>
+  <div id="paper-none" style="display:none">
+    <div class="card"><h3>Empezar una simulación</h3><div id="paper-cands"></div></div>
+  </div>
+  <div id="paper-on" style="display:none">
+    <div class="card"><h3>Estrategia en simulación</h3><p id="paper-rules" class="big"></p>
+      <div class="row"><button id="paper-update" class="primary">⟳ Actualizar precios y simulación</button>
+        <button id="paper-stop">■ Detener simulación</button><span id="paper-msg" class="muted"></span></div>
+      <p id="paper-stale"></p>
+      <div id="paper-kpis" class="kpis"></div></div>
+    <div class="card"><h3>Qué hará en la próxima apertura <span id="paper-next" class="muted"></span></h3>
+      <p class="muted">Decidido con el cierre del <b id="paper-asof"></b>. Cantidades aproximadas: se ajustan al precio real de apertura. Precios ajustados por dividendos y splits.</p>
+      <table id="paper-orders"></table></div>
+    <div class="card"><h3>Posiciones abiertas</h3><table id="paper-positions"></table></div>
+    <div class="card"><h3>Evolución</h3><div id="paper-chart" class="chart small"></div>
+      <p class="muted"><span class="sw" style="background:#4c8dff"></span> simulación &nbsp; <span class="sw" style="background:#8b93a1"></span> comprar y mantener SPY desde el mismo día</p></div>
+    <div class="card"><h3>Operaciones cerradas</h3><div class="scroll"><table id="paper-closed"></table></div></div>
+    <div class="card"><h3>Diario (lo que dijo cada tarde)</h3><div class="scroll"><table id="paper-journal"></table></div></div>
+  </div>
+</section>
+
 <section id="tab-dashboard" class="tab">
   <div class="grid">
     <div class="card"><h3>Portfolio</h3><dl id="portfolio"></dl></div>
@@ -133,6 +166,7 @@
   <div class="card bar"><h3>El listón a superar</h3>
     <p class="muted">Si una estrategia no gana a <b>comprar todas tus acciones y no hacer nada</b>, no aporta nada: mejor no operar.</p>
     <div id="ar-passive" class="kpis"></div></div>
+  <div class="card callout" id="ar-best" style="display:none"></div>
   <div class="card"><h3>Ranking: estrategias más consistentes</h3>
     <p class="muted" id="ar-board-note"></p>
     <table id="ar-board"></table></div>

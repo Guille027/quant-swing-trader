@@ -14,7 +14,8 @@ python -m pytest
 
 ## Desktop app (easiest)
 `python -m qsts.cli desktop` → tab **Inicio** guides you: 1 · Datos (download S&P 500 stocks), 2 · Investigación IA
-(automatic search), 3 · click a ranked strategy to see its backtest, 4 · Test final.
+(automatic search), click a ranked strategy to see its backtest, Test final, then 3 · Simulación (paper trading:
+what it would buy at the next open, with fictitious money).
 
 ## Windows (cmd)
 `qsts` may not be on PATH after `pip install`; use `python -m qsts.cli <command>` instead, e.g.

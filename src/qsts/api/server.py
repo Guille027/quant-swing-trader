@@ -26,11 +26,13 @@ from qsts.data.adjust import adjust
 from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.data.universe import UniverseList, fetch_sp500
 from qsts.db import models as m
+from qsts.execution.paper import PaperError, PaperTrading
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
 from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
 from qsts.research.validation import OOSAccessDenied
 from qsts.risk.engine import PortfolioState
 from qsts.strategy.definition import definition_from_dict
+from qsts.strategy.lifecycle import LifecycleError
 
 STATIC = Path(__file__).resolve().parent.parent / "ui" / "static"
 
@@ -88,6 +90,15 @@ class IngestBody(BaseModel):
     symbols: list[str] = []
     sample: int | None = None  # sp500: random sample size (None = all)
     start: str = "2010-01-01"
+
+
+class PaperStartBody(BaseModel):
+    strategy_id: str
+    capital: float = 10_000.0
+
+
+class PaperStopBody(BaseModel):
+    reason: str = "detenida por el usuario"
 
 
 class ApprovalBody(BaseModel):
@@ -352,6 +363,40 @@ def create_app(ctx: AppContext) -> FastAPI:
     def data_job_stop():
         _data_runner().stop()
         return {"stopping": True}
+
+    # ------------------------------------------------------------------ paper trading ("Simulación")
+    def _paper() -> PaperTrading:
+        p = ctx.extra.get("paper")
+        if p is None:
+            p = ctx.extra["paper"] = PaperTrading(ctx.sf, ctx.research_frame, ctx.settings.benchmark)
+        return p
+
+    @app.get("/api/paper")
+    def paper_view():
+        return _j(_paper().view())
+
+    @app.get("/api/paper/summary")
+    def paper_summary():
+        return _j(_paper().summary())
+
+    @app.get("/api/paper/journal")
+    def paper_journal():
+        return _j(_paper().journal())
+
+    @app.post("/api/paper/start")
+    def paper_start(body: PaperStartBody):
+        try:
+            return {"session_id": _paper().start(body.strategy_id, body.capital)}
+        except (PaperError, LifecycleError) as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/paper/stop")
+    def paper_stop(body: PaperStopBody):
+        try:
+            _paper().stop(body.reason)
+        except (PaperError, LifecycleError) as e:
+            raise HTTPException(400, str(e))
+        return {"stopped": True}
 
     # ------------------------------------------------------------------ automatic research ("Investigación IA")
     def _runner() -> AutoResearchRunner:

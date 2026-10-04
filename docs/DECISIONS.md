@@ -40,3 +40,13 @@
 18. **Speed without changing numbers.** Research reuses indicator results through a content-keyed cache (exact frame
     hash) instead of re-implementing indicators faster, because faster maths would change last-bit results and break
     bit-identical reproduction of stored experiments.
+19. **Paper trading = the backtest engine run forward.** No second execution model: the same code decides at the
+    close and fills at the next open with the same costs and sizing, so paper and research are comparable. Sessions
+    start from the latest data only (no back-dating), journal each evening append-only and report vendor data
+    revisions instead of rewriting history. Prices are total-return adjusted; dollar results are invariant to later
+    backward adjustments (risk-based sizing), up to float noise.
+20. **Engine v2.** Ties between equal-rank entry signals were broken alphabetically, which concentrated large-universe
+    backtests in A–B tickers; now a per-day CRC32 key of (symbol, date) breaks ties (neutral and reproducible). Entry
+    fills happen after all exits and in decision order, and sizing at the open uses previous closes only (v1 could
+    see same-day closes of symbols processed earlier). Experiments recorded with v1 may no longer reproduce
+    bit-identically (reported by REPRODUCE as differing metrics/code version); rankings are versioned.

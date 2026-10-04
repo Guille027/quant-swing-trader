@@ -26,7 +26,7 @@ function goTab(name) {
   $("#tab-" + name).classList.add("active");
   if ($(`#adv button[data-tab="${name}"]`)) $("#adv").classList.add("open");
   clearInterval(autoTimer); autoTimer = null;
-  ({ home: loadHome, data: openData, auto: openAuto, signals: loadSignals, charts: initCharts, strategies: loadStrategies,
+  ({ home: loadHome, data: openData, auto: openAuto, paper: loadPaper, signals: loadSignals, charts: initCharts, strategies: loadStrategies,
      research: loadExperiments, logs: loadLogs }[name] || (() => {}))();
 }
 document.querySelectorAll("nav button[data-tab]").forEach(b => b.onclick = () => goTab(b.dataset.tab));
@@ -52,6 +52,14 @@ async function loadHome() {
     $("#step-search .body").innerHTML = (st.running ? '<span class="good">Investigando ahora…</span> ' : "Parado. ") +
       "La app combina indicadores y, con IA, propone ideas nuevas. Cada ciclo prueba decenas de estrategias.";
   } catch (e) { $("#step-search .body").textContent = e.message; }
+  try {
+    const pv = await api("/api/paper/summary");
+    $("#step-paper .body").innerHTML = pv.active
+      ? `<span class="good">En marcha</span> desde el ${pv.start}: ${pct(pv["return"])} sobre ${fmt(pv.capital)} ficticios` +
+        (pv.last_day ? ` (último día registrado: ${pv.last_day}). Pulsa ⟳ Actualizar en Simulación cada día.` : ".")
+      : (pv.candidates ? `Tienes <b>${pv.candidates}</b> estrategia(s) aprobada(s) en el test final: ya puedes simularla.`
+        : "Disponible cuando una estrategia apruebe el test final. La app te dirá qué comprar en cada apertura (con dinero ficticio).");
+  } catch (e) { $("#step-paper .body").textContent = e.message; }
   try {
     const lb = await api("/api/autoresearch/leaderboard?limit=40");
     const best = lb.rows.find(r => r.origin !== "baseline"), ref = lb.rows.find(r => r.origin === "baseline");
@@ -190,12 +198,21 @@ async function loadBoard() {
   $("#ar-passive").innerHTML = kp("Consistencia", fmt(pv.consistency, 3), esc(pv.rules || "")) + kp("Sharpe", fmt(pv.sharpe)) +
     kp("Al año (CAGR)", pct(pv.cagr)) + kp("Caída máx.", pct(pv.max_drawdown)) + kp("Años en positivo", pct(pv.pct_positive_years));
   arRows = lb.rows;
+  const bestVal = arRows.find(r => r.status === "VALIDATED_PASS"), bestFinal = arRows.find(r => r.status === "FINAL_PASS");
+  const cb = $("#ar-best");
+  if (bestFinal) { cb.style.display = "block"; cb.innerHTML = `<h3>👉 Estrategia aprobada en el test final</h3><p><b>${esc(bestFinal.rules)}</b></p>
+      <button class="primary" onclick="goTab('paper')">Simularla con dinero ficticio →</button>`; }
+  else if (bestVal) { cb.style.display = "block"; cb.innerHTML = `<h3>👉 Mejor candidata para el test final</h3><p><b>${esc(bestVal.rules)}</b> · consistencia ${fmt(bestVal.consistency, 3)}</p>
+      <p class="muted">Es la validada con más consistencia. Mira antes su backtest (pulsa su fila). El test final solo se puede hacer una vez.</p>
+      <button onclick="finalTest('${bestVal.id}')">Hacer el test final</button>`; }
+  else cb.style.display = "none";
   table($("#ar-board"), arRows, [["#", r => arRows.indexOf(r) + 1],
     ["Estrategia", r => `<span class="badge">${ORIGIN[r.origin] || r.origin}</span>${esc(r.rules)}`],
     ["Consistencia", r => `<span class="${r.consistency > (pv.consistency ?? Infinity) ? "up" : ""}">${fmt(r.consistency, 3)}</span>`], ["Sharpe", r => fmt(r.sharpe)], ["Años en positivo", r => pct(r.pct_positive_years)],
     ["Peor año", r => pct(r.worst_year)], ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades],
     ["Fiabilidad", r => r.dsr == null ? "—" : pct(r.dsr)], ["Estado", r => STATUS[r.status] || r.status],
-    ["", r => r.status === "VALIDATED_PASS" ? `<button onclick="event.stopPropagation();finalTest('${r.id}')">Test final</button>` : ""]]);
+    ["", r => r.status === "VALIDATED_PASS" ? `<button onclick="event.stopPropagation();finalTest('${r.id}')">Test final</button>`
+      : r.status === "FINAL_PASS" ? `<button class="primary" onclick="event.stopPropagation();goTab('paper')">Simular →</button>` : ""]]);
   [...$("#ar-board").querySelectorAll("tr")].slice(1).forEach((tr, i) => {
     tr.classList.add("click"); if (arRows[i].id === arSel) tr.classList.add("sel");
     tr.cells[1].classList.add("rules");
@@ -270,6 +287,78 @@ $("#ar-start").onclick = async () => {
   loadAuto(false);
 };
 $("#ar-stop").onclick = async () => { await post("/api/autoresearch/stop"); $("#ar-msg").textContent = "Deteniendo (termina la prueba en curso)…"; loadAuto(false); };
+
+// ---------------------------------------------------------------- paper trading
+let paperChart = null, paperSeries = [];
+const ACTION = { COMPRAR: '<span class="buy">COMPRAR</span>', VENDER: '<span class="sell">VENDER</span>' };
+async function loadPaper() {
+  let v; try { v = await api("/api/paper"); } catch (e) { $("#paper-msg").textContent = e.message; return; }
+  $("#paper-on").style.display = v.active ? "block" : "none"; $("#paper-none").style.display = v.active ? "none" : "block";
+  if (!v.active) {
+    $("#paper-cands").innerHTML = !v.candidates.length
+      ? `<p>Aún no tienes ninguna estrategia <b>aprobada en el test final</b>. Pasos: <b>2 · Investigación IA</b> → espera a que alguna salga <span class="good">✔ validada</span> → mira su backtest → pulsa <b>Test final</b>. Si lo aprueba, aparecerá aquí.</p>
+         <p class="muted">Es a propósito: simular una estrategia que no ha pasado el examen con datos nuevos no tendría sentido.</p>`
+      : `<p>Estrategias aprobadas en el test final:</p>` + v.candidates.map(c => `<div class="card"><p><b>${esc(c.rules)}</b></p>
+          <p class="muted">Test final: ${c.final ? `rentabilidad ${pct(c.final.oos?.total_return)} · Sharpe ${fmt(c.final.oos?.sharpe)} · caída máx. ${pct(c.final.oos?.max_drawdown)}` : "—"}</p>
+          <div class="row"><label>Capital ficticio <input id="cap-${esc(c.strategy_id)}" value="10000" size="8"></label>
+          <button class="primary" onclick="startPaper('${esc(c.strategy_id)}')">▶ Empezar simulación</button></div></div>`).join("");
+    return;
+  }
+  $("#paper-rules").innerHTML = `<b>${esc(v.session.rules)}</b><br><span class="muted">Desde el ${v.session.start} · ${v.session.n_symbols} acciones · capital ficticio ${fmt(v.session.capital)}</span>`;
+  $("#paper-stale").innerHTML = v.stale_sessions > 0 ? `<span class="warn">Faltan ${v.stale_sessions} día(s) de precios: pulsa ⟳ Actualizar.</span>` : "";
+  if (v.revisions && v.revisions.days_changed) $("#paper-stale").innerHTML += ` <span class="warn">Yahoo ha corregido datos antiguos: ${v.revisions.days_changed} día(s) del diario ya no coinciden exactamente.</span>`;
+  const k = (l, x, sub) => `<div class="kpi"><div class="l">${l}</div><div class="v">${x}</div><div class="s">${sub || ""}</div></div>`;
+  $("#paper-kpis").innerHTML = k("Valor actual", fmt(v.equity), `efectivo ${fmt(v.cash)}`) +
+    k("Ganancia", `<span class="${v.pnl >= 0 ? "up" : "down"}">${fmt(v.pnl)}</span>`, pct(v["return"])) +
+    k("Mercado (SPY) en el mismo periodo", v.benchmark ? pct(v.benchmark["return"]) : "—") +
+    k("Días de simulación", v.days) + k("Operaciones cerradas", v.n_closed, v.win_rate == null ? "" : `ganadoras ${pct(v.win_rate)}`) +
+    k("Posiciones abiertas", v.positions.length);
+  $("#paper-asof").textContent = v.as_of;
+  $("#paper-next").textContent = v.next_open ? "· " + new Date(v.next_open).toLocaleString(undefined, { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }) + " (tu hora)" : "";
+  table($("#paper-orders"), v.orders, [["", o => ACTION[o.action]], ["Acción", o => o.symbol], ["Cantidad aprox.", o => fmt(o.qty, 3)],
+    ["Importe aprox.", o => fmt(o.approx_value)], ["Precio último cierre", o => fmt(o.last_close)], ["Stop aprox.", o => fmt(o.approx_stop)],
+    ["Objetivo aprox.", o => fmt(o.approx_target)],
+    ["Motivo", o => o.action === "VENDER" ? (EXIT[o.reason] || o.reason)
+      : o.likely === false ? '<span class="muted">señal, pero probablemente sin efectivo suficiente</span>'
+      : o.partial ? "señal de entrada (parcial: se acaba el efectivo)" : "señal de entrada"]]);
+  if (!v.orders.length) $("#paper-orders").innerHTML = `<tr><td class="muted">Nada que hacer en la próxima apertura (NO TRADE es un resultado normal).</td></tr>`;
+  table($("#paper-positions"), v.positions, [["Acción", p => p.symbol], ["Desde", p => p.entry_ts], ["Cantidad", p => fmt(p.qty, 3)],
+    ["Precio compra", p => fmt(p.entry_price)], ["Último cierre", p => fmt(p.last_close)], ["Stop", p => fmt(p.stop)], ["Objetivo", p => fmt(p.target)],
+    ["Resultado", p => `<span class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${fmt(p.unrealized_pnl)}</span>`], ["Días", p => p.bars_held]]);
+  if (!paperChart) paperChart = LightweightCharts.createChart($("#paper-chart"), opts());
+  paperSeries.forEach(x => paperChart.removeSeries(x)); paperSeries = [];
+  if (v.benchmark) { const b = paperChart.addLineSeries({ color: "#8b93a1", lineWidth: 1, title: "SPY" }); b.setData(v.benchmark.curve); paperSeries.push(b); }
+  const sc = paperChart.addLineSeries({ color: "#4c8dff", lineWidth: 2, title: "simulación" }); sc.setData(v.curve); paperSeries.push(sc);
+  paperChart.timeScale().fitContent();
+  table($("#paper-closed"), v.closed.slice().reverse(), [["Acción", t => t.symbol], ["Compra", t => t.entry], ["Venta", t => t.exit],
+    ["Precio compra", t => fmt(t.entry_price)], ["Precio venta", t => fmt(t.exit_price)],
+    ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${fmt(t.pnl)}</span>`], ["Motivo", t => EXIT[t.reason] || t.reason]]);
+  const j = await api("/api/paper/journal");
+  table($("#paper-journal"), j.slice().reverse(), [["Día", d => d.day], ["Valor", d => fmt(d.equity)], ["Posiciones", d => d.n_positions],
+    ["Órdenes para la apertura siguiente", d => d.orders == null ? '<span class="muted">(día recuperado al ponerse al día)</span>'
+      : d.orders.length ? d.orders.map(o => `${o.action} ${o.symbol}`).join(", ") : "ninguna"]]);
+}
+window.startPaper = async (sid) => {
+  const cap = +($("#cap-" + CSS.escape(sid)) || {}).value || 10000;
+  if (!confirm(`Empezar a simular con ${cap} de dinero FICTICIO desde hoy. No se envía nada a ningún bróker. ¿Continuar?`)) return;
+  try { await post("/api/paper/start", { strategy_id: sid, capital: cap }); } catch (e) { alert(e.message); }
+  loadPaper();
+};
+$("#paper-stop").onclick = async () => {
+  const r = prompt("¿Detener la simulación? Motivo:", "detenida por el usuario"); if (r === null) return;
+  try { await post("/api/paper/stop", { reason: r }); } catch (e) { alert(e.message); }
+  loadPaper();
+};
+$("#paper-update").onclick = async () => {
+  $("#paper-msg").textContent = "Descargando precios nuevos…";
+  try { await post("/api/data/ingest", { mode: "update" }); } catch (e) { $("#paper-msg").textContent = e.message; }
+  clearInterval(autoTimer);
+  autoTimer = setInterval(async () => {
+    const j = await api("/api/data/job");
+    $("#paper-msg").textContent = j.running ? `Descargando ${j.done}/${j.total}…` : "Recalculando…";
+    if (!j.running) { clearInterval(autoTimer); autoTimer = null; await loadPaper(); $("#paper-msg").textContent = "Actualizado."; }
+  }, 2000);
+};
 
 // ---------------------------------------------------------------- signals
 async function loadSignals() {

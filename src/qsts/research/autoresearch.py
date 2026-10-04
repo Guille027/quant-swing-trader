@@ -30,7 +30,7 @@ from sqlalchemy import func, select
 from qsts.ai.providers import AIProviderError
 from qsts.ai.service import AIBudgetExceeded, AIOutputRejected, AIResearchService
 from qsts.backtest.benchmarks import momentum_baseline, trend_baseline
-from qsts.backtest.engine import BacktestConfig
+from qsts.backtest.engine import ENGINE_VERSION, BacktestConfig
 from qsts.backtest.metrics import periodic_returns
 from qsts.core.hashing import hash_obj
 from qsts.db import models as m
@@ -200,7 +200,8 @@ class AutoResearcher:
         self.universe_id = hash_obj({"symbols": {k: str(v.index[0].date()) for k, v in sorted(self.research.items())},
                                      "oos_start": cfg.oos_start, "warmup": cfg.warmup_bars, "blocks": cfg.blocks,
                                      "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
-                                     "complexity_penalty": cfg.complexity_penalty, "engine": bt_cfg.to_dict()}, 32)
+                                     "complexity_penalty": cfg.complexity_penalty, "engine": bt_cfg.to_dict(),
+                                     "engine_version": ENGINE_VERSION}, 32)
         self.registry, self.tracker = StrategyRegistry(sf), ExperimentTracker(sf)
         self.log = log or (lambda msg: None)
         self.stop_event = stop_event or threading.Event()
@@ -211,23 +212,12 @@ class AutoResearcher:
         self._adopt_legacy_rows()
 
     def _adopt_legacy_rows(self) -> None:
-        """Rows stored before rankings were scoped by universe: adopt them if they were scored on this symbol set."""
+        """Rows stored before rankings were scoped by universe were scored by engine v1: they keep counting as trials
+        (Deflated Sharpe) but are never mixed into a current ranking."""
         R = m.ResearchCandidate
         with self.sf() as s, s.begin():
-            legacy = s.scalars(select(R).where(R.universe_id.is_(None))).all()
-            if not legacy:
-                return
-            syms = None
-            for r in legacy:
-                exp = (r.validation or {}).get("experiment_id")
-                e = s.get(m.Experiment, exp) if exp else None
-                if e is not None:
-                    syms = set(e.config.get("symbols") or [])
-                    break
-            for r in legacy:
-                r.version_id = r.version_id or r.id
-                if syms is not None and syms == set(self.research):
-                    r.universe_id = self.universe_id
+            for r in s.scalars(select(R).where(R.universe_id.is_(None), R.version_id.is_(None))).all():
+                r.version_id = r.id
 
     def passive_reference(self) -> dict:
         """'Do nothing' benchmark on the SAME stocks: hold all of them, equal weight, rebalanced daily, no costs

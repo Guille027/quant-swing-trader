@@ -172,3 +172,25 @@ def test_data_manager_and_backtest_view(client, tmp_path):
     assert bt["includes_oos"] is False and bt["equity"] and "benchmark" in bt and bt["yearly"]
     assert bt["period"][1] < "2023-01-01"
     assert c.get("/api/autoresearch/nope/backtest").status_code == 404
+
+
+def test_paper_endpoints(client):
+    from qsts.strategy.lifecycle import Status
+    from qsts.strategy.definition import definition_from_dict
+    c, ctx = client
+    v = c.get("/api/paper").json()
+    assert v["active"] is False and v["candidates"] == []
+    assert c.post("/api/paper/start", json={"strategy_id": "nope"}).status_code == 400
+    sd = definition_from_dict(DEF)
+    ctx.registry.register("p1", sd)
+    rec = ctx.tracker.run_backtest(sd, {s: ctx.research_frame(s) for s in ("AAA", "BBB")}, __import__(
+        "qsts.backtest.engine", fromlist=["x"]).BacktestConfig(), strategy_id="p1")
+    ctx.registry.transition("p1", Status.BACKTESTED, reason="t", actor="system", evidence={"backtest_experiment_id": rec.id})
+    ctx.registry.transition("p1", Status.VALIDATING, reason="t", actor="system")
+    ctx.registry.transition("p1", Status.CANDIDATE, reason="t", actor="user",
+                            evidence={"walk_forward_experiment_id": "x", "robustness_passed": True,
+                                      "oos_experiment_id": "y", "monte_carlo_experiment_id": "z"})
+    assert [x["strategy_id"] for x in c.get("/api/paper").json()["candidates"]] == ["p1"]
+    r = c.post("/api/paper/start", json={"strategy_id": "p1", "capital": 5000})
+    assert r.status_code == 400 and "actualízalos" in r.json()["detail"]  # test data ends in 2022: stale
+    assert c.post("/api/paper/stop", json={}).status_code == 400

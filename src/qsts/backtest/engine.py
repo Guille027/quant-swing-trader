@@ -18,6 +18,7 @@ not create fake gaps. Share-count limits (no fractional) are applied to those pr
 """
 from __future__ import annotations
 
+import zlib
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -94,10 +95,21 @@ class BacktestResult:
     config: dict
     strategy_version: str
     rejected_orders: list[dict]
+    open_positions: list[dict] = field(default_factory=list)  # only with close_at_end=False
+    pending_orders: list[dict] = field(default_factory=list)  # entries decided at the last close, for the next open
 
     @property
     def returns(self) -> pd.Series:
         return self.equity["equity"].pct_change().fillna(0.0)
+
+
+# bump when fills/ordering semantics change. 2: neutral tie-break between equal-rank signals; entries filled in
+# decision order after all exits; sizing at the open no longer sees other symbols' same-day closes.
+ENGINE_VERSION = "2"
+
+
+def _tiebreak(symbol: str, ts) -> int:
+    return zlib.crc32(f"{symbol}|{pd.Timestamp(ts).value}".encode())
 
 
 class BacktestEngine:
@@ -105,7 +117,9 @@ class BacktestEngine:
         self.cfg = cfg
 
     def run(self, strategy: StrategyDefinition, data: dict[str, pd.DataFrame],
-            regime: pd.Series | None = None, start=None, end=None) -> BacktestResult:
+            regime: pd.Series | None = None, start=None, end=None, close_at_end: bool = True) -> BacktestResult:
+        """close_at_end=False (paper trading): open positions stay open, marked at the last close, and the
+        orders decided at the last close are returned as `pending_orders` instead of being dropped."""
         cs = CompiledStrategy(strategy)
         cfg, cm = self.cfg, self.cfg.costs
         frames, sigs = {}, {}
@@ -173,49 +187,58 @@ class BacktestEngine:
                 if i < len(IDX[sym]) and IDX[sym][i] == ts:
                     todays.append((sym, i))
                     ptr[sym] = i + 1
-            # ---------------------------------------------------------- opens
+            # ---------------------------------------------------------- opens (3 passes)
+            # 1) pending market exits fill at the open, freeing cash before any new entry
             for sym, i in todays:
-                b = B[sym]
-                o, h, l, c, v = b["open"][i], b["high"][i], b["low"][i], b["close"][i], b["volume"][i]
-                cap_qty = v * cm.max_volume_participation if v > 0 else 0.0
                 p = pos.get(sym)
-                # pending market exit -> fill at open
                 if p is not None and p.pending_exit:
+                    b = B[sym]
+                    v = b["volume"][i]
+                    cap_qty = v * cm.max_volume_participation if v > 0 else 0.0
                     q = min(p.pending_exit_qty, cap_qty) if cap_qty > 0 else 0.0
                     if q > 0:
-                        reason = p.pending_exit
-                        close_qty(p, q, ts, o, reason)
+                        close_qty(p, q, ts, b["open"][i], p.pending_exit)
                         if sym in pos:
                             pos[sym].pending_exit_qty -= q
-                    p = pos.get(sym)
-                # pending entry -> fill at open
-                if sym in pending_entries and sym not in pos:
-                    e = pending_entries.pop(sym)
-                    d = e["direction"]
-                    px = cm.fill_price(o, d)
-                    eq = equity_now() if pos else cash
-                    qty = e["qty"]
-                    gross_now = sum(pp.qty * last_close[pp.symbol] for pp in pos.values())
-                    room = max(cfg.max_gross_exposure * eq - gross_now, 0.0) / px
-                    affordable = (cash / (px * (1 + cm.commission_pct) + cm.commission_per_share)) if d > 0 else room
-                    qty = min(qty, room, affordable, cap_qty)
-                    if not cfg.allow_fractional:
-                        qty = np.floor(qty)
-                    if qty < max(cfg.min_qty, 1e-12) or qty <= 0:
-                        rejected.append({"ts": ts, "symbol": sym, "reason": "size<min after cash/volume/exposure limits"})
-                    else:
-                        comm = cm.commission(qty, px)
-                        cash -= d * qty * px + comm
-                        sd = e["stop_dist"]
-                        stop = px - d * sd
-                        target = px + d * e["tp_dist"] if np.isfinite(e["tp_dist"]) else None
-                        pos[sym] = _Pos(sym, d, qty, ts, px, stop, target, sd, qty * sd, comm, qty * abs(px - o))
-                        last_close[sym] = px
-                        if qty < e["qty"] - 1e-9:
-                            rejected.append({"ts": ts, "symbol": sym, "reason": "partial fill",
-                                             "requested": e["qty"], "filled": qty})
+            # 2) pending entries fill at the open in the order they were DECIDED (rank, neutral tie-break), sized
+            #    only with what is known at the open: previous closes for held positions, today's open for the fill
+            today_idx = dict(todays)
+            for sym in [x for x in list(pending_entries) if x in today_idx]:
+                if sym in pos:
+                    continue
+                i = today_idx[sym]
+                b = B[sym]
+                o, v = b["open"][i], b["volume"][i]
+                cap_qty = v * cm.max_volume_participation if v > 0 else 0.0
+                e = pending_entries.pop(sym)
+                d = e["direction"]
+                px = cm.fill_price(o, d)
+                eq = equity_now() if pos else cash
+                qty = e["qty"]
+                gross_now = sum(pp.qty * last_close[pp.symbol] for pp in pos.values())
+                room = max(cfg.max_gross_exposure * eq - gross_now, 0.0) / px
+                affordable = (cash / (px * (1 + cm.commission_pct) + cm.commission_per_share)) if d > 0 else room
+                qty = min(qty, room, affordable, cap_qty)
+                if not cfg.allow_fractional:
+                    qty = np.floor(qty)
+                if qty < max(cfg.min_qty, 1e-12) or qty <= 0:
+                    rejected.append({"ts": ts, "symbol": sym, "reason": "size<min after cash/volume/exposure limits"})
+                else:
+                    comm = cm.commission(qty, px)
+                    cash -= d * qty * px + comm
+                    sd = e["stop_dist"]
+                    stop = px - d * sd
+                    target = px + d * e["tp_dist"] if np.isfinite(e["tp_dist"]) else None
+                    pos[sym] = _Pos(sym, d, qty, ts, px, stop, target, sd, qty * sd, comm, qty * abs(px - o))
+                    last_close[sym] = px
+                    if qty < e["qty"] - 1e-9:
+                        rejected.append({"ts": ts, "symbol": sym, "reason": "partial fill",
+                                         "requested": e["qty"], "filled": qty})
+            # 3) intrabar stop / target, then mark to today's close
+            for sym, i in todays:
+                b = B[sym]
+                o, h, l, c = b["open"][i], b["high"][i], b["low"][i], b["close"][i]
                 p = pos.get(sym)
-                # ---------------------------------------------- intrabar stop / target
                 if p is not None:
                     d = p.direction
                     p.mae = max(p.mae, (p.entry_price - l) if d > 0 else (h - p.entry_price))
@@ -269,9 +292,11 @@ class BacktestEngine:
                     continue
                 s = {k: col[i] for k, col in SIG[sym].items()}
                 if s["long_entry"] or s["short_entry"]:
-                    cands.append((-(s["rank"] if np.isfinite(s["rank"]) else -np.inf), sym, s))
-            cands.sort(key=lambda x: (x[0], x[1]))  # deterministic: rank desc, then symbol
-            for _, sym, s in cands:
+                    cands.append((-(s["rank"] if np.isfinite(s["rank"]) else -np.inf), _tiebreak(sym, ts), sym, s))
+            # rank desc; ties broken by a per-day pseudo-random but reproducible key (NOT the ticker's
+            # alphabetical order, which would always favour A..B names when signals exceed free slots)
+            cands.sort(key=lambda x: (x[0], x[1], x[2]))
+            for _, _, sym, s in cands:
                 if slots <= 0:
                     rejected.append({"ts": ts, "symbol": sym, "reason": "max_positions"})
                     continue
@@ -287,16 +312,31 @@ class BacktestEngine:
             eq_rows.append({"ts": ts, "equity": eq, "cash": cash, "gross_exposure": gross / eq if eq > 0 else np.nan,
                             "n_positions": len(pos)})
 
-        # close remaining at last known close (marked, with exit costs)
         last_ts = timeline[-1] if timeline else None
-        for p in list(pos.values()):
-            close_qty(p, p.qty, last_ts, last_close[p.symbol], "end_of_data")
-        if eq_rows:
-            eq_rows[-1]["equity"] = cash
-            eq_rows[-1]["cash"] = cash
-            eq_rows[-1]["gross_exposure"] = 0.0
-            eq_rows[-1]["n_positions"] = 0
+        open_positions, pending_orders = [], []
+        if close_at_end:  # close remaining at last known close (marked, with exit costs)
+            for p in list(pos.values()):
+                close_qty(p, p.qty, last_ts, last_close[p.symbol], "end_of_data")
+            if eq_rows:
+                eq_rows[-1]["equity"] = cash
+                eq_rows[-1]["cash"] = cash
+                eq_rows[-1]["gross_exposure"] = 0.0
+                eq_rows[-1]["n_positions"] = 0
+        else:
+            for p in pos.values():
+                lc = last_close[p.symbol]
+                open_positions.append({
+                    "symbol": p.symbol, "direction": "LONG" if p.direction > 0 else "SHORT", "qty": p.qty,
+                    "entry_ts": p.entry_ts, "entry_price": p.entry_price, "stop": p.stop, "target": p.target,
+                    "bars_held": p.bars, "last_close": lc, "market_value": p.qty * lc,
+                    "unrealized_pnl": p.direction * p.qty * (lc - p.entry_price) - p.costs,
+                    "pending_exit": p.pending_exit})
+            for sym, e in pending_entries.items():  # decision order = fill priority at the next open
+                pending_orders.append({"symbol": sym, "direction": "LONG" if e["direction"] > 0 else "SHORT",
+                                       "qty": e["qty"], "stop_dist": e["stop_dist"], "tp_dist": e["tp_dist"],
+                                       "last_close": last_close.get(sym)})
 
         equity = pd.DataFrame(eq_rows).set_index("ts") if eq_rows else pd.DataFrame(
             columns=["equity", "cash", "gross_exposure", "n_positions"])
-        return BacktestResult(pd.DataFrame(trades), equity, cfg.to_dict(), strategy.version_id, rejected)
+        return BacktestResult(pd.DataFrame(trades), equity, cfg.to_dict(), strategy.version_id, rejected,
+                              open_positions, pending_orders)

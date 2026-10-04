@@ -184,3 +184,17 @@ def test_buy_and_hold_benchmark(daily):
     assert np.isclose(bh["equity"].iloc[-1] / 10_000, daily["close"].iloc[-1] / daily["close"].iloc[0])
     yr = periodic_returns(bh["equity"], "YE")
     assert len(yr) == 3
+
+
+def test_equal_signals_are_not_filled_alphabetically():
+    """When more symbols signal than there are free slots, the choice must not follow the ticker's alphabet."""
+    from conftest import synthetic_daily
+    syms = [f"S{i:02d}" for i in range(30)]
+    data = {s: to_canonical(synthetic_daily("2021-01-01", "2021-03-31", seed=80 + i), Timeframe.D1) for i, s in enumerate(syms)}
+    sd = StrategyDefinition(name="all", family="t", hypothesis="h", entry_long=(Condition(F("close"), ">", V(0.0)),),
+                            stop=StopRule("atr", 14, 3.0), take_profit=TakeProfitRule("none"))
+    res = BacktestEngine(BacktestConfig(max_positions=3)).run(sd, data, start=pd.Timestamp("2021-02-01", tz="UTC"))
+    first = res.trades.sort_values(["entry_ts", "symbol"]).groupby("entry_ts")["symbol"].apply(sorted).iloc[0]
+    assert len(first) == 3 and first != syms[:3]
+    again = BacktestEngine(BacktestConfig(max_positions=3)).run(sd, data, start=pd.Timestamp("2021-02-01", tz="UTC"))
+    assert again.trades.equals(res.trades)  # still fully deterministic

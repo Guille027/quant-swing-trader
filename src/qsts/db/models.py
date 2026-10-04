@@ -244,6 +244,36 @@ class ResearchCandidate(Base):
     __table_args__ = (Index("ix_candidate_version_universe", "version_id", "universe_id"),)
 
 
+class PaperSession(Base):
+    """A forward paper-trading run of ONE frozen strategy version, from the day it was started onwards."""
+    __tablename__ = "paper_sessions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(ForeignKey("strategies.id"), index=True)
+    version_id: Mapped[str] = mapped_column(String(32))
+    symbols: Mapped[list] = mapped_column(JSON)
+    start: Mapped[datetime] = mapped_column(Date)  # decision bar: first orders are decided at its close
+    capital: Mapped[float] = mapped_column(Float)
+    config: Mapped[dict] = mapped_column(JSON)  # BacktestConfig (same fill/cost model as research)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", index=True)  # ACTIVE | STOPPED
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class PaperDay(Base):
+    """Append-only journal: what the simulation showed after each session's close."""
+    __tablename__ = "paper_days"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("paper_sessions.id"), index=True)
+    day: Mapped[datetime] = mapped_column(Date)
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    n_positions: Mapped[int] = mapped_column(Integer)
+    orders: Mapped[list | None] = mapped_column(JSON)  # orders for the next open, as shown that evening
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    __table_args__ = (UniqueConstraint("session_id", "day", name="uq_paper_day"),)
+
+
 class OOSAccessLog(Base):
     """Every read of the reserved out-of-sample dataset is logged (and limited)."""
     __tablename__ = "oos_access_log"
