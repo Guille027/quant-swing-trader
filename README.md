@@ -17,6 +17,12 @@ python -m pytest
 (automatic search), click a ranked strategy to see its backtest, Test final, then 3 · Simulación (paper trading:
 what it would buy at the next open, with fictitious money).
 
+## Windows: open it from the desktop
+Once: double-click **`Crear acceso directo.bat`** in the project folder (or run `python -m qsts.cli shortcut`).
+It creates a **QSTS** icon on the desktop and in the Start menu; double-click it to open the app (no console).
+`Abrir QSTS.bat` does the same without creating a shortcut. Logs go to `var/desktop.log`.
+While a research run or a download is active, Windows is kept from sleeping (the screen may still turn off).
+
 ## Windows (cmd)
 `qsts` may not be on PATH after `pip install`; use `python -m qsts.cli <command>` instead, e.g.
 `python -m qsts.cli ingest --provider yahoo --symbols SPY,AAPL --start 2010-01-01` and `python -m qsts.cli desktop`.

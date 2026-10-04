@@ -3,6 +3,7 @@
   qsts ingest  --provider yahoo|csv [--root DIR] --symbols AAPL,MSFT --start 2010-01-01 [--end ...]
   qsts serve   [--port 8765]            # backend + UI in the browser (127.0.0.1 only)
   qsts desktop                           # same, in a native window if pywebview is installed
+  qsts shortcut                          # Windows: desktop/Start-menu shortcut that opens the app
   qsts scan    [--asof ISO] [--universe A,B]
   qsts research --strategy file.json --symbols A,B --oos-start 2022-01-01 --space '{"p": [1,2]}'
   qsts evolve  --symbols A,B --train 2012-01-01:2017-12-31 --validate 2018-01-15:2021-12-31
@@ -61,22 +62,13 @@ def cmd_serve(args, ctx):
 
 
 def cmd_desktop(args, ctx):
-    import threading
-    import uvicorn
-    server = uvicorn.Server(uvicorn.Config(_app(ctx), host="127.0.0.1", port=args.port, log_level="warning"))
-    threading.Thread(target=server.run, daemon=True).start()
-    url = f"http://127.0.0.1:{args.port}"
-    try:
-        import webview
-        webview.create_window("QSTS — Quant Swing Trading System", url, width=1400, height=900)
-        webview.start()
-    except ImportError:
-        import time
-        import webbrowser
-        print(f"pywebview not installed; opening {url} in your browser (Ctrl+C to quit)")
-        webbrowser.open(url)
-        while True:
-            time.sleep(3600)
+    from qsts.app.launcher import main as launch
+    launch(args.port)
+
+
+def cmd_shortcut(args, ctx):
+    from qsts.app.shortcut import main as make
+    make()
 
 
 def cmd_scan(args, ctx):
@@ -165,6 +157,7 @@ def main(argv=None):
     s.add_argument("--population", type=int, default=30)
     s.add_argument("--generations", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    sub.add_parser("shortcut", help="crea el acceso directo QSTS en el escritorio (Windows)")
     s = sub.add_parser("autoresearch")
     s.add_argument("--cycles", type=int, default=1, help="0 = until Ctrl+C")
     s.add_argument("--no-ai", action="store_true")
@@ -173,7 +166,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     ctx = build_context()
     {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "scan": cmd_scan,
-     "research": cmd_research, "evolve": cmd_evolve, "autoresearch": cmd_autoresearch}[args.cmd](args, ctx)
+     "research": cmd_research, "evolve": cmd_evolve, "autoresearch": cmd_autoresearch,
+     "shortcut": cmd_shortcut}[args.cmd](args, ctx)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ from qsts.backtest.benchmarks import momentum_baseline, trend_baseline
 from qsts.backtest.engine import ENGINE_VERSION, BacktestConfig
 from qsts.backtest.metrics import periodic_returns
 from qsts.core.hashing import hash_obj
+from qsts.core.power import keep_awake
 from qsts.db import models as m
 from qsts.features.registry import REGISTRY, feature_cache
 from qsts.research.evolution import EvolutionConfig, EvolutionEngine, Individual
@@ -638,6 +639,7 @@ class AutoResearchRunner:
             return True
 
     def _run(self, cfg: AutoResearchConfig, max_cycles: int) -> None:
+        keep_awake(True)  # a day-long run must not be paused by Windows sleep
         try:
             self.log("Cargando datos (solo el periodo de investigación)…")
             self.researcher = self._build(cfg, self.log, self._stop)
@@ -651,6 +653,7 @@ class AutoResearchRunner:
             self.state.error = repr(e)[:500]
             self.log(f"ERROR: {e!r}")
         finally:
+            keep_awake(False)
             self.state.running = False
             self.state.phase = "parado"
 

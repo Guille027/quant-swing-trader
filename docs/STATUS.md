@@ -29,6 +29,7 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 17 | Trading 212 adapter | NOT STARTED — official API docs read 2026-10-03 (v0 beta), summary + implications in [TRADING212_API.md](TRADING212_API.md); awaiting go-ahead |
 | 13 | Market scanner (point-in-time), CLI `qsts scan` | IMPLEMENTED (scheduling via cron/Task Scheduler: not yet) |
 | 14 | Guided UI (2026-10-04): Inicio (4 steps + glossary), Datos (S&P 500 random sample / all / custom symbols / incremental update, background job with progress), one-click backtest of any ranked strategy vs SPY (research period only until its final test), expert tabs under "Avanzado" | IMPLEMENTED |
+| 14 | Windows desktop shortcut (`Crear acceso directo.bat` / `qsts shortcut`): pythonw launcher without console, single server instance, Spanish close confirmation, browser fallback with keep-alive dialog, log in var/desktop.log, keep-awake during research/downloads | IMPLEMENTED (logic tested on Linux; not run on Windows from this environment) |
 | 14 | Desktop UI: FastAPI backend (127.0.0.1) + web frontend (dashboard, signals/approvals, charts with as-of replay, strategies, Strategy Lab, research/REPRODUCE, logs), `qsts desktop` native window via pywebview | IMPLEMENTED |
 | 22 | Full validation on real data | STARTED — baselines through the full pipeline on real data (below); no PIT S&P 500 membership yet |
 

@@ -15,6 +15,7 @@ from typing import Callable
 
 import pandas as pd
 
+from qsts.core.power import keep_awake
 from qsts.data.bars import Timeframe, nyse_schedule
 from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.data.repository import MarketDataRepository
@@ -82,6 +83,7 @@ class DataJobRunner:
             return True
 
     def _run(self, symbols, start, incremental, asset_fields, memberships) -> None:
+        keep_awake(True)
         try:
             prov = self.provider_factory()
             end = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
@@ -131,6 +133,7 @@ class DataJobRunner:
             self.state.message = f"error: {e!r}"[:300]
             self.log(f"ERROR: {e!r}")
         finally:
+            keep_awake(False)
             self.state.running = False
             self.state.current = None
             self.state.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
