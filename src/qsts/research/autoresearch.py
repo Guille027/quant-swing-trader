@@ -62,6 +62,7 @@ class AutoResearchConfig:
     finalist_pool: int = 10         # only candidates in the global top-N are validated
     use_ai: bool = True
     ai_proposals: int = 3
+    avoid_earnings: bool = True     # apply the earnings blackout / exit-before-results rules (Settings) in research
     seed: int = 0
     wf_train: int = 504
     wf_validate: int = 126
@@ -178,6 +179,24 @@ class _ConsistencyEvolution(EvolutionEngine):
         return ind
 
 
+def _engine_key(bt: BacktestConfig) -> dict:
+    """Engine config for the ranking id; earnings options at their 'off' defaults are omitted so rankings made
+    before those options existed stay valid."""
+    d = bt.to_dict()
+    for k, off in (("earnings_blackout_days", 0), ("exit_before_earnings", False)):
+        if d.get(k) == off:
+            d.pop(k, None)
+    return d
+
+
+def _earnings_key(research: dict[str, pd.DataFrame]) -> str | None:
+    """Fingerprint of the earnings columns inside the research window (None = no earnings data at all)."""
+    from qsts.core.hashing import hash_frame
+    from qsts.data.earnings import EARN_COLS
+    fp = {k: hash_frame(v[EARN_COLS]) for k, v in sorted(research.items()) if set(EARN_COLS) <= set(v.columns)}
+    return hash_obj(fp, 16) if fp else None
+
+
 # ---------------------------------------------------------------------- the loop
 class AutoResearcher:
     def __init__(self, sf, data: dict[str, pd.DataFrame], cfg: AutoResearchConfig = AutoResearchConfig(),
@@ -202,7 +221,8 @@ class AutoResearcher:
         self.universe_id = hash_obj({"symbols": {k: str(v.index[0].date()) for k, v in sorted(self.research.items())},
                                      "oos_start": cfg.oos_start, "warmup": cfg.warmup_bars, "blocks": cfg.blocks,
                                      "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
-                                     "complexity_penalty": cfg.complexity_penalty, "engine": bt_cfg.to_dict(),
+                                     "complexity_penalty": cfg.complexity_penalty, "engine": _engine_key(bt_cfg),
+                                     "earnings_data": _earnings_key(self.research),
                                      "engine_version": ENGINE_VERSION}, 32)
         self.registry, self.tracker = StrategyRegistry(sf), ExperimentTracker(sf)
         self.log = log or (lambda msg: None)
@@ -401,6 +421,9 @@ class AutoResearcher:
                 "best_so_far": best, "recent_failure_reasons": failures, "trials_so_far": n,
                 "passive_benchmark_to_beat": {k: self.passive_reference()[k] for k in ("consistency", "sharpe")},
                 "your_last_rejected_proposals": self._last_ai_rejections[-5:],
+                "event_features": ("days_since_earnings, earnings_surprise (percent) and days_to_earnings (sessions; "
+                                   f"{self.bt.earnings_blackout_days and 'entries within ' + str(self.bt.earnings_blackout_days) + ' sessions of results are blocked by the engine' or 'no blackout'}) "
+                                   "are available when earnings data exists"),
                 "holding_period": f"swing trading: max_holding_bars is REQUIRED, an integer from 1 to "
                                   f"{self.cfg.max_holding_days} (trading days), 1-10 preferred; exits may come earlier "
                                   "via stop/target/exit rules",
@@ -614,7 +637,10 @@ class AutoResearcher:
             by_status = dict(s.execute(select(R.status, func.count()).where(R.universe_id == self.universe_id)
                                        .group_by(R.status)).all())
         return _clean({"n_trials": n, "n_trials_universe": int(sum(by_status.values())), "final_tests_used": finals,
-                       "universe": {"id": self.universe_id, "n_symbols": len(self.research)},
+                       "universe": {"id": self.universe_id, "n_symbols": len(self.research),
+                                    "with_earnings": sum("earn_days_to" in v.columns for v in self.research.values())},
+                       "earnings_rule": {"blackout_days": self.bt.earnings_blackout_days,
+                                         "exit_before": self.bt.exit_before_earnings},
                        "passive": self.passive_reference(),
                        "by_status": by_status, "equivalents_hidden": hidden,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,

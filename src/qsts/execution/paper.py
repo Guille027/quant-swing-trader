@@ -74,13 +74,14 @@ class PaperTrading:
                             "consistency": rc.fitness if rc else None, "final": rc.final if rc else None})
         return out
 
-    def _symbols_for(self, version_id: str) -> list[str]:
+    def _research_setup(self, version_id: str) -> tuple[list[str], dict]:
+        """Symbols and engine config the strategy was validated with (paper must use the same rules)."""
         with self.sf() as s:
             e = s.scalars(select(m.Experiment).where(m.Experiment.strategy_version_id == version_id)
                           .order_by(m.Experiment.created_at.desc())).first()
         if e is None or not e.config.get("symbols"):
             raise PaperError("no sé con qué acciones se validó esta estrategia")
-        return list(e.config["symbols"])
+        return list(e.config["symbols"]), dict(e.config.get("engine") or {})
 
     def _load(self, symbols: list[str], until=None) -> dict[str, pd.DataFrame]:
         data = {}
@@ -108,7 +109,7 @@ class PaperTrading:
         with self.sf() as s:
             v = s.scalars(select(m.StrategyVersion).where(m.StrategyVersion.strategy_id == strategy_id)
                           .order_by(m.StrategyVersion.version.desc())).first()
-        symbols = self._symbols_for(v.id)
+        symbols, engine = self._research_setup(v.id)
         data = self._load(symbols, until=asof)
         if not data:
             raise PaperError("no hay datos para las acciones de esta estrategia")
@@ -117,7 +118,8 @@ class PaperTrading:
         behind = len(nyse_schedule(last_bar + pd.Timedelta(days=1), due)) if last_bar < due else 0
         if behind > MAX_STALE_SESSIONS:
             raise PaperError(f"los precios llevan {behind} sesiones sin actualizar: actualízalos antes de empezar")
-        cfg = BacktestConfig(initial_capital=float(capital))
+        cfg = config_from_dict({**engine, "initial_capital": float(capital)}) if engine else \
+            BacktestConfig(initial_capital=float(capital))
         self.registry.transition(strategy_id, Status.PAPER, actor=actor,
                                  reason=f"paper trading started with {capital:.0f} (fictitious)")
         with self.sf() as s, s.begin():
@@ -156,6 +158,12 @@ class PaperTrading:
         due = last_completed_session(asof if asof is not None else until)
         stale = len(nyse_schedule(last_bar + pd.Timedelta(days=1), due)) if last_bar < due else 0
         nxt = next_open(last_bar)
+        def days_to(sym):
+            df = data.get(sym)
+            if df is None or "earn_days_to" not in df:
+                return None
+            v = float(df["earn_days_to"].iloc[-1])
+            return v if np.isfinite(v) and v <= 10 else None
         orders = [{"action": "VENDER", "symbol": p["symbol"], "qty": p["qty"], "reason": p["pending_exit"],
                    "approx_value": p["market_value"]} for p in res.open_positions if p["pending_exit"]]
         # buys are filled in decision order while cash lasts (sells at the same open free cash first)
@@ -168,7 +176,8 @@ class PaperTrading:
             orders.append({"action": "COMPRAR", "symbol": o["symbol"], "qty": o["qty"] * (fit / want if want else 0),
                            "approx_value": fit, "last_close": c, "approx_stop": c - o["stop_dist"],
                            "approx_target": c + o["tp_dist"] if np.isfinite(o["tp_dist"]) else None,
-                           "likely": fit > 0.01 * want, "partial": 0 < fit < 0.99 * want})
+                           "likely": fit > 0.01 * want, "partial": 0 < fit < 0.99 * want,
+                           "earnings_in": days_to(o["symbol"])})
         revisions = self._journal(ps.id, eq, orders)
         trades = res.trades
         closed = [] if trades.empty else [
@@ -183,7 +192,9 @@ class PaperTrading:
                "equity": equity_now, "cash": float(eq["cash"].iloc[-1]), "pnl": equity_now - ps.capital,
                "return": equity_now / ps.capital - 1, "days": int(len(eq) - 1),
                "n_closed": len(closed), "win_rate": float(np.mean([t["pnl"] > 0 for t in closed])) if closed else None,
-               "positions": [{**p, "entry_ts": str(p["entry_ts"])[:10]} for p in res.open_positions],
+               "positions": [{**p, "entry_ts": str(p["entry_ts"])[:10], "earnings_in": days_to(p["symbol"])}
+                             for p in res.open_positions],
+               "earnings_rule": {"blackout_days": cfg.earnings_blackout_days, "exit_before": cfg.exit_before_earnings},
                "orders": orders, "closed": closed[-200:], "revisions": revisions,
                "missing_symbols": sorted(set(ps.symbols) - set(data)),
                "curve": [{"time": int(t.timestamp()), "value": float(x)} for t, x in eq["equity"].items()]}

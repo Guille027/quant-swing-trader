@@ -75,3 +75,23 @@ def test_only_candidates_can_be_simulated(sf):
     reg.register("r1", SD)
     with pytest.raises(PaperError):
         PaperTrading(sf, load).start("r1", asof="2022-06-01 21:00")
+
+
+def test_paper_uses_the_rules_the_strategy_was_validated_with(sf):
+    from qsts.db import models as m
+    reg = StrategyRegistry(sf)
+    reg.register("s2", SD)
+    rec = ExperimentTracker(sf).run_backtest(SD, {k: DATA[k] for k in ("AAA", "BBB")},
+                                             BacktestConfig(earnings_blackout_days=3, exit_before_earnings=True),
+                                             strategy_id="s2")
+    reg.transition("s2", Status.BACKTESTED, reason="t", actor="system", evidence={"backtest_experiment_id": rec.id})
+    reg.transition("s2", Status.VALIDATING, reason="t", actor="system")
+    reg.transition("s2", Status.CANDIDATE, reason="t", actor="user",
+                   evidence={"walk_forward_experiment_id": "x", "robustness_passed": True, "oos_experiment_id": "y",
+                             "monte_carlo_experiment_id": "z"})
+    pt = PaperTrading(sf, load)
+    sid = pt.start("s2", 7_000, asof="2022-06-01 21:00")
+    with sf() as s:
+        cfg = s.get(m.PaperSession, sid).config
+    assert cfg["earnings_blackout_days"] == 3 and cfg["exit_before_earnings"] is True and cfg["initial_capital"] == 7000
+    assert pt.view(until="2022-06-10")["earnings_rule"] == {"blackout_days": 3, "exit_before": True}

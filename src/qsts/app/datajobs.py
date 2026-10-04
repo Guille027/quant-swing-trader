@@ -32,6 +32,12 @@ def ingest_one(repo: MarketDataRepository, prov, symbol: str, start, end, asset_
     return {"symbol": symbol, "bars": n, "warnings": sorted({i.code for i in vb.report.issues})}
 
 
+def ingest_earnings(repo: MarketDataRepository, prov, symbol: str) -> int:
+    """Quarterly results calendar (past + upcoming). Returns the number of events stored."""
+    ev = prov.get_earnings(symbol)
+    return repo.store_earnings(symbol, ev, prov.name) if len(ev) else 0
+
+
 def last_completed_session(now: pd.Timestamp | None = None) -> pd.Timestamp:
     now = now or pd.Timestamp.now(tz="UTC")
     sched = nyse_schedule(now - pd.Timedelta(days=10), now)
@@ -48,6 +54,8 @@ class JobState:
     ok: int = 0
     up_to_date: int = 0
     failed: dict = field(default_factory=dict)
+    earnings_ok: int = 0       # symbols with at least one earnings event downloaded
+    earnings_missing: int = 0  # symbols where the provider returned none or failed (never fatal)
     started_at: str | None = None
     finished_at: str | None = None
     message: str | None = None
@@ -70,7 +78,8 @@ class DataJobRunner:
         self.logs.append(f"{datetime.now().strftime('%H:%M:%S')}  {msg}")
 
     def start(self, kind: str, symbols: list[str], start: str = "2010-01-01", *, incremental: bool = False,
-              asset_fields: dict[str, dict] | None = None, memberships: tuple | None = None) -> bool:
+              asset_fields: dict[str, dict] | None = None, memberships: tuple | None = None,
+              bars: bool = True, earnings: bool = True) -> bool:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
@@ -78,11 +87,23 @@ class DataJobRunner:
             self.state = JobState(running=True, kind=kind, total=len(symbols),
                                   started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
             self._thread = threading.Thread(target=self._run, daemon=True, name="datajob",
-                                            args=(symbols, start, incremental, asset_fields or {}, memberships))
+                                            args=(symbols, start, incremental, asset_fields or {}, memberships,
+                                                  bars, earnings))
             self._thread.start()
             return True
 
-    def _run(self, symbols, start, incremental, asset_fields, memberships) -> None:
+    def _earnings(self, prov, sym: str) -> None:
+        try:
+            n = ingest_earnings(self.repo, prov, sym)
+        except Exception as e:  # noqa: BLE001 - earnings are optional data; prices must not fail because of them
+            n = 0
+            self.log(f"{sym}: sin resultados trimestrales ({e!r})"[:200])
+        if n:
+            self.state.earnings_ok += 1
+        else:
+            self.state.earnings_missing += 1
+
+    def _run(self, symbols, start, incremental, asset_fields, memberships, bars=True, earnings=True) -> None:
         keep_awake(True)
         try:
             prov = self.provider_factory()
@@ -95,11 +116,19 @@ class DataJobRunner:
                     self.log("Detenido por el usuario")
                     break
                 self.state.current = sym
+                if not bars:  # earnings-only job
+                    if self.repo.last_bar(sym) is not None:
+                        self._earnings(prov, sym)
+                    self.state.done += 1
+                    time.sleep(self.pause)
+                    continue
                 s = start
                 if incremental:
                     last = self.repo.last_bar(sym)
                     if last is not None and last >= last_done:
                         self.state.up_to_date += 1
+                        if earnings:  # upcoming result dates still matter (earnings blackout)
+                            self._earnings(prov, sym)
                         self.state.done += 1
                         continue
                     if last is not None:
@@ -109,6 +138,8 @@ class DataJobRunner:
                         r = ingest_one(self.repo, prov, sym, s, end, asset_fields.get(sym))
                         self.state.ok += 1
                         self.log(f"{sym}: {r['bars']} barras" + (f" (avisos: {', '.join(r['warnings'])})" if r["warnings"] else ""))
+                        if earnings:
+                            self._earnings(prov, sym)
                         break
                     except DataQualityError as e:
                         self.state.failed[sym] = f"datos rechazados: {e}"[:200]
@@ -127,7 +158,9 @@ class DataJobRunner:
                 n = self.repo.set_memberships(universe, rows, source)
                 self.log(f"Pertenencia a {universe} registrada para {n} acciones (fuente: {source})")
             self.state.message = (f"{self.state.ok} descargadas, {self.state.up_to_date} ya al día, "
-                                  f"{len(self.state.failed)} con problemas")
+                                  f"{len(self.state.failed)} con problemas"
+                                  + (f"; resultados trimestrales: {self.state.earnings_ok} con datos, "
+                                     f"{self.state.earnings_missing} sin datos" if earnings else ""))
             self.log("Terminado: " + self.state.message)
         except Exception as e:  # noqa: BLE001
             self.state.message = f"error: {e!r}"[:300]

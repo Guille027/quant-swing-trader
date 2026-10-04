@@ -133,12 +133,21 @@ class ExperimentTracker:
             ds = s.get(m.DatasetVersion, e.dataset_version_id)
         data = {k: data[k] for k in e.config["symbols"] if k in data}
         fp = dataset_fingerprint(data)
-        if fp != ds.spec["frames"] and e.config.get("end"):
-            # experiments run on a research view (data cut at the OOS boundary): rebuild that view
-            end_ts = pd.Timestamp(e.config["end"])
-            cut = {k: v[v.index <= end_ts] for k, v in data.items()}
-            if dataset_fingerprint(cut) == ds.spec["frames"]:
-                data, fp = cut, ds.spec["frames"]
+        if fp != ds.spec["frames"]:
+            # rebuild how the experiment saw the data: research view cut at its end, and/or without the earnings
+            # columns added after it was recorded
+            from qsts.data.earnings import EARN_COLS
+            end_ts = pd.Timestamp(e.config["end"]) if e.config.get("end") else None
+            def variants():
+                no_earn = {k: v.drop(columns=[c for c in EARN_COLS if c in v]) for k, v in data.items()}
+                for base in (data, no_earn):
+                    yield base
+                    if end_ts is not None:
+                        yield {k: v[v.index <= end_ts] for k, v in base.items()}
+            for cand in variants():
+                if dataset_fingerprint(cand) == ds.spec["frames"]:
+                    data, fp = cand, ds.spec["frames"]
+                    break
         if fp != ds.spec["frames"]:
             bad = sorted(k for k in ds.spec["frames"] if fp.get(k) != ds.spec["frames"][k])
             return {"reproduced": False, "reason": f"dataset differs for {bad}"}

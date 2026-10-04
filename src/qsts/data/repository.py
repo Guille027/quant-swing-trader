@@ -134,6 +134,47 @@ class MarketDataRepository:
         df["ex_date"] = pd.to_datetime(df["ex_date"]).dt.tz_localize("UTC")
         return df
 
+    # ------------------------------------------------------------------ earnings
+    def store_earnings(self, symbol: str, events: pd.DataFrame, source: str) -> int:
+        """Upsert by (asset, announcement time): later fetches fill in reported EPS / surprise."""
+        aid = self.asset_id(symbol)
+        rows = []
+        for r in events.itertuples(index=False):
+            def num(x):
+                return None if x is None or pd.isna(x) else float(x)
+            rows.append({"asset_id": aid, "announced_at": _naive_utc(r.announced_at),
+                         "time_known": bool(getattr(r, "time_known", True)), "eps_estimate": num(getattr(r, "eps_estimate", None)),
+                         "eps_reported": num(getattr(r, "eps_reported", None)), "surprise_pct": num(getattr(r, "surprise_pct", None)),
+                         "source": source, "fetched_at": _naive_utc(pd.Timestamp.now(tz="UTC"))})
+        if rows:
+            with self.sf() as s, s.begin():
+                _upsert(s, m.EarningsEvent, rows, ["asset_id", "announced_at"],
+                        ["time_known", "eps_estimate", "eps_reported", "surprise_pct", "source", "fetched_at"])
+        return len(rows)
+
+    def load_earnings(self, symbol: str) -> pd.DataFrame:
+        cols = ["announced_at", "time_known", "eps_estimate", "eps_reported", "surprise_pct"]
+        try:
+            aid = self.asset_id(symbol)
+        except KeyError:
+            return pd.DataFrame(columns=cols)
+        with self.sf() as s:
+            rows = s.execute(select(m.EarningsEvent.announced_at, m.EarningsEvent.time_known, m.EarningsEvent.eps_estimate,
+                                    m.EarningsEvent.eps_reported, m.EarningsEvent.surprise_pct)
+                             .where(m.EarningsEvent.asset_id == aid).order_by(m.EarningsEvent.announced_at)).all()
+        df = pd.DataFrame(rows, columns=cols)
+        if len(df):
+            df["announced_at"] = pd.to_datetime(df["announced_at"]).dt.tz_localize("UTC")
+        return df
+
+    def earnings_summary(self) -> dict[str, dict]:
+        with self.sf() as s:
+            rows = s.execute(select(m.Asset.symbol, func.count(), func.min(m.EarningsEvent.announced_at),
+                                    func.max(m.EarningsEvent.announced_at), func.count(m.EarningsEvent.surprise_pct))
+                             .join(m.EarningsEvent, m.EarningsEvent.asset_id == m.Asset.id).group_by(m.Asset.symbol)).all()
+        return {r[0]: {"events": int(r[1]), "first": str(pd.Timestamp(r[2]).date()), "last": str(pd.Timestamp(r[3]).date()),
+                       "with_surprise": int(r[4])} for r in rows}
+
     # ------------------------------------------------------------------ universe (survivorship-safe)
     def add_membership(self, universe: str, symbol: str, start: date, end: date | None = None,
                        source: str | None = None) -> None:

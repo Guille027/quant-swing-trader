@@ -82,8 +82,12 @@
       <div class="row"><label>Desde <input id="sym-start" value="2010-01-01" size="10"></label>
         <button id="sym-download">⬇ Descargar</button></div>
       <h3 style="margin-top:18px">Actualizar precios</h3>
-      <p>Descarga los días nuevos de todas tus acciones (solo lo que falta).</p>
+      <p>Descarga los días nuevos de todas tus acciones (solo lo que falta) y las próximas fechas de resultados.</p>
       <button id="data-update">⟳ Actualizar ahora</button>
+      <h3 style="margin-top:18px">Resultados trimestrales (earnings)</h3>
+      <p id="earn-info" class="muted">—</p>
+      <p class="muted small">Fechas de presentación de resultados (pasadas y próximas), beneficio esperado y real, y la sorpresa en %. Sirven para no comprar justo antes de los resultados y para que la investigación pruebe reglas con ellos. Fuente: Yahoo (calendario de resultados).</p>
+      <button id="earn-download">⬇ Descargar resultados de todas mis acciones</button>
     </div>
   </div>
   <div class="card" id="job-card"><h3>Descarga <button id="job-stop" class="small-btn">■ Detener</button></h3>
@@ -158,6 +162,7 @@
       <button id="ar-start" class="primary">▶ Empezar a investigar</button>
       <button id="ar-stop">■ Detener</button>
       <label><input type="checkbox" id="ar-ai" checked> usar IA (Gemini)</label>
+      <label title="No compra si hay resultados en los próximos días y vende la sesión antes de los resultados (evita los saltos de precio). Requiere descargar los resultados en Datos."><input type="checkbox" id="ar-earn" checked> evitar resultados trimestrales</label>
       <label>Ciclos <select id="ar-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
       <span id="ar-msg" class="muted"></span>
     </div>

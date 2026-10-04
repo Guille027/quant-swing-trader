@@ -15,6 +15,12 @@ def empty_actions() -> pd.DataFrame:
                          "value": pd.Series([], dtype="float64")})
 
 
+def empty_earnings() -> pd.DataFrame:
+    return pd.DataFrame({"announced_at": pd.DatetimeIndex([], tz="UTC"), "time_known": pd.Series([], dtype=bool),
+                         "eps_estimate": pd.Series([], dtype=float), "eps_reported": pd.Series([], dtype=float),
+                         "surprise_pct": pd.Series([], dtype=float)})
+
+
 def utc_bounds(start, end) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """(start, exclusive end). A date-only `end` includes that whole day."""
     def u(t):
@@ -35,6 +41,11 @@ class MarketDataProvider(ABC):
     def get_bars(self, symbol: str, timeframe: Timeframe, start, end) -> pd.DataFrame:
         """Raw OHLCV (lower-case columns), DatetimeIndex = bar open (or session date for daily bars).
         `end` is inclusive. Must never fill, interpolate or otherwise fabricate bars."""
+
+    def get_earnings(self, symbol: str) -> pd.DataFrame:
+        """Columns announced_at (UTC), time_known, eps_estimate, eps_reported, surprise_pct (in %).
+        Includes upcoming (not yet reported) dates. Empty when the provider has none."""
+        return empty_earnings()
 
     def get_corporate_actions(self, symbol: str) -> pd.DataFrame:
         """Columns ex_date (UTC), kind ('split' | 'dividend'), value (split ratio | RAW cash per share)."""

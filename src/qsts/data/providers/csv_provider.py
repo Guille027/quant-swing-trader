@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from qsts.data.bars import OHLCV, Timeframe
-from qsts.data.providers.base import MarketDataProvider, empty_actions, utc_bounds
+from qsts.data.providers.base import MarketDataProvider, empty_actions, empty_earnings, utc_bounds
 
 
 class CSVProvider(MarketDataProvider):
@@ -29,6 +29,18 @@ class CSVProvider(MarketDataProvider):
         if e is not None:
             df = df[df.index < e]
         return df[OHLCV]
+
+    def get_earnings(self, symbol: str) -> pd.DataFrame:
+        """<root>/earnings/<SYMBOL>.csv with announced_at (ISO, tz or UTC), time_known, eps_estimate, eps_reported,
+        surprise_pct."""
+        path = self.root / "earnings" / f"{symbol.upper()}.csv"
+        if not path.exists():
+            return empty_earnings()
+        e = pd.read_csv(path)
+        e["announced_at"] = pd.to_datetime(e["announced_at"], utc=True)
+        if "time_known" not in e:
+            e["time_known"] = True
+        return e
 
     def get_corporate_actions(self, symbol: str) -> pd.DataFrame:
         path = self.root / "actions" / f"{symbol.upper()}.csv"

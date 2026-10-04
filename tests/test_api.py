@@ -194,3 +194,37 @@ def test_paper_endpoints(client):
     r = c.post("/api/paper/start", json={"strategy_id": "p1", "capital": 5000})
     assert r.status_code == 400 and "actualízalos" in r.json()["detail"]  # test data ends in 2022: stale
     assert c.post("/api/paper/stop", json={}).status_code == 400
+
+
+def test_earnings_download_columns_and_reproduce(client, tmp_path):
+    import time
+    import pandas as pd
+    from qsts.data.providers.csv_provider import CSVProvider
+    c, ctx = client
+    r0 = c.post("/api/lab/backtest", json={"definition": DEF, "symbols": ["AAA"]}).json()  # recorded before earnings
+    root = tmp_path / "csv3"
+    (root / "earnings").mkdir(parents=True)
+    pd.DataFrame({"announced_at": ["2020-01-30T21:00:00Z", "2020-04-30T12:00:00Z", "2020-07-30T21:00:00Z"],
+                  "time_known": [True, True, True], "eps_estimate": [1.0, 1.0, 1.0], "eps_reported": [1.1, 0.9, 1.2],
+                  "surprise_pct": [10.0, -10.0, 20.0]}).to_csv(root / "earnings" / "AAA.csv", index=False)
+    ctx.extra["data_provider_factory"] = lambda: CSVProvider(root)
+    assert c.post("/api/data/ingest", json={"mode": "earnings"}).json()["started"]
+    for _ in range(300):
+        j = c.get("/api/data/job").json()
+        if not j["running"]:
+            break
+        time.sleep(0.1)
+    assert j["earnings_ok"] == 1 and j["earnings_missing"] == 2  # BBB and SPY have none: reported, not invented
+    summ = c.get("/api/data/summary").json()
+    assert summ["earnings"]["symbols"] == 1 and summ["earnings_rule"]["blackout_days"] == 3
+    f = ctx.research_frame("AAA")
+    assert {"earn_days_since", "earn_surprise", "earn_days_to"} <= set(f.columns)
+    assert f.loc["2020-08-03", "earn_surprise"].item() == 20.0
+    assert "earn_days_to" not in ctx.research_frame("BBB")
+    rp = c.post(f"/api/experiments/{r0['experiment_id']}/reproduce").json()
+    assert rp["reproduced"] is True  # the experiment saw the data without earnings columns
+    r = ctx.autoresearcher()
+    assert r.bt.earnings_blackout_days == 3 and r.bt.exit_before_earnings is True
+    from qsts.research.autoresearch import AutoResearchConfig
+    r_off = ctx.autoresearcher(AutoResearchConfig(oos_start=ctx.settings.oos_start, avoid_earnings=False))
+    assert r_off.bt.earnings_blackout_days == 0 and r_off.universe_id != r.universe_id  # separate rankings

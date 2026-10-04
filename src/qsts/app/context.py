@@ -44,13 +44,19 @@ class AppContext:
 
     def research_frame(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
         """The ONE way research code gets bars: stored RAW data re-validated (ValidatedBars contract), then
-        backward-adjusted for splits and dividends from stored corporate actions (`raw_close` kept).
+        backward-adjusted for splits and dividends from stored corporate actions (`raw_close` kept), plus
+        point-in-time earnings columns when results are stored for the symbol.
         Using the same loader everywhere keeps dataset hashes stable for reproduction."""
         from qsts.data.adjust import adjust
         from qsts.data.quality import validate_and_clean
         raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]
         vb = validate_and_clean(raw, symbol, timeframe)
-        return adjust(vb.df, self.repo.load_corporate_actions(symbol), "total")
+        df = adjust(vb.df, self.repo.load_corporate_actions(symbol), "total")
+        ev = self.repo.load_earnings(symbol)
+        if len(ev) and timeframe is Timeframe.D1:  # point-in-time earnings columns (qsts.data.earnings)
+            from qsts.data.earnings import earnings_columns
+            df = df.join(earnings_columns(df.index, ev))
+        return df
 
     def adjusted_bars(self, symbol: str, timeframe: Timeframe = Timeframe.D1, asof=None) -> pd.DataFrame:
         """Stored RAW bars backward-adjusted with the corporate actions known at `asof` (ex_date <= asof),
@@ -98,7 +104,10 @@ class AppContext:
             ai = AIResearchService(GeminiProvider(self.settings.gemini_api_key.get_secret_value(),
                                                   model=self.settings.gemini_model),
                                    self.sf, max_calls_per_day=self.settings.ai_max_calls_per_day)
-        return AutoResearcher(self.sf, data, cfg, ai=ai, log=log, stop_event=stop_event, benchmark=bench)
+        from qsts.backtest.engine import BacktestConfig
+        bt = BacktestConfig(earnings_blackout_days=self.settings.earnings_blackout_days if cfg.avoid_earnings else 0,
+                            exit_before_earnings=self.settings.exit_before_earnings if cfg.avoid_earnings else False)
+        return AutoResearcher(self.sf, data, cfg, bt, ai=ai, log=log, stop_event=stop_event, benchmark=bench)
 
     def symbols(self) -> list[str]:
         with self.sf() as s:

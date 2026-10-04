@@ -63,6 +63,9 @@ class BacktestConfig:
     min_qty: float = 1e-6
     bars_per_year: int = 252
     costs: CostModel = field(default_factory=CostModel)
+    # Quarterly results (needs the `earn_days_to` column from qsts.data.earnings; inactive without it):
+    earnings_blackout_days: int = 0      # no new entry if results are due within this many sessions
+    exit_before_earnings: bool = False   # exit at the open BEFORE the results gap (decided 2 sessions ahead)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -138,6 +141,8 @@ class BacktestEngine:
         B = {sym: {k: df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close", "volume")}
              for sym, df in frames.items()}
         SIG = {sym: {k: sg[k].to_numpy() for k in sg.columns} for sym, sg in sigs.items()}
+        EARN = {sym: (df["earn_days_to"].to_numpy(dtype=float) if "earn_days_to" in df else None)
+                for sym, df in frames.items()}
         IDX = {sym: list(df.index) for sym, df in frames.items()}
 
         cash = cfg.initial_capital
@@ -277,6 +282,8 @@ class BacktestEngine:
                     reason = "reversal"
                 elif strategy.max_holding_bars is not None and p.bars >= int(strategy.resolve(strategy.max_holding_bars)):
                     reason = "time_stop"
+                elif cfg.exit_before_earnings and EARN[sym] is not None and EARN[sym][i] <= 2:
+                    reason = "earnings_exit"  # fills at the next open, one session before the results gap
                 if reason:
                     p.pending_exit, p.pending_exit_qty = reason, p.qty
                 elif strategy.stop.trailing and np.isfinite(s["stop_dist"]):
@@ -291,6 +298,10 @@ class BacktestEngine:
                 if sym in pos or sym in pending_entries:
                     continue
                 s = {k: col[i] for k, col in SIG[sym].items()}
+                if (s["long_entry"] or s["short_entry"]) and cfg.earnings_blackout_days > 0 \
+                        and EARN[sym] is not None and EARN[sym][i] <= cfg.earnings_blackout_days:
+                    rejected.append({"ts": ts, "symbol": sym, "reason": "earnings_blackout"})
+                    continue
                 if s["long_entry"] or s["short_entry"]:
                     cands.append((-(s["rank"] if np.isfinite(s["rank"]) else -np.inf), _tiebreak(sym, ts), sym, s))
             # rank desc; ties broken by a per-day pseudo-random but reproducible key (NOT the ticker's

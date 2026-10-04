@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from qsts.data.bars import OHLCV, Timeframe
-from qsts.data.providers.base import MarketDataProvider, empty_actions, utc_bounds
+from qsts.data.providers.base import MarketDataProvider, empty_actions, empty_earnings, utc_bounds
 
 _INTERVAL = {Timeframe.D1: "1d", Timeframe.W1: "1wk", Timeframe.H1: "1h"}
 
@@ -79,6 +79,22 @@ class YFinanceProvider(MarketDataProvider):
                             "close": h["Close"].values * f, "volume": h["Volume"].values / f}, index=h.index)
         out.index.name = "ts"
         return out[OHLCV]
+
+    def get_earnings(self, symbol: str, limit: int = 100) -> pd.DataFrame:
+        """Yahoo earnings calendar (yfinance scrapes finance.yahoo.com/calendar/earnings; up to 100 rows = ~25 years,
+        incl. upcoming dates). Times have hour precision in America/New_York; "12 AM" means the time is unknown.
+        Surprise(%) is in percent. UNVERIFIED from the build environment (host blocked): check coverage in the app."""
+        df = self._ticker(symbol).get_earnings_dates(limit=limit)
+        if df is None or len(df) == 0:
+            return empty_earnings()
+        idx = pd.DatetimeIndex(df.index)
+        idx = idx.tz_localize("America/New_York") if idx.tz is None else idx.tz_convert("America/New_York")
+        col = lambda name: pd.to_numeric(df[name], errors="coerce").to_numpy() if name in df else np.nan  # noqa: E731
+        out = pd.DataFrame({"announced_at": idx.tz_convert("UTC"),
+                            "time_known": ~((idx.hour == 0) & (idx.minute == 0)),
+                            "eps_estimate": col("EPS Estimate"), "eps_reported": col("Reported EPS"),
+                            "surprise_pct": col("Surprise(%)")})
+        return out.drop_duplicates("announced_at").sort_values("announced_at").reset_index(drop=True)
 
     def get_corporate_actions(self, symbol: str) -> pd.DataFrame:
         a = self._yahoo_actions(symbol)

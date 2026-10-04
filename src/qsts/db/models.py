@@ -85,6 +85,22 @@ class DatasetVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class EarningsEvent(Base):
+    """Quarterly results: announcement time (UTC) and EPS figures. Point-in-time use goes through
+    qsts.data.earnings (info / impact sessions), never through the raw timestamp."""
+    __tablename__ = "earnings_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
+    announced_at: Mapped[datetime] = mapped_column(DateTime)
+    time_known: Mapped[bool] = mapped_column(Boolean, default=True)
+    eps_estimate: Mapped[float | None] = mapped_column(Float)
+    eps_reported: Mapped[float | None] = mapped_column(Float)
+    surprise_pct: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str | None] = mapped_column(String(32))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    __table_args__ = (UniqueConstraint("asset_id", "announced_at", name="uq_earnings_event"),)
+
+
 class Fundamental(Base):
     __tablename__ = "fundamentals"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

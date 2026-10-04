@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     benchmark: str = "SPY"
     # Research ignores a stock's history before it joined the S&P 500 (when the join date is known).
     pit_membership: bool = True
+    # Quarterly results in research: no new entries within N sessions of results, exit before the results gap.
+    earnings_blackout_days: int = 3
+    exit_before_earnings: bool = True
     gemini_model: str = "gemini-2.5-flash"
     ai_max_calls_per_day: int = 50
 

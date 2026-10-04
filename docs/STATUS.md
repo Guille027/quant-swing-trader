@@ -33,7 +33,14 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 14 | Desktop UI: FastAPI backend (127.0.0.1) + web frontend (dashboard, signals/approvals, charts with as-of replay, strategies, Strategy Lab, research/REPRODUCE, logs), `qsts desktop` native window via pywebview | IMPLEMENTED |
 | 22 | Full validation on real data | STARTED — baselines through the full pipeline on real data (below); no PIT S&P 500 membership yet |
 
-Implied volatility, market breadth, fundamentals/news/macro *providers*: NOT STARTED (schema + PIT queries exist).
+Quarterly results (earnings): Yahoo earnings calendar via yfinance (past + upcoming, EPS estimate/reported/surprise),
+stored in `earnings_events`, turned into point-in-time columns (info session = first close after the announcement; impact
+session = first open after it; unknown time handled conservatively) and features `days_since_earnings`,
+`earnings_surprise`, `days_to_earnings`; engine rules `earnings_blackout_days` / `exit_before_earnings` (research default
+3 sessions + exit before results). IMPLEMENTED; Yahoo endpoint UNVERIFIED from the build environment (host blocked) —
+coverage is shown in the Datos tab. Assumption: result dates are known 10 sessions ahead.
+Implied volatility, market breadth, news/macro *providers*: NOT STARTED (schema + PIT queries exist). Historical news is
+deliberately not scored with an LLM: the model knows what happened afterwards (hindsight leakage).
 S&P 500 universe: CURRENT member list (datasets/s-and-p-500-companies on GitHub, Wikipedia fallback) with "Date added";
 research ignores each stock's history before it joined (partial survivorship mitigation). Removed/delisted members are
 still missing: a full point-in-time membership source remains NOT STARTED.

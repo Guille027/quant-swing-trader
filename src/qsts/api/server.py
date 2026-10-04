@@ -80,13 +80,14 @@ class BacktestBody(BaseModel):
 
 class AutoResearchBody(BaseModel):
     use_ai: bool = True
+    avoid_earnings: bool = True
     max_cycles: int = 0  # 0 = until stopped
     population: int = 20
     generations: int = 4
 
 
 class IngestBody(BaseModel):
-    mode: str  # sp500 | symbols | update
+    mode: str  # sp500 | symbols | update | earnings
     symbols: list[str] = []
     sample: int | None = None  # sp500: random sample size (None = all)
     start: str = "2010-01-01"
@@ -305,7 +306,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         joined = ctx.repo.membership_starts("SP500")
         for r in rows:
             r["sp500_since"] = str(joined[r["symbol"]]) if r["symbol"] in joined else None
+        earn = ctx.repo.earnings_summary()
+        for r in rows:
+            r["earnings"] = earn.get(r["symbol"])
         return _j({"count": len(rows), "symbols": rows, "benchmark": ctx.settings.benchmark,
+                   "earnings": {"symbols": len(earn), "events": sum(v["events"] for v in earn.values()),
+                                "first": min((v["first"] for v in earn.values()), default=None)},
+                   "earnings_rule": {"blackout_days": ctx.settings.earnings_blackout_days,
+                                     "exit_before": ctx.settings.exit_before_earnings},
                    "has_benchmark": any(r["symbol"] == ctx.settings.benchmark for r in rows),
                    "first": min((r["first"] for r in rows), default=None), "last": max((r["last"] for r in rows), default=None)})
 
@@ -324,10 +332,15 @@ def create_app(ctx: AppContext) -> FastAPI:
         bench = ctx.settings.benchmark
         have = [r["symbol"] for r in ctx.repo.summary()]
         fields, members = {}, None
+        bars = True
         if body.mode == "update":
             if not have:
                 raise HTTPException(400, "no hay datos que actualizar")
             syms, incremental = have, True
+        elif body.mode == "earnings":
+            if not have:
+                raise HTTPException(400, "primero descarga precios")
+            syms, incremental, bars = have, False, False
         elif body.mode == "symbols":
             syms = sorted({x.strip().upper().replace(".", "-") for x in body.symbols if x.strip()})
             if not syms:
@@ -347,10 +360,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             incremental = False
         else:
             raise HTTPException(400, "modo desconocido")
-        if bench not in syms and bench not in have:
+        if bars and bench not in syms and bench not in have:
             syms = [bench, *syms]
         started = _data_runner().start(body.mode, syms, body.start, incremental=incremental, asset_fields=fields,
-                                       memberships=members)
+                                       memberships=members, bars=bars)
         if not started:
             raise HTTPException(409, "ya hay una descarga en marcha")
         return {"started": True, "symbols": len(syms)}
@@ -418,13 +431,14 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.get("/api/autoresearch/status")
     def ar_status():
         return _j(_runner().status() | {"ai_available": bool(ctx.settings.gemini_api_key),
+                                        "earnings_symbols": len(ctx.repo.earnings_summary()),
                                         "oos_start": ctx.settings.oos_start})
 
     @app.post("/api/autoresearch/start")
     def ar_start(body: AutoResearchBody):
         if not ctx.symbols():
             raise HTTPException(400, "no hay datos: ejecuta primero `qsts ingest`")
-        cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai,
+        cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai, avoid_earnings=body.avoid_earnings,
                                  population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)))
         return {"started": _runner().start(cfg, max(0, body.max_cycles))}
 

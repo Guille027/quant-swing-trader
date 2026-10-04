@@ -85,6 +85,10 @@ async function loadData() {
     $("#data-summary").innerHTML = d.count ? `<b>${d.count}</b> acciones, del <b>${d.first}</b> al <b>${d.last}</b>.` +
       (d.has_benchmark ? "" : ` <span class="bad">Falta ${d.benchmark} (referencia del mercado).</span>`) : '<span class="bad">No hay datos todavía.</span>';
     dataRows = d.symbols; renderDataTable();
+    $("#earn-info").innerHTML = d.earnings.symbols
+      ? `Tienes resultados de <b>${d.earnings.symbols}</b> de ${d.count} acciones (${d.earnings.events} presentaciones, desde ${d.earnings.first}).` +
+        (d.earnings.symbols < d.count * 0.8 ? ' <span class="bad">Faltan muchas: pulsa descargar.</span>' : "")
+      : '<span class="bad">Aún no hay resultados descargados.</span>';
   } catch (e) { $("#data-summary").textContent = e.message; }
   api("/api/data/sp500").then(sp => {
     $("#sp500-info").innerHTML = `Lista actual: <b>${sp.count}</b> empresas (ya tienes ${sp.loaded}). Fuente: ${esc(sp.source.replace("https://", ""))}.`;
@@ -95,7 +99,8 @@ function renderDataTable() {
   const q = ($("#data-filter").value || "").toUpperCase();
   const rows = dataRows.filter(r => !q || r.symbol.includes(q) || (r.name || "").toUpperCase().includes(q) || (r.sector || "").toUpperCase().includes(q));
   table($("#data-table"), rows.slice(0, 600), [["Símbolo", r => r.symbol], ["Empresa", r => esc(r.name || "—")], ["Sector", r => esc(r.sector || "—")],
-    ["Desde", r => r.first], ["Hasta", r => r.last], ["Días", r => r.bars], ["En el S&P 500 desde", r => r.sp500_since || "—"]]);
+    ["Desde", r => r.first], ["Hasta", r => r.last], ["Días", r => r.bars], ["En el S&P 500 desde", r => r.sp500_since || "—"],
+    ["Resultados", r => r.earnings ? `${r.earnings.events} (desde ${r.earnings.first})` : '<span class="muted">—</span>']]);
 }
 $("#data-filter").oninput = renderDataTable;
 let jobWasRunning = false;
@@ -104,7 +109,7 @@ async function loadJob() {
   const pctDone = j.total ? Math.round(100 * j.done / j.total) : 0;
   $("#job-bar").style.width = (j.running ? pctDone : (j.total ? 100 : 0)) + "%";
   $("#job-stop").disabled = !j.running;
-  ["#sp-download", "#sym-download", "#data-update"].forEach(id => $(id).disabled = j.running);
+  ["#sp-download", "#sym-download", "#data-update", "#earn-download"].forEach(id => $(id).disabled = j.running);
   $("#job-text").innerHTML = j.running ? `Descargando <b>${esc(j.current || "")}</b> · ${j.done}/${j.total} (${pctDone}%) · ${Object.keys(j.failed).length} con problemas`
     : (j.message ? "Última descarga: " + esc(j.message) : "Sin descargas en curso.");
   $("#job-log").textContent = (j.log || []).slice().reverse().join("\n");
@@ -119,6 +124,7 @@ async function startIngest(body) {
 $("#sp-download").onclick = () => { const n = +document.querySelector('input[name="sp-size"]:checked').value; startIngest({ mode: "sp500", sample: n || null }); };
 $("#sym-download").onclick = () => startIngest({ mode: "symbols", symbols: $("#sym-input").value.split(/[,\s]+/), start: $("#sym-start").value || "2010-01-01" });
 $("#data-update").onclick = () => startIngest({ mode: "update" });
+$("#earn-download").onclick = () => startIngest({ mode: "earnings" });
 $("#job-stop").onclick = async () => { await post("/api/data/job/stop"); loadJob(); };
 
 // ---------------------------------------------------------------- dashboard
@@ -197,6 +203,11 @@ async function loadBoard() {
   const kp = (l, v, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s || ""}</div></div>`;
   $("#ar-passive").innerHTML = kp("Consistencia", fmt(pv.consistency, 3), esc(pv.rules || "")) + kp("Sharpe", fmt(pv.sharpe)) +
     kp("Al año (CAGR)", pct(pv.cagr)) + kp("Caída máx.", pct(pv.max_drawdown)) + kp("Años en positivo", pct(pv.pct_positive_years));
+  const er = lb.earnings_rule || {};
+  $("#ar-board-note").innerHTML += ` · <b>Resultados trimestrales:</b> ` + (lb.universe.with_earnings
+    ? `datos de ${lb.universe.with_earnings} de ${lb.universe.n_symbols} acciones; ` +
+      (er.blackout_days ? `no compra a ${er.blackout_days} sesiones o menos de resultados` + (er.exit_before ? " y vende antes de ellos" : "") : "sin restricciones")
+    : '<span class="bad">sin datos de resultados</span> (descárgalos en 1 · Datos)');
   arRows = lb.rows;
   const bestVal = arRows.find(r => r.status === "VALIDATED_PASS"), bestFinal = arRows.find(r => r.status === "FINAL_PASS");
   const cb = $("#ar-best");
@@ -223,7 +234,8 @@ async function loadBoard() {
   if (arShowBt && cur) { arShowBt = false; loadBacktest(cur.id); $("#ar-detail-card").scrollIntoView({ behavior: "smooth" }); }
 }
 const EXIT = { stop: "stop", stop_gap: "stop (hueco de apertura)", target: "objetivo", signal_exit: "señal de salida",
-  time_stop: "tiempo máximo", end_of_data: "fin del periodo", reversal: "señal contraria" };
+  time_stop: "tiempo máximo", end_of_data: "fin del periodo", reversal: "señal contraria",
+  earnings_exit: "antes de resultados", target_gap: "objetivo (hueco de apertura)" };
 let btSeries = [];
 async function loadBacktest(id) {
   $("#ar-bt").style.display = "block"; $("#ar-bt-period").textContent = "calculando…";
@@ -281,7 +293,7 @@ window.finalTest = async (id) => {
   loadBoard();
 };
 $("#ar-start").onclick = async () => {
-  try { const r = await post("/api/autoresearch/start", { use_ai: $("#ar-ai").checked, max_cycles: +$("#ar-cycles").value });
+  try { const r = await post("/api/autoresearch/start", { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value });
     $("#ar-msg").textContent = r.started ? "En marcha. Cada ciclo tarda unos minutos; puedes seguir usando la app." : "Ya estaba en marcha.";
   } catch (e) { $("#ar-msg").textContent = e.message; }
   loadAuto(false);
@@ -318,13 +330,15 @@ async function loadPaper() {
   table($("#paper-orders"), v.orders, [["", o => ACTION[o.action]], ["Acción", o => o.symbol], ["Cantidad aprox.", o => fmt(o.qty, 3)],
     ["Importe aprox.", o => fmt(o.approx_value)], ["Precio último cierre", o => fmt(o.last_close)], ["Stop aprox.", o => fmt(o.approx_stop)],
     ["Objetivo aprox.", o => fmt(o.approx_target)],
+    ["Resultados", o => o.earnings_in == null ? '<span class="muted">—</span>' : `en ${o.earnings_in} sesión(es)`],
     ["Motivo", o => o.action === "VENDER" ? (EXIT[o.reason] || o.reason)
       : o.likely === false ? '<span class="muted">señal, pero probablemente sin efectivo suficiente</span>'
       : o.partial ? "señal de entrada (parcial: se acaba el efectivo)" : "señal de entrada"]]);
   if (!v.orders.length) $("#paper-orders").innerHTML = `<tr><td class="muted">Nada que hacer en la próxima apertura (NO TRADE es un resultado normal).</td></tr>`;
   table($("#paper-positions"), v.positions, [["Acción", p => p.symbol], ["Desde", p => p.entry_ts], ["Cantidad", p => fmt(p.qty, 3)],
     ["Precio compra", p => fmt(p.entry_price)], ["Último cierre", p => fmt(p.last_close)], ["Stop", p => fmt(p.stop)], ["Objetivo", p => fmt(p.target)],
-    ["Resultado", p => `<span class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${fmt(p.unrealized_pnl)}</span>`], ["Días", p => p.bars_held]]);
+    ["Resultado", p => `<span class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${fmt(p.unrealized_pnl)}</span>`], ["Días", p => p.bars_held],
+    ["Próximos resultados", p => p.earnings_in == null ? '<span class="muted">—</span>' : `en ${p.earnings_in} sesión(es)`]]);
   if (!paperChart) paperChart = LightweightCharts.createChart($("#paper-chart"), opts());
   paperSeries.forEach(x => paperChart.removeSeries(x)); paperSeries = [];
   if (v.benchmark) { const b = paperChart.addLineSeries({ color: "#8b93a1", lineWidth: 1, title: "SPY" }); b.setData(v.benchmark.curve); paperSeries.push(b); }

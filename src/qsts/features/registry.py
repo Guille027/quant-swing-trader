@@ -88,7 +88,7 @@ class _FeatureCache:
     def token(self, df: pd.DataFrame) -> tuple:
         if self._last[0] is df:  # holding the reference guarantees the object was not recycled
             return self._last[1]
-        cols = [c for c in ("open", "high", "low", "close", "volume") if c in df]
+        cols = [c for c in df.columns if c != "available_at"]  # every input a feature may read (OHLCV, earnings...)
         h = pd.util.hash_pandas_object(df[cols], index=True).to_numpy()
         tok = (len(df), hashlib.blake2b(h.tobytes(), digest_size=16).hexdigest())
         self._last = (df, tok)
@@ -221,6 +221,18 @@ register("breakout_down", "structure", n=20)(lambda df, n: _b(st.breakout(df, n)
 register("pullback", "structure", trend_n=50, fast_n=10)(lambda df, trend_n, fast_n: _b(st.pullback(df, trend_n, fast_n)))
 register("inside_bar", "price_action")(lambda df: _b(st.inside_bar(df)))
 register("engulfing", "price_action")(lambda df: _b(st.engulfing(df)))
+
+
+# ------------------------------------------------------------------ events (quarterly results)
+# Read the point-in-time columns built by qsts.data.earnings (attached by AppContext.research_frame);
+# NaN when the symbol has no earnings data. Causality is guaranteed by the column builder (tested there).
+def _col(df, name):
+    return df[name].astype("float64") if name in df else pd.Series(np.nan, index=df.index)
+
+
+register("days_since_earnings", "events")(lambda df: _col(df, "earn_days_since"))
+register("earnings_surprise", "events")(lambda df: _col(df, "earn_surprise"))
+register("days_to_earnings", "events")(lambda df: _col(df, "earn_days_to"))
 
 
 # ------------------------------------------------------------------ cross-asset (benchmark)

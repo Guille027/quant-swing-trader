@@ -50,3 +50,10 @@
     fills happen after all exits and in decision order, and sizing at the open uses previous closes only (v1 could
     see same-day closes of symbols processed earlier). Experiments recorded with v1 may no longer reproduce
     bit-identically (reported by REPRODUCE as differing metrics/code version); rankings are versioned.
+21. **Earnings, not news.** For 1–20 day holds the results gap is the main event risk and post-earnings drift a documented
+    effect, and the dates/surprises are available point-in-time. Historical news sentiment from an LLM would leak hindsight
+    (the model was trained after the events), so news can only ever be used going forward, never to validate.
+22. **Earnings timing is conservative.** Information is usable from the first CLOSE after the announcement; the gap is
+    assumed at the first OPEN after it; with unknown time both the later information and the earlier gap are assumed.
+    Research rankings include the earnings rule and a fingerprint of the earnings columns inside the research window.
+    Paper trading reuses the exact engine rules of the strategy's validation experiment.
