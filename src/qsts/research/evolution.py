@@ -43,6 +43,28 @@ class EvolutionConfig:
     init_hold_choices: tuple = (5, 10, 20)   # max holding period (bars) sampled for new genomes
     hold_choices: tuple = (3, 5, 10, 15, 20)  # ... and used by mutation
     objective: Objective = field(default_factory=Objective)
+    # diversity (off by default): share of every new generation made of brand-new random genomes, and the max
+    # share of the population whose entry rules use the same indicator (stops one idea taking over the search)
+    immigrants: float = 0.0
+    max_feature_share: float = 1.0
+
+
+PRICE_FIELDS = {"open", "high", "low", "close", "volume"}
+
+
+def entry_features(sd: StrategyDefinition) -> frozenset:
+    """Indicators the entry rules are built on (the strategy's 'idea'); raw prices are not counted."""
+    out = set()
+    for c in tuple(sd.entry_long) + tuple(sd.entry_short):
+        for o in (c.left, c.right):
+            if getattr(o, "feature", None) and o.feature not in PRICE_FIELDS:
+                out.add(o.feature)
+    return frozenset(out)
+
+
+def idea(sd: StrategyDefinition) -> str:
+    f = entry_features(sd)
+    return " + ".join(sorted(f)) if f else "solo precio"
 
 
 @dataclass
@@ -175,6 +197,22 @@ class EvolutionEngine:
         self._cache[vid] = ind
         return ind
 
+    def _room_for(self, sd: StrategyDefinition, members: list[Individual]) -> bool:
+        if self.cfg.max_feature_share >= 1.0:
+            return True
+        limit = max(1, int(self.cfg.max_feature_share * self.cfg.population))
+        used = [entry_features(m.sd) for m in members]
+        return all(sum(f in u for u in used) < limit for f in entry_features(sd))
+
+    def _fresh(self, members: list[Individual]) -> StrategyDefinition:
+        """A new random genome, preferring indicators that do not already fill their share."""
+        sd = self.random_individual()
+        for _ in range(20):
+            if self._room_for(sd, members):
+                break
+            sd = self.random_individual()
+        return sd
+
     def _tournament(self, pop: list[Individual]) -> Individual:
         picks = self.rng.choice(len(pop), size=min(self.cfg.tournament, len(pop)), replace=False)
         return max((pop[i] for i in picks), key=lambda x: x.fitness)
@@ -190,13 +228,19 @@ class EvolutionEngine:
             self.history.append({"generation": g, "best": pop[0].fitness, "median": float(np.median(finite)) if finite else None,
                                  "n_valid": len(finite), "n_trials": self.n_trials})
             nxt = pop[: self.cfg.elite]
-            while len(nxt) < self.cfg.population:
+            n_new = int(round(self.cfg.immigrants * self.cfg.population))
+            while len(nxt) < self.cfg.population - n_new:
                 a = self._tournament(pop).sd
                 child = self.crossover(a, self._tournament(pop).sd) if self.rng.random() < self.cfg.crossover_rate else a
                 if self.rng.random() < self.cfg.mutation_rate:
                     child = self.mutate(child)
+                if not self._room_for(child, nxt):  # that indicator already fills its share: explore instead
+                    child = self._fresh(nxt)
                 nxt.append(self.evaluate(child))
+            while len(nxt) < self.cfg.population:
+                nxt.append(self.evaluate(self._fresh(nxt)))
             pop = nxt
+        self.population = pop  # last generation (inspection / tests)
         pop.sort(key=lambda x: -x.fitness)
         best = [p for p in pop if np.isfinite(p.fitness)]
         seen, uniq = set(), []

@@ -109,6 +109,8 @@ because concurrent positions are not independent.
 - [x] Every evaluated strategy persisted and counted once (re-proposals of a known version are not re-counted)
 - [x] Leaderboard DSR is deflated by the total number of trials (more trials -> lower DSR, tested)
 - [x] DSR null = Sharpe of holding the same stocks (floored at 0), not zero: "Fiabilidad" means beating doing nothing (tested)
+- [x] Search diversity: indicator share cap, random newcomers, diverse seeds, AI told crowded ideas, ranking grouped
+      by idea (tests)
 - [x] Faster validation (indicators reused across walk-forward windows, bit-identical; tested), cached price frames,
       validation progress and stop
 - [x] New ranking (data/rules changed): earlier strategies reported with the reason, best 30 re-scored on start,

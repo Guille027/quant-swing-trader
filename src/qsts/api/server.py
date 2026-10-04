@@ -585,9 +585,9 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"stopping": True}
 
     @app.get("/api/autoresearch/leaderboard")
-    def ar_leaderboard(limit: int = 20):
+    def ar_leaderboard(limit: int = 20, group: bool = False):
         try:
-            return _j(_researcher().leaderboard(max(1, min(limit, 200))))
+            return _j(_researcher().leaderboard(max(1, min(limit, 200)), group=group))
         except ValueError as e:
             raise HTTPException(400, str(e))
 

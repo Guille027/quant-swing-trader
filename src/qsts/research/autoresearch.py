@@ -36,7 +36,7 @@ from qsts.core.hashing import hash_obj
 from qsts.core.power import keep_awake
 from qsts.db import models as m
 from qsts.features.registry import REGISTRY, feature_cache
-from qsts.research.evolution import EvolutionConfig, EvolutionEngine, Individual
+from qsts.research.evolution import EvolutionConfig, EvolutionEngine, Individual, idea
 from qsts.research.experiments import ExperimentTracker, _clean, dataset_fingerprint
 from qsts.research.scoring import (ScoreConfig, expected_max_sharpe, overfitting_risk, psr_from_stats, return_stats,
                                    strategy_score)
@@ -58,6 +58,9 @@ class AutoResearchConfig:
     population: int = 20
     generations: int = 4
     elites_from_history: int = 6
+    elites_per_idea: int = 2         # earlier best strategies that seed a cycle: at most this many per indicator idea
+    immigrants: float = 0.2          # share of each generation made of brand-new random strategies
+    max_feature_share: float = 0.5   # no indicator in more than half of the population
     finalists_per_cycle: int = 2
     finalist_pool: int = 10         # only candidates in the global top-N are validated
     use_ai: bool = True
@@ -497,6 +500,20 @@ class AutoResearcher:
                 q = q.where(m.ResearchCandidate.status.in_(statuses))
             return list(s.scalars(q.order_by(m.ResearchCandidate.fitness.desc()).limit(n)))
 
+    def diverse_elites(self) -> list[StrategyDefinition]:
+        """Best earlier strategies to seed a cycle, at most `elites_per_idea` built on the same indicators, so one
+        good idea cannot fill every seed with variants of itself."""
+        out, per = [], {}
+        for r in self._top_rows(self.cfg.elites_from_history * 40, "evolution"):
+            sd = definition_from_dict(r.definition)
+            k = idea(sd)
+            if per.get(k, 0) < self.cfg.elites_per_idea:
+                per[k] = per.get(k, 0) + 1
+                out.append(sd)
+            if len(out) >= self.cfg.elites_from_history:
+                break
+        return out
+
     def next_cycle(self) -> int:
         with self.sf() as s:
             return int(s.scalar(select(func.max(m.ResearchCandidate.cycle))) or 0) + 1
@@ -509,7 +526,8 @@ class AutoResearcher:
                 self, self.research, (self.start, self.end), self.bt,
                 EvolutionConfig(population=self.cfg.population, generations=self.cfg.generations, seed=self.cfg.seed,
                                 init_hold_choices=self._holds(), hold_choices=self._holds(),
-                                complexity_penalty=self.cfg.complexity_penalty))
+                                complexity_penalty=self.cfg.complexity_penalty, immigrants=self.cfg.immigrants,
+                                max_feature_share=self.cfg.max_feature_share))
         return self._engine
 
     def _holds(self) -> tuple:
@@ -568,8 +586,10 @@ class AutoResearcher:
         eng = self.engine()
         eng.cycle = cycle
         eng.rng = np.random.default_rng([self.cfg.seed, cycle])
-        elites = [definition_from_dict(r.definition) for r in self._top_rows(self.cfg.elites_from_history, "evolution")]
-        self.log(f"Ciclo {cycle}: evolución ({self.cfg.population}×{self.cfg.generations}) partiendo de {len(elites)} mejores anteriores")
+        elites = self.diverse_elites()
+        ideas = sorted({idea(sd) for sd in elites})
+        self.log(f"Ciclo {cycle}: evolución ({self.cfg.population}×{self.cfg.generations}) partiendo de {len(elites)} "
+                 f"mejores anteriores ({len(ideas)} ideas distintas: {', '.join(ideas)[:120]})")
         eng.run(initial=elites)
         if self.cfg.use_ai and self.ai is not None:
             self.phase = "IA proponiendo ideas"
@@ -603,13 +623,18 @@ class AutoResearcher:
     def ai_context(self) -> dict:
         """What the AI may see: research-period results only. Final-test (OOS) results are never included."""
         n, _ = self.trial_stats()
-        best = []
-        for r in self._top_rows(6):
+        best, ideas = [], {}
+        for r in self._top_rows(300):  # the best strategy of each idea, and how crowded each idea is
             sd = definition_from_dict(r.definition)
+            k = idea(sd)
+            ideas[k] = ideas.get(k, 0) + 1
+            if ideas[k] > 1 or len(best) >= 6:
+                continue
             mt = r.metrics or {}
             best.append({"rules": describe(sd), "origin": r.origin, "consistency_score": round(r.fitness, 3),
                          "sharpe": mt.get("sharpe"), "block_sharpes": [b["sharpe"] for b in mt.get("blocks", [])],
                          "pct_positive_years": mt.get("pct_positive_years"), "n_trades": mt.get("n_trades")})
+        crowded = [k for k, c in sorted(ideas.items(), key=lambda x: -x[1]) if c >= 0.3 * sum(ideas.values())]
         with self.sf() as s:
             reasons = s.scalars(select(m.ResearchCandidate.error).where(m.ResearchCandidate.status == "INVALID",
                                                                          m.ResearchCandidate.universe_id == self.universe_id)
@@ -624,6 +649,10 @@ class AutoResearcher:
                          f"must close within {self.cfg.max_holding_days} trading days."),
                 "universe": sorted(self.research), "research_period": [str(self.start.date()), str(self.end.date())],
                 "best_so_far": best, "recent_failure_reasons": failures, "trials_so_far": n,
+                "indicator_ideas_among_top_results": ideas,
+                "diversity_request": (f"Most of the top results are variants built on {', '.join(crowded)}. Do NOT propose "
+                                      "more variants of that: propose genuinely different hypotheses with other "
+                                      "indicators." if crowded else "Explore genuinely different hypotheses."),
                 "passive_benchmark_to_beat": {k: self.passive_reference()[k] for k in ("consistency", "sharpe")},
                 "your_last_rejected_proposals": self._last_ai_rejections[-5:],
                 "event_features": ("days_since_earnings, earnings_surprise (percent) and days_to_earnings (sessions; "
@@ -822,7 +851,9 @@ class AutoResearcher:
         return _clean(out)
 
     # -------------------------------------------------------------- leaderboard
-    def leaderboard(self, limit: int = 20) -> dict:
+    def leaderboard(self, limit: int = 20, group: bool = False) -> dict:
+        """`group`: one row per indicator idea (its best variant; validated / final-tested rows always shown), with
+        the number of similar variants hidden behind it."""
         n, var = self.trial_stats()
         passive = self.passive_reference()
         # "No skill" for a long-only stock strategy is not a zero Sharpe: it is the Sharpe of simply holding the same
@@ -830,8 +861,8 @@ class AutoResearcher:
         sr0 = max(0.0, (passive.get("sharpe") or 0.0) / np.sqrt(self.bt.bars_per_year)) + expected_max_sharpe(max(n, 1), var)
         with self.sf() as s:
             finals = s.scalar(select(func.count()).select_from(m.OOSAccessLog)) or 0
-        rows, seen, hidden = [], set(), 0
-        for r in self._top_rows(limit * 4):
+        rows, seen, hidden, by_idea = [], set(), 0, {}
+        for r in self._top_rows(limit * (40 if group else 4)):
             mt = r.metrics or {}
             # logically equivalent rule sets (e.g. a redundant extra condition) trade identically: show the
             # best-ranked one only (the complexity penalty already ranks the simpler one first)
@@ -840,17 +871,23 @@ class AutoResearcher:
                 hidden += 1
                 continue
             seen.add(sig)
+            sd = definition_from_dict(r.definition)
+            k = idea(sd)
+            if group and k in by_idea and r.status not in ("VALIDATED_PASS", "FINAL_PASS", "FINAL_FAIL"):
+                by_idea[k]["variants"] += 1  # a variant of an idea already shown
+                continue
             if len(rows) >= limit:
                 continue
-            sd = definition_from_dict(r.definition)
             dsr = psr_from_stats(mt["sr"], mt["skew"], mt["kurt"], mt["T"], sr0) if mt.get("T") else None
             rows.append({"id": r.id, "origin": r.origin, "cycle": r.cycle, "rules": describe(sd), "name": sd.name,
+                         "idea": k, "variants": 0,
                          "consistency": r.fitness, "sharpe": mt.get("sharpe"), "cagr": mt.get("cagr"),
                          "max_drawdown": mt.get("max_drawdown"), "n_trades": mt.get("n_trades"),
                          "pct_positive_years": mt.get("pct_positive_years"), "worst_year": mt.get("worst_year"),
                          "avg_days": mt.get("avg_trade_bars"),
                          "blocks": mt.get("blocks"), "dsr": dsr, "status": r.status, "strategy_id": r.strategy_id,
                          "validation": r.validation, "final": r.final})
+            by_idea.setdefault(k, rows[-1])
         R = m.ResearchCandidate
         with self.sf() as s:
             by_status = dict(s.execute(select(R.status, func.count()).where(R.universe_id == self.universe_id)
@@ -861,7 +898,7 @@ class AutoResearcher:
                        "earnings_rule": {"blackout_days": self.bt.earnings_blackout_days,
                                          "exit_before": self.bt.exit_before_earnings},
                        "passive": passive, "previous": self.previous_ranking(),
-                       "by_status": by_status, "equivalents_hidden": hidden,
+                       "by_status": by_status, "equivalents_hidden": hidden, "grouped": group,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,
                        "rows": rows})
 

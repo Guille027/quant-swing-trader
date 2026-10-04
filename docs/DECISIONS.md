@@ -99,3 +99,10 @@
     prepared price frames are cached while the stored data is unchanged (fingerprint of bars, corporate actions and
     earnings), validation reports its progress, and "Detener" also interrupts a validation (the candidate is simply
     validated again later).
+30. **One idea must not take over the search.** Evolution seeded every cycle with the 6 best earlier strategies,
+    which after a while were all variants of one indicator, so most trials only nudged its thresholds (and every
+    near-duplicate trial still lowers everyone's Fiabilidad). Now: seeds keep at most 2 strategies per indicator
+    idea (the set of indicators in the entry rules), no indicator may appear in more than half of a generation,
+    20% of every generation is brand-new random strategies, and the AI is told which ideas are already crowded.
+    Scoring is unchanged (rankings stay valid). The ranking can group variants of one idea (best one shown, with
+    "+N variantes"); validated and final-tested strategies are always listed.

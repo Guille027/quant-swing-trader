@@ -231,6 +231,43 @@ def test_stop_works_in_the_middle_of_a_validation(sf, data):
     assert r.baseline_sharpes() == r.baseline_sharpes() and len(r.baseline_sharpes()) == 2
 
 
+def _variant(feature, thr, n=14, hold=10):
+    return StrategyDefinition(name="v", family="t", hypothesis="h",
+                              entry_long=(Condition(F(feature, n=n), "<", V("$p0")),), stop=StopRule("atr", 14, 2.0),
+                              take_profit=TakeProfitRule("none"), max_holding_bars=hold, params={"p0": thr})
+
+
+def test_one_indicator_cannot_take_over_the_search(data):
+    from qsts.research.evolution import entry_features
+    tr = (pd.Timestamp("2015-01-02", tz="UTC"), pd.Timestamp("2018-12-31", tz="UTC"))
+    va = (pd.Timestamp("2019-01-15", tz="UTC"), pd.Timestamp("2021-12-31", tz="UTC"))
+    seeds = [_variant("rsi", t) for t in (30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0)]
+    eng = EvolutionEngine(data, tr, va, cfg=EvolutionConfig(population=10, generations=2, seed=3, immigrants=0.2,
+                                                            max_feature_share=0.5))
+    eng.run(initial=seeds)
+    assert sum("rsi" in entry_features(p.sd) for p in eng.population) <= 5  # at most half of the population
+    plain = EvolutionEngine(data, tr, va, cfg=EvolutionConfig(population=10, generations=2, seed=3))
+    plain.run(initial=seeds)  # default: no diversity rules (behaviour unchanged)
+    assert sum("rsi" in entry_features(p.sd) for p in plain.population) >= sum(
+        "rsi" in entry_features(p.sd) for p in eng.population)
+
+
+def test_diverse_seeds_grouped_ranking_and_ai_told_to_explore(sf, data):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False, "elites_per_idea": 2}))
+    for t in (30.0, 35.0, 40.0, 45.0):
+        r.evaluate_and_store(_variant("rsi", t), "evolution", 1)
+    for t in (-1.0, 0.0, 1.0):
+        r.evaluate_and_store(_variant("roc", t, n=10), "evolution", 1)
+    elites = r.diverse_elites()
+    ideas = [ar.idea(sd) for sd in elites]
+    assert ideas.count("rsi") <= 2 and ideas.count("roc") <= 2 and set(ideas) == {"rsi", "roc"}
+    flat, grouped = r.leaderboard(50), r.leaderboard(50, group=True)
+    assert len({x["idea"] for x in grouped["rows"]}) == len(grouped["rows"]) and grouped["grouped"] is True
+    assert sum(1 + x["variants"] for x in grouped["rows"]) == len(flat["rows"])
+    ctx = r.ai_context()
+    assert set(ctx["indicator_ideas_among_top_results"]) >= {"rsi", "roc"} and "Do NOT propose" in ctx["diversity_request"]
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition

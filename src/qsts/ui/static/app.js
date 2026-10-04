@@ -211,7 +211,7 @@ async function loadAuto(full) {
 }
 async function loadBoard() {
   let lb; finalsUsed = null;
-  try { lb = await api("/api/autoresearch/leaderboard?limit=25"); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
+  try { lb = await api(`/api/autoresearch/leaderboard?limit=25&group=${$("#ar-group").checked}`); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
   $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
   $("#ar-board-note").innerHTML = previousNote(lb) + `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
     `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${(finalsUsed = lb.final_tests_used)}</b>. ` +
@@ -237,7 +237,8 @@ async function loadBoard() {
       <button onclick="finalTest('${bestVal.id}')">Hacer el test final</button>`; }
   else cb.style.display = "none";
   table($("#ar-board"), arRows, [["#", r => arRows.indexOf(r) + 1],
-    ["Estrategia", r => `<span class="badge">${ORIGIN[r.origin] || r.origin}</span>${esc(r.rules)}`],
+    ["Estrategia", r => `<span class="badge">${ORIGIN[r.origin] || r.origin}</span>${esc(r.rules)}` +
+      (r.variants ? ` <span class="badge" title="variantes de la misma idea (mismos indicadores) ocultas">+${r.variants} variantes</span>` : "")],
     ["Consistencia", r => `<span class="${r.consistency > (pv.consistency ?? Infinity) ? "up" : ""}">${fmt(r.consistency, 3)}</span>`], ["Sharpe", r => fmt(r.sharpe)], ["Años en positivo", r => pct(r.pct_positive_years)],
     ["Peor año", r => pct(r.worst_year)], ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades], ["Días/operación", r => fmt(r.avg_days, 1)],
     ["Fiabilidad", r => r.dsr == null ? "—" : pct(r.dsr)], ["Estado", r => STATUS[r.status] || r.status],
@@ -318,6 +319,7 @@ window.finalTest = async (id) => {
   } catch (e) { alert(e.message); }
   loadBoard();
 };
+$("#ar-group").onchange = () => loadBoard();
 $("#ar-start").onclick = async () => {
   try { const r = await post("/api/autoresearch/start", { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value });
     $("#ar-msg").textContent = r.started ? "En marcha. Cada ciclo tarda unos minutos; puedes seguir usando la app." : "Ya estaba en marcha.";
