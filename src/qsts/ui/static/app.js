@@ -50,7 +50,57 @@ function previousNote(lb) {
     `<b>Pulsa ▶ Empezar a investigar</b> (en 2 · Investigación IA): lo primero que hace es volver a puntuar las 30 mejores con los datos actuales ` +
     `(unos minutos) y luego sigue buscando a partir de ellas. No empiezas de cero.</p>`;
 }
+// ---------------------------------------------------------------- several computers (OneDrive copy)
+const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+async function loadSync() {
+  let s; try { s = await api("/api/sync"); } catch (e) { $("#sync-body").textContent = e.message; return; }
+  $("#sync-setup").style.display = s.enabled ? "none" : "block";
+  $("#sync-actions").style.display = s.enabled ? "flex" : "none";
+  if (!s.enabled) {
+    $("#sync-body").innerHTML = "Desactivado: los datos solo están en este ordenador.";
+    if (!$("#sync-dir").value && s.suggested_dir) $("#sync-dir").value = s.suggested_dir;
+    return;
+  }
+  const r = s.remote, sm = (r && r.summary) || {};
+  let h = `Carpeta: <b>${esc(s.dir)}</b> · este ordenador: <b>${esc(s.machine)}</b><br>` +
+    (r ? `Copia en la carpeta: de <b>${esc(r.machine)}</b>, ${when(r.saved_at)} (${fmt(r.size / 1e6, 0)} MB, ${sm.strategies_tested ?? "?"} estrategias probadas)`
+       : "Aún no hay ninguna copia en la carpeta.");
+  if (s.loaded_at_start) h += `<p class="good">✔ Al abrir se cargaron los datos de ${esc(s.loaded_at_start.machine)} (${when(s.loaded_at_start.saved_at)}).</p>`;
+  if (s.remote_newer) h += `<p class="warn">Hay una copia <b>más reciente de ${esc(r.machine)}</b> que este ordenador no tiene. Cárgala antes de investigar o simular aquí.` +
+    (s.conflict ? ` <b>Ojo:</b> este ordenador también tiene cambios que no están en la copia; al cargarla se perderán (se guarda una copia de seguridad en var\\backups).` : "") + `</p>`;
+  else h += `<p class="muted small">${s.local_changed ? "Este ordenador tiene cambios que se guardarán al cerrar la app." : "Todo guardado."}` +
+    (r && r.code_version && s.code_version && r.code_version.slice(0, 7) !== s.code_version.slice(0, 7) ? ` Versión del otro ordenador: ${esc(r.code_version.slice(0, 7))}; actualiza los dos (Actualizar QSTS.bat).` : "") + `</p>`;
+  $("#sync-body").innerHTML = h; $("#sync-body").classList.remove("muted");
+  $("#sync-load").style.display = s.remote_newer ? "" : "none";
+  $("#sync-load").textContent = r ? `Cargar la copia de ${r.machine}` : "Cargar la copia";
+}
+const syncDo = async (path, body, ok) => {
+  $("#sync-msg").textContent = "…";
+  try { const r = await post(path, body); $("#sync-msg").textContent = ok(r); } catch (e) { $("#sync-msg").textContent = e.message; }
+  loadSync();
+};
+$("#sync-enable").onclick = () => syncDo("/api/sync/enable", { dir: $("#sync-dir").value }, () => "Activado.");
+$("#sync-off").onclick = () => { if (confirm("¿Desactivar la copia entre ordenadores? (no se borra nada)")) syncDo("/api/sync/disable", {}, () => "Desactivado."); };
+$("#sync-save").onclick = async () => {
+  $("#sync-msg").textContent = "Guardando copia…";
+  try { const r = await post("/api/sync/save", {}); $("#sync-msg").textContent = `Copia guardada (${fmt(r.size / 1e6, 0)} MB).`; }
+  catch (e) {
+    if (confirm(e.message + "\n\n¿Guardar igualmente y SUSTITUIR esa copia?")) {
+      try { await post("/api/sync/save", { force: true }); $("#sync-msg").textContent = "Copia guardada."; } catch (e2) { $("#sync-msg").textContent = e2.message; }
+    } else $("#sync-msg").textContent = "";
+  }
+  loadSync();
+};
+$("#sync-load").onclick = async () => {
+  if (!confirm("Se cargarán los datos del otro ordenador y SUSTITUIRÁN los de este (antes se guarda una copia de seguridad aquí). QSTS se reiniciará sola. ¿Continuar?")) return;
+  $("#sync-msg").textContent = "Preparando la copia (puede tardar un minuto)…";
+  try {
+    const r = await post("/api/sync/load", {});
+    $("#sync-msg").textContent = r.restarting ? "Listo: QSTS se está reiniciando con esos datos…" : "Listo: cierra QSTS y vuelve a abrirla para usar esos datos.";
+  } catch (e) { $("#sync-msg").textContent = e.message; }
+};
 async function loadHome() {
+  loadSync();
   try {
     const d = await api("/api/data/summary");
     const el = $("#step-data");
@@ -321,7 +371,11 @@ window.finalTest = async (id) => {
 };
 $("#ar-group").onchange = () => loadBoard();
 $("#ar-start").onclick = async () => {
-  try { const r = await post("/api/autoresearch/start", { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value });
+  const body = { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value };
+  try { const r = await post("/api/autoresearch/start", body).catch(async (e) => {
+      if (!/más recientes/.test(e.message) || !confirm(e.message + "\n\n¿Investigar igualmente?")) throw e;
+      return post("/api/autoresearch/start", { ...body, ignore_sync: true });
+    });
     $("#ar-msg").textContent = r.started ? "En marcha. Cada ciclo tarda unos minutos; puedes seguir usando la app." : "Ya estaba en marcha.";
   } catch (e) { $("#ar-msg").textContent = e.message; }
   loadAuto(false);

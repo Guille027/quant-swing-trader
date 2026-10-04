@@ -21,6 +21,7 @@ from sqlalchemy import select
 from qsts.app.context import AppContext
 from qsts.app.daily import DailyReporter
 from qsts.app.datajobs import FX_SERIES, DataJobRunner, sample_symbols
+from qsts.app import sync
 from qsts.app.envfile import set_env_values
 from qsts.app.scanner import MarketScanner, StrategySlot, render_report
 from qsts.backtest.engine import BacktestConfig, CostModel
@@ -84,6 +85,7 @@ class BacktestBody(BaseModel):
 
 
 class AutoResearchBody(BaseModel):
+    ignore_sync: bool = False  # start even though a newer copy from another computer waits to be loaded
     use_ai: bool = True
     avoid_earnings: bool = True
     max_cycles: int = 0  # 0 = until stopped
@@ -106,6 +108,14 @@ class PaperStartBody(BaseModel):
 
 class TelegramTokenBody(BaseModel):
     token: str
+
+
+class SyncDirBody(BaseModel):
+    dir: str
+
+
+class SyncSaveBody(BaseModel):
+    force: bool = False
 
 
 class PaperStopBody(BaseModel):
@@ -467,8 +477,74 @@ def create_app(ctx: AppContext) -> FastAPI:
         if r is None:
             r = ctx.extra["daily_reporter"] = DailyReporter(
                 ctx.sf, _paper, _telegram, _data_runner, ctx.repo.last_bar, benchmark=ctx.settings.benchmark,
-                delay_min=ctx.settings.daily_report_delay_min)
+                delay_min=ctx.settings.daily_report_delay_min, blocked=_sync_block_reason)
         return r
+
+    # ------------------------------------------------------------------ several computers (OneDrive copy)
+    def _db():
+        db = sync.db_file(ctx.settings.database_url)
+        if db is None:
+            raise HTTPException(400, "la copia entre ordenadores solo funciona con la base de datos SQLite local")
+        return db
+
+    def _sync_status() -> dict:
+        db = sync.db_file(ctx.settings.database_url)
+        return sync.status(db, ctx.settings.state_dir) if db is not None else {"enabled": False}
+
+    def _sync_newer() -> str | None:
+        try:
+            st = _sync_status()
+        except Exception:  # noqa: BLE001 - an unreachable folder must not block the app
+            return None
+        return (st["remote"] or {}).get("machine", "otro ordenador") if st.get("remote_newer") else None
+
+    def _sync_block_reason() -> str | None:
+        newer = _sync_newer()
+        return f"hay datos más recientes de {newer} sin cargar" if newer else None
+
+    @app.get("/api/sync")
+    def sync_status():
+        st = _sync_status()
+        loaded = ctx.extra.get("sync_loaded")
+        return _j({**st, "loaded_at_start": loaded, "code_version": ctx.extra.get("code_version")})
+
+    @app.post("/api/sync/enable")
+    def sync_enable(body: SyncDirBody):
+        folder = Path(body.dir.strip().strip('"'))
+        if not folder.parent.exists():
+            raise HTTPException(400, f"no existe la carpeta {folder.parent}")
+        folder.mkdir(parents=True, exist_ok=True)
+        sync.save_state(ctx.settings.state_dir, dir=str(folder))
+        return _j(_sync_status())
+
+    @app.post("/api/sync/disable")
+    def sync_disable():
+        sync.save_state(ctx.settings.state_dir, dir=None)
+        return _j(_sync_status())
+
+    @app.post("/api/sync/save")
+    def sync_save(body: SyncSaveBody):
+        try:
+            return _j(sync.export_snapshot(_db(), ctx.settings.state_dir, code_version=ctx.extra.get("code_version"),
+                                           force=body.force))
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409 if isinstance(e, sync.SyncError) else 400, str(e))
+
+    @app.post("/api/sync/load")
+    def sync_load():
+        r = ctx.extra.get("autoresearch")
+        if r is not None and r.state.running:
+            raise HTTPException(409, "detén primero la investigación")
+        if _data_runner().state.running:
+            raise HTTPException(409, "espera a que termine la descarga de datos")
+        try:
+            meta = sync.stage_import(ctx.settings.state_dir)
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409, str(e))
+        restart = ctx.extra.get("restart_app")
+        if restart is not None:
+            restart()  # the launcher closes the window and opens QSTS again with the loaded data
+        return _j({"staged": meta, "restarting": restart is not None})
 
     def _save_env(values: dict) -> None:
         set_env_values(values, ctx.extra.get("env_path", ".env"))
@@ -566,6 +642,10 @@ def create_app(ctx: AppContext) -> FastAPI:
     def ar_start(body: AutoResearchBody):
         if not ctx.symbols():
             raise HTTPException(400, "no hay datos: ejecuta primero `qsts ingest`")
+        newer = _sync_newer()
+        if newer and not body.ignore_sync:
+            raise HTTPException(409, f"Hay datos más recientes de {newer} en la carpeta compartida: cárgalos antes en "
+                                     "Inicio. Si investigas ahora y luego los cargas, perderás lo que hagas aquí.")
         cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai, avoid_earnings=body.avoid_earnings,
                                  population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)))
         started = _runner().start(cfg, max(0, body.max_cycles))

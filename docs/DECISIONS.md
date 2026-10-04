@@ -106,3 +106,10 @@
     20% of every generation is brand-new random strategies, and the AI is told which ideas are already crowded.
     Scoring is unchanged (rankings stay valid). The ranking can group variants of one idea (best one shown, with
     "+N variantes"); validated and final-tested strategies are always listed.
+31. **Two computers share data through a copy, never a shared live database.** SQLite in a cloud-synced folder can
+    be corrupted when the sync tool copies it mid-write, and two computers writing at once cannot be merged (trial
+    counts, one-time OOS accesses, the paper journal). So the whole database is saved as one consistent snapshot
+    (SQLite backup API, gzip, sha256, metadata written last) in a OneDrive folder when the app closes, and the other
+    computer loads it at its next start after backing up its own data. Overwriting a copy that was not loaded, and
+    researching or sending Telegram messages while a newer copy waits, are refused or warned about. Secrets stay in
+    each computer's `.env`.

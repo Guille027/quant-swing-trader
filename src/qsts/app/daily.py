@@ -36,10 +36,11 @@ class DailyReporter:
     def __init__(self, sf, paper: Callable[[], object], telegram: Callable[[], object | None],
                  data_runner: Callable[[], object] | None = None, last_bar: Callable[[str], pd.Timestamp | None] | None = None,
                  benchmark: str = "SPY", delay_min: int = 45, poll_seconds: float = 120.0,
-                 log: Callable[[str], None] | None = None):
+                 log: Callable[[str], None] | None = None, blocked: Callable[[], str | None] | None = None):
+        """`blocked()`: a reason not to send now (e.g. newer data from another computer waits to be loaded)."""
         self.sf, self.paper, self.telegram = sf, paper, telegram
         self.data_runner, self.last_bar, self.benchmark = data_runner, last_bar, benchmark
-        self.delay_min, self.poll = delay_min, poll_seconds
+        self.delay_min, self.poll, self.blocked = delay_min, poll_seconds, blocked
         self.logs: deque[str] = deque(maxlen=50)
         self.log = log or (lambda msg: self.logs.append(f"{datetime.now().strftime('%d/%m %H:%M')}  {msg}"))
         self.state = "parado"
@@ -98,6 +99,9 @@ class DailyReporter:
             return self._set("sin simulación en marcha: no hay nada que avisar")
         if self.telegram() is None:
             return self._set("Telegram no configurado")
+        why = self.blocked() if self.blocked is not None else None
+        if why:
+            return self._set(f"en espera: {why}")
         due = due_session(now, self.delay_min)
         day = due.date()
         if self.sent(ps.id, day):

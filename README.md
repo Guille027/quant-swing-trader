@@ -25,6 +25,13 @@ It creates a **QSTS** icon on the desktop and in the Start menu; double-click it
 `Abrir QSTS.bat` does the same without creating a shortcut. Logs go to `var/desktop.log`.
 While a research run or a download is active, Windows is kept from sleeping (the screen may still turn off).
 
+## A second computer (e.g. a laptop) with the same data
+Install it there the same way (Python, Git, `git clone`, `git checkout claude/quirky-mayer-g6nhsj`,
+`python -m pip install -e ".[dev]"`, `Crear acceso directo.bat`). Then on BOTH computers: Inicio → "Usar QSTS en
+varios ordenadores" → the same OneDrive folder → Activar. Closing the app saves a compressed copy of the data there;
+opening it on the other computer offers to load it (the local data is backed up to `var/backups` first). Use one
+computer at a time: copies are not merged. Secrets (`.env`: Gemini key, Telegram) are not copied.
+
 ## Windows (cmd)
 `qsts` may not be on PATH after `pip install`; use `python -m qsts.cli <command>` instead, e.g.
 `python -m qsts.cli ingest --provider yahoo --symbols SPY,AAPL --start 2010-01-01` and `python -m qsts.cli desktop`.

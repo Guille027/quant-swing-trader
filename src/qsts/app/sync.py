@@ -1,0 +1,268 @@
+"""Use QSTS on several computers (e.g. desktop PC and laptop) through a cloud-synced folder such as OneDrive.
+
+Model: ONE computer at a time. The whole database is saved as a single compressed copy in the shared folder
+(when the app is closed, or with a button) and the other computer loads it (replacing its own data, which is first
+backed up locally). Nothing is merged: two computers working at the same time would produce two different
+histories, so the app warns before overwriting work that has not been loaded yet.
+
+Files in the shared folder: `qsts-datos.db.gz` (consistent SQLite snapshot, gzip) and `qsts-datos.json`
+(who saved it, when, sha256 of the .gz). The .json is written last and the hash is checked before loading, so a
+copy that is still uploading is never loaded half-way. Secrets (.env) are never copied.
+Local state lives in `<state_dir>/sync_state.json`; a loaded copy is staged as `<state_dir>/qsts.db.import` and
+swapped in by `apply_pending_import()` the next time the app starts, before the database is opened.
+"""
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import os
+import platform
+import shutil
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+SNAPSHOT, META, STATE, PENDING = "qsts-datos.db.gz", "qsts-datos.json", "sync_state.json", "qsts.db.import"
+KEEP_BACKUPS = 5
+
+
+class SyncError(RuntimeError):
+    pass
+
+
+def machine_name() -> str:
+    return os.environ.get("COMPUTERNAME") or platform.node() or "este ordenador"
+
+
+def suggested_dir() -> str | None:
+    """OneDrive folder of this Windows user (+ \\QSTS), if OneDrive is installed."""
+    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        p = os.environ.get(var)
+        if p and Path(p).is_dir():
+            return str(Path(p) / "QSTS")
+    return None
+
+
+def db_file(database_url: str) -> Path | None:
+    if database_url.startswith("sqlite:///") and database_url != "sqlite:///:memory:":
+        return Path(database_url.removeprefix("sqlite:///"))
+    return None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------- local state
+def load_state(state_dir) -> dict:
+    return _read_json(Path(state_dir) / STATE) or {}
+
+
+def save_state(state_dir, **updates) -> dict:
+    st = {**load_state(state_dir), **updates}
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    _write_json(Path(state_dir) / STATE, st)
+    return st
+
+
+SIGNATURE_QUERIES = (
+    "SELECT count(*), max(created_at) FROM research_candidates",
+    "SELECT count(*) FROM strategy_status_history",
+    "SELECT count(*) FROM oos_access_log",
+    "SELECT count(*), max(recorded_at) FROM paper_days",
+    "SELECT count(*), max(sent_at) FROM paper_notifications",
+    "SELECT count(*), max(stopped_at) FROM paper_sessions",
+    "SELECT count(*), max(ts), max(ingested_at) FROM prices",
+    "SELECT count(*), max(fetched_at) FROM earnings_events",
+    "SELECT count(*) FROM corporate_actions",
+    "SELECT count(*) FROM experiments",
+)
+
+
+def signature(db: Path) -> str:
+    """Cheap fingerprint of the user's work in the database (changes when anything is added)."""
+    if not db.exists():
+        return "empty"
+    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    out = []
+    try:
+        for q in SIGNATURE_QUERIES:
+            try:
+                r = con.execute(q).fetchone()
+            except sqlite3.Error:  # table not created yet (older version)
+                r = None
+            out.append(r if r and r[0] else None)  # missing table == empty table (a newer version adds tables)
+    finally:
+        con.close()
+    return hashlib.sha256(repr(out).encode()).hexdigest()[:24]
+
+
+def summary(db: Path) -> dict:
+    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    def one(q):
+        try:
+            return con.execute(q).fetchone()[0]
+        except sqlite3.Error:
+            return None
+    try:
+        return {"strategies_tested": one("SELECT count(*) FROM research_candidates"),
+                "stocks": one("SELECT count(DISTINCT asset_id) FROM prices"),
+                "last_price": one("SELECT max(ts) FROM prices"),
+                "simulation_active": bool(one("SELECT count(*) FROM paper_sessions WHERE status = 'ACTIVE'"))}
+    finally:
+        con.close()
+
+
+def _has_work(db: Path) -> bool:
+    s = summary(db) if db.exists() else {}
+    return bool(s.get("strategies_tested") or s.get("stocks"))
+
+
+# ---------------------------------------------------------------------- status
+def status(db: Path, state_dir) -> dict:
+    st = load_state(state_dir)
+    folder = st.get("dir")
+    remote = _read_json(Path(folder) / META) if folder else None
+    if st.get("last_signature") is None:
+        local_changed = _has_work(db)
+    else:
+        local_changed = signature(db) != st.get("last_signature")
+    remote_newer = bool(remote) and remote.get("id") != st.get("last_id")
+    return {"enabled": bool(folder), "dir": folder, "suggested_dir": suggested_dir(), "machine": machine_name(),
+            "remote": remote, "remote_newer": remote_newer, "local_changed": local_changed,
+            "conflict": remote_newer and local_changed, "last": {k: st.get(k) for k in ("last_at", "last_action")},
+            "pending_import": (Path(state_dir) / PENDING).exists()}
+
+
+# ---------------------------------------------------------------------- save (export)
+def export_snapshot(db: Path, state_dir, *, code_version: str | None = None, force: bool = False) -> dict:
+    st = status(db, state_dir)
+    if not st["enabled"]:
+        raise SyncError("la copia entre ordenadores no está activada")
+    if st["remote_newer"] and not force:
+        raise SyncError(f"en la carpeta hay una copia de {st['remote'].get('machine')} ({st['remote'].get('saved_at')}) "
+                        "que este ordenador no ha cargado: si guardas, se perdería")
+    folder = Path(st["dir"])
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp_db = Path(state_dir) / "sync-export.tmp.db"
+    tmp_db.unlink(missing_ok=True)
+    src, dst = sqlite3.connect(db), sqlite3.connect(tmp_db)
+    try:
+        src.backup(dst)  # consistent copy even while the app is writing (WAL)
+    finally:
+        dst.close()
+        src.close()
+    try:
+        part = folder / (SNAPSHOT + ".part")
+        with open(tmp_db, "rb") as f, gzip.open(part, "wb", compresslevel=1) as g:
+            shutil.copyfileobj(f, g, 1 << 20)
+        sha = _sha256(part)
+        os.replace(part, folder / SNAPSHOT)
+        meta = {"id": uuid.uuid4().hex, "machine": machine_name(), "saved_at": _now(), "sha256": sha,
+                "size": (folder / SNAPSHOT).stat().st_size, "code_version": code_version, "summary": summary(tmp_db)}
+        _write_json(folder / META, meta)  # last: the other computer only sees a complete copy
+    finally:
+        tmp_db.unlink(missing_ok=True)
+    save_state(state_dir, last_id=meta["id"], last_signature=signature(db), last_at=meta["saved_at"],
+               last_action="guardada")
+    return meta
+
+
+# ---------------------------------------------------------------------- load (import)
+def stage_import(state_dir) -> dict:
+    """Downloads/decompresses the shared copy next to the local database; it replaces it at the next start."""
+    st = load_state(state_dir)
+    folder = Path(st.get("dir") or "")
+    meta = _read_json(folder / META) if st.get("dir") else None
+    if not meta:
+        raise SyncError("no hay ninguna copia en la carpeta")
+    gz = folder / SNAPSHOT
+    if not gz.exists() or _sha256(gz) != meta.get("sha256"):
+        raise SyncError("la copia todavía se está sincronizando (OneDrive no la ha terminado de bajar): "
+                        "espera un poco y vuelve a intentarlo")
+    staged = Path(state_dir) / PENDING
+    part = staged.with_name(staged.name + ".part")
+    with gzip.open(gz, "rb") as g, open(part, "wb") as f:
+        shutil.copyfileobj(g, f, 1 << 20)
+    con = sqlite3.connect(part)
+    try:
+        ok = con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        con.close()
+    if not ok or "research_candidates" not in tables:
+        part.unlink(missing_ok=True)
+        raise SyncError("la copia está dañada; vuelve a guardarla desde el otro ordenador")
+    os.replace(part, staged)
+    _write_json(Path(state_dir) / (PENDING + ".json"), meta)
+    return meta
+
+
+def apply_pending_import(database_url: str, state_dir) -> dict | None:
+    """At startup, BEFORE the database is opened: swap in a staged copy (the current data is backed up first)."""
+    db = db_file(database_url)
+    staged = Path(state_dir) / PENDING
+    if db is None or not staged.exists():
+        return None
+    meta = _read_json(Path(state_dir) / (PENDING + ".json")) or {}
+    backups = Path(state_dir) / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    if db.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        src, dst = sqlite3.connect(db), sqlite3.connect(backups / f"qsts-antes-de-cargar-{stamp}.db")
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        for old in sorted(backups.glob("qsts-antes-de-cargar-*.db"))[:-KEEP_BACKUPS]:
+            old.unlink(missing_ok=True)
+    for suffix in ("-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staged, db)
+    (Path(state_dir) / (PENDING + ".json")).unlink(missing_ok=True)
+    save_state(state_dir, last_id=meta.get("id"), last_signature=signature(db), last_at=_now(),
+               last_action=f"cargada de {meta.get('machine', '?')}")
+    return meta
+
+
+def auto_save_on_close(database_url: str, state_dir, code_version: str | None = None) -> str:
+    """Called when the app window closes: save the copy if this computer has new work and nothing newer waits."""
+    db = db_file(database_url)
+    if db is None:
+        return "sin base de datos SQLite"
+    st = status(db, state_dir)
+    if not st["enabled"]:
+        return "copia entre ordenadores desactivada"
+    if st["pending_import"]:
+        return "hay una copia pendiente de cargar: no se guarda"
+    if st["remote_newer"]:
+        return "la carpeta tiene una copia más nueva de otro ordenador: no se sobrescribe"
+    if not st["local_changed"]:
+        return "sin cambios desde la última copia"
+    meta = export_snapshot(db, state_dir, code_version=code_version)
+    return f"copia guardada ({meta['size'] / 1e6:.0f} MB)"

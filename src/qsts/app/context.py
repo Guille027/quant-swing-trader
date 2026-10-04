@@ -134,6 +134,8 @@ class AppContext:
 
 def build_context(settings: Settings | None = None, initial_paper_cash: float = 10_000.0) -> AppContext:
     st = settings or load_settings()
+    from qsts.app.sync import apply_pending_import
+    loaded = apply_pending_import(st.database_url, st.state_dir)  # data copied from another computer (sync)
     eng = make_engine(st.database_url)
     init_db(eng)
     sf = session_factory(eng)
@@ -147,5 +149,10 @@ def build_context(settings: Settings | None = None, initial_paper_cash: float = 
     broker = PaperBroker(initial_paper_cash, CostModel())
     execu = ExecutionService(broker, risk, ks, modes, notifier)
     Path(st.state_dir).mkdir(parents=True, exist_ok=True)
-    return AppContext(st, sf, MarketDataRepository(sf), ks, modes, risk, notifier, log_ch, execu,
-                      ExperimentTracker(sf), StrategyRegistry(sf))
+    ctx = AppContext(st, sf, MarketDataRepository(sf), ks, modes, risk, notifier, log_ch, execu,
+                     ExperimentTracker(sf), StrategyRegistry(sf))
+    if loaded is not None:
+        from qsts.app.sync import db_file, save_state, signature
+        ctx.extra["sync_loaded"] = loaded
+        save_state(st.state_dir, last_signature=signature(db_file(st.database_url)))  # after the schema update
+    return ctx

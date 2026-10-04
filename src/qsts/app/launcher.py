@@ -6,6 +6,8 @@
 - There is no console under pythonw: output goes to var/desktop.log.
 - If the native window cannot be created, the app opens in the browser and a small dialog keeps it alive
   ("press OK to close the app").
+- Several computers (qsts.app.sync): when the window closes, the data copy is saved to the shared folder; after
+  loading a copy from another computer the app restarts by itself to use it.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from pathlib import Path
 
 PORT = 8765
 TITLE = "QSTS — Investigación de estrategias"
+_RESTART = threading.Event()
 
 
 def project_root() -> Path:
@@ -94,22 +97,62 @@ def message(text: str, title: str = "QSTS") -> None:
         print(f"{title}: {text}")
 
 
-def start_server(port: int) -> None:
+def _close_windows() -> None:
+    try:
+        import webview
+        for w in list(webview.windows):
+            w.destroy()
+    except Exception as e:  # noqa: BLE001
+        print(f"could not close the window: {e!r}")
+
+
+def _restart_soon() -> None:
+    _RESTART.set()
+    threading.Timer(1.5, _close_windows).start()  # let the screen show its message first
+
+
+def start_server(port: int):
     import uvicorn
     from qsts.api.server import create_app
     from qsts.app.context import build_context
     ctx = build_context()
+    if ctx.extra.get("sync_loaded"):
+        print(f"loaded the data copy from {ctx.extra['sync_loaded'].get('machine')}")
     server = uvicorn.Server(uvicorn.Config(create_app(ctx), host="127.0.0.1", port=port, log_level="warning"))
     ctx.extra["shutdown"] = lambda: setattr(server, "should_exit", True)
+    ctx.extra["restart_app"] = _restart_soon
     threading.Thread(target=server.run, daemon=True, name="api").start()
+    return ctx
 
 
-def main(port: int = PORT) -> None:
+def after_close(ctx) -> None:
+    """Window closed: restart if a copy from another computer was loaded, otherwise save this computer's copy."""
+    if ctx is None:
+        return  # another process owns the server and the data
+    if _RESTART.is_set():
+        print("restarting to use the loaded data copy")
+        subprocess.Popen([sys.executable, "-m", "qsts.app.launcher", "--wait-free"], cwd=str(project_root()))
+        return
+    try:
+        from qsts.app.sync import auto_save_on_close
+        print("sync: " + auto_save_on_close(ctx.settings.database_url, ctx.settings.state_dir,
+                                            ctx.extra.get("code_version")))
+    except Exception as e:  # noqa: BLE001 - never fail on exit; the user can save from the app
+        print(f"sync: copy NOT saved: {e!r}")
+
+
+def main(port: int = PORT, argv: list[str] | None = None) -> None:
     root = project_root()
     os.chdir(root)
     _redirect_output(root)
     url = f"http://127.0.0.1:{port}"
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} launcher start ({url})")
+    if "--wait-free" in (argv if argv is not None else sys.argv[1:]):  # restart: the previous copy is closing
+        for _ in range(80):
+            if not is_running(url, 0.5):
+                break
+            time.sleep(0.25)
+    ctx = None
     if is_running(url):
         from qsts.research.experiments import code_version
         mine, theirs = code_version(), running_version(url)
@@ -122,7 +165,7 @@ def main(port: int = PORT) -> None:
                 return
     if not is_running(url):
         try:
-            start_server(port)
+            ctx = start_server(port)
         except Exception as e:  # noqa: BLE001
             message(f"No se pudo arrancar QSTS:\n\n{e!r}\n\nDetalles en var\\desktop.log")
             raise
@@ -145,6 +188,7 @@ def main(port: int = PORT) -> None:
         webbrowser.open(url)
         message("QSTS está abierta en tu navegador.\n\nDeja este aviso abierto mientras la uses: al pulsar "
                 "Aceptar se CIERRA la app (y se detiene cualquier investigación en marcha).")
+    after_close(ctx)
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} closed")
 
 

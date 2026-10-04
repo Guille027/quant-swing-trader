@@ -51,6 +51,20 @@
     <div class="card step" id="step-paper"><div class="num">5</div><h3>Simulación (paper trading)</h3><div class="body">Cargando…</div>
       <button data-goto="paper" class="primary">Ir a Simulación →</button></div>
   </div>
+  <div class="card" id="sync-card"><h3>Usar QSTS en varios ordenadores (OneDrive)</h3>
+    <div id="sync-body" class="muted">Cargando…</div>
+    <div id="sync-setup" style="display:none">
+      <p>Tus datos (precios, estrategias probadas, simulación) se guardan como una copia en una carpeta de OneDrive.
+        Al <b>cerrar</b> la app se guarda la copia; al abrirla en el <b>otro</b> ordenador te ofrece cargarla.
+        Usa <b>un ordenador cada vez</b>: si investigas en los dos a la vez, una de las dos versiones se perdería.</p>
+      <div class="row"><label>Carpeta <input id="sync-dir" size="60" placeholder="C:\Users\tú\OneDrive\QSTS"></label>
+        <button id="sync-enable" class="primary">Activar</button></div>
+      <p class="muted small">Pon la MISMA carpeta de OneDrive en los dos ordenadores. Las claves (Gemini, Telegram) no se copian: configúralas en cada uno.</p>
+    </div>
+    <div class="row" id="sync-actions" style="display:none"><button id="sync-save">Guardar copia ahora</button>
+      <button id="sync-load" class="primary" style="display:none">Cargar la copia</button>
+      <button id="sync-off">Desactivar</button><span id="sync-msg" class="muted"></span></div>
+  </div>
   <div class="card"><h3>Palabras clave</h3>
     <dl class="glossary">
       <dt>Backtest</dt><dd>Simular cómo habría funcionado una estrategia en el pasado, operación a operación.</dd>
