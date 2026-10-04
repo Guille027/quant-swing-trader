@@ -6,6 +6,7 @@
   qsts scan    [--asof ISO] [--universe A,B]
   qsts research --strategy file.json --symbols A,B --oos-start 2022-01-01 --space '{"p": [1,2]}'
   qsts evolve  --symbols A,B --train 2012-01-01:2017-12-31 --validate 2018-01-15:2021-12-31
+  qsts autoresearch [--cycles 1] [--no-ai]   # automatic search for the most consistent strategy
 """
 from __future__ import annotations
 
@@ -123,6 +124,25 @@ def cmd_evolve(args, ctx):
     print(f"trials evaluated: {res['n_trials']} — {res['note']}")
 
 
+def cmd_autoresearch(args, ctx):
+    from qsts.research.autoresearch import AutoResearchConfig
+    cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=not args.no_ai, population=args.population,
+                             generations=args.generations)
+    r = ctx.autoresearcher(cfg, log=print)
+    if cfg.use_ai and r.ai is None:
+        print("IA no configurada (QSTS_GEMINI_API_KEY vacío): solo búsqueda evolutiva")
+    try:
+        r.run(args.cycles)
+    except KeyboardInterrupt:
+        print("Interrumpido")
+    lb = r.leaderboard(10)
+    print(f"\nEstrategias probadas en total: {lb['n_trials']} · tests finales usados: {lb['final_tests_used']}")
+    for i, row in enumerate(lb["rows"], 1):
+        dsr = f"{row['dsr']:.0%}" if row["dsr"] is not None else "—"
+        print(f"{i:2d}. consistencia {row['consistency']:+.3f} · Sharpe {row['sharpe'] or 0:.2f} · "
+              f"DSR {dsr} · {row['status']} · [{row['origin']}] {row['rules']}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="qsts")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -151,10 +171,15 @@ def main(argv=None):
     s.add_argument("--population", type=int, default=30)
     s.add_argument("--generations", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    s = sub.add_parser("autoresearch")
+    s.add_argument("--cycles", type=int, default=1, help="0 = until Ctrl+C")
+    s.add_argument("--no-ai", action="store_true")
+    s.add_argument("--population", type=int, default=20)
+    s.add_argument("--generations", type=int, default=4)
     args = p.parse_args(argv)
     ctx = build_context()
     {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "scan": cmd_scan,
-     "research": cmd_research, "evolve": cmd_evolve}[args.cmd](args, ctx)
+     "research": cmd_research, "evolve": cmd_evolve, "autoresearch": cmd_autoresearch}[args.cmd](args, ctx)
 
 
 if __name__ == "__main__":

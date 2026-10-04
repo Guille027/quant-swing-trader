@@ -15,17 +15,27 @@ EULER_GAMMA = 0.5772156649
 
 
 # ============================================================== Sharpe statistics
+def return_stats(returns: pd.Series) -> dict | None:
+    """Per-period Sharpe, skewness, (non-excess) kurtosis and length: all PSR/DSR need."""
+    r = pd.Series(returns).dropna()
+    if len(r) < 3 or r.std(ddof=1) == 0:
+        return None
+    return {"sr": float(r.mean() / r.std(ddof=1)), "skew": float(skew(r)), "kurt": float(kurtosis(r, fisher=False)),
+            "T": int(len(r))}
+
+
+def psr_from_stats(sr: float, g3: float, g4: float, t: int, sr_benchmark: float = 0.0) -> float:
+    denom = np.sqrt(max(1 - g3 * sr + (g4 - 1) / 4 * sr ** 2, 1e-12))
+    return float(norm.cdf((sr - sr_benchmark) * np.sqrt(t - 1) / denom))
+
+
 def probabilistic_sharpe(returns: pd.Series, sr_benchmark: float = 0.0) -> float:
     """PSR (Bailey & Lopez de Prado 2012): P(true per-period SR > benchmark) given sample length,
     skewness and kurtosis of returns. Per-period (not annualised) Sharpe."""
-    r = pd.Series(returns).dropna()
-    t = len(r)
-    if t < 3 or r.std(ddof=1) == 0:
+    st = return_stats(returns)
+    if st is None:
         return float("nan")
-    sr = r.mean() / r.std(ddof=1)
-    g3, g4 = skew(r), kurtosis(r, fisher=False)
-    denom = np.sqrt(max(1 - g3 * sr + (g4 - 1) / 4 * sr ** 2, 1e-12))
-    return float(norm.cdf((sr - sr_benchmark) * np.sqrt(t - 1) / denom))
+    return psr_from_stats(st["sr"], st["skew"], st["kurt"], st["T"], sr_benchmark)
 
 
 def expected_max_sharpe(n_trials: int, var_trial_sr: float) -> float:

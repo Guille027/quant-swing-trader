@@ -63,6 +63,29 @@ class AppContext:
             acts = acts[acts["ex_date"] <= (t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC"))]
         return adjust(raw, acts, "total")[["open", "high", "low", "close", "volume"]]
 
+    def autoresearcher(self, cfg=None, log=None, stop_event=None):
+        """AutoResearcher over every stored symbol except the benchmark, with Gemini if configured."""
+        from qsts.data.quality import DataQualityError
+        from qsts.research.autoresearch import AutoResearchConfig, AutoResearcher
+        cfg = cfg or AutoResearchConfig(oos_start=self.settings.oos_start)
+        data = {}
+        for sym in self.symbols():
+            if sym == self.settings.benchmark:
+                continue
+            try:
+                data[sym] = self.research_frame(sym)
+            except (DataQualityError, KeyError) as e:
+                if log:
+                    log(f"{sym} excluido: {e}")
+        ai = None
+        if cfg.use_ai and self.settings.gemini_api_key:
+            from qsts.ai.providers import GeminiProvider
+            from qsts.ai.service import AIResearchService
+            ai = AIResearchService(GeminiProvider(self.settings.gemini_api_key.get_secret_value(),
+                                                  model=self.settings.gemini_model),
+                                   self.sf, max_calls_per_day=self.settings.ai_max_calls_per_day)
+        return AutoResearcher(self.sf, data, cfg, ai=ai, log=log, stop_event=stop_event)
+
     def symbols(self) -> list[str]:
         with self.sf() as s:
             return list(s.scalars(select(m.Asset.symbol).join(m.Price, m.Price.asset_id == m.Asset.id)

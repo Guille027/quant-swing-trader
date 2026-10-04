@@ -12,6 +12,10 @@ cp .env.example .env
 python -m pytest
 ```
 
+## Windows (cmd)
+`qsts` may not be on PATH after `pip install`; use `python -m qsts.cli <command>` instead, e.g.
+`python -m qsts.cli ingest --provider yahoo --symbols SPY,AAPL --start 2010-01-01` and `python -m qsts.cli desktop`.
+
 ## Use
 ```bash
 qsts ingest --provider yahoo --symbols SPY,AAPL,MSFT --start 2010-01-01   # needs network access to Yahoo
@@ -20,6 +24,7 @@ qsts scan                      # text dashboard
 qsts research --strategy my.json --symbols AAPL,MSFT --oos-start 2022-01-01 --space '{"rsi_lo":[30,35,40]}'
 qsts evolve --symbols AAPL,MSFT --train 2012-01-01:2017-12-31 --validate 2018-01-15:2021-12-31
 python scripts/run_baselines.py --oos-start 2023-01-01   # baselines through the full pipeline (one OOS read per version)
+qsts autoresearch --cycles 3   # automatic search for the most consistent strategy (also: UI tab "Investigación IA")
 ```
 Screenshots in `docs/screenshots/` were taken with SYNTHETIC random-walk data (symbols `SYN_*`) — they show the UI, not market results.
 

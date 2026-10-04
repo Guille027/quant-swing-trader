@@ -52,9 +52,10 @@ class Individual:
 
 
 class EvolutionEngine:
-    def __init__(self, data: dict[str, pd.DataFrame], train: tuple, validate: tuple,
+    def __init__(self, data: dict[str, pd.DataFrame], train: tuple, validate: tuple | None,
                  bt_cfg: BacktestConfig = BacktestConfig(), cfg: EvolutionConfig = EvolutionConfig()):
-        if pd.Timestamp(train[1]) >= pd.Timestamp(validate[0]):
+        """`validate` may be None only for subclasses that override `evaluate` with their own fitness."""
+        if validate is not None and pd.Timestamp(train[1]) >= pd.Timestamp(validate[0]):
             raise ValueError("train must end before validation starts")
         self.data, self.train, self.validate = data, train, validate
         self.bt, self.cfg = bt_cfg, cfg
@@ -175,8 +176,11 @@ class EvolutionEngine:
         picks = self.rng.choice(len(pop), size=min(self.cfg.tournament, len(pop)), replace=False)
         return max((pop[i] for i in picks), key=lambda x: x.fitness)
 
-    def run(self) -> dict:
-        pop = [self.evaluate(self.random_individual()) for _ in range(self.cfg.population)]
+    def run(self, initial: list[StrategyDefinition] | None = None) -> dict:
+        """`initial`: genomes to seed the population with (e.g. the best found in earlier runs), so the
+        search builds on what it already learnt. They must use this engine's genome shape."""
+        seeds = [self.evaluate(sd) for sd in (initial or [])[: self.cfg.population]]
+        pop = seeds + [self.evaluate(self.random_individual()) for _ in range(self.cfg.population - len(seeds))]
         for g in range(self.cfg.generations):
             pop.sort(key=lambda x: -x.fitness)
             finite = [p.fitness for p in pop if np.isfinite(p.fitness)]

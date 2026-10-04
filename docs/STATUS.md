@@ -19,6 +19,7 @@ Legend: **IMPLEMENTED** (tested) · **UNVERIFIED** (implemented, not tested agai
 | 9 | AIProvider abstraction, AI research service (strategy proposals, news labels, result review) with schema validation, caching, daily budget, provenance | IMPLEMENTED |
 | 9 | GeminiProvider | VERIFIED 2026-10-03: request/response fields match https://ai.google.dev/api/generate-content; live calls with the user key OK (`gemini-2.5-flash`), strategy proposals pass/fail schema validation as designed, cache hit avoids a second call |
 | 10 | Evolutionary search (train/val min-fitness, complexity & divergence penalties, trial counting) | IMPLEMENTED |
+| 9/10 | Automatic research loop ("Investigación IA"): evolution seeded with past elites + Gemini proposals fed with research-only results → consistency score (worst of 3 sub-period Sharpes) → auto-validation of top candidates → leaderboard with global-trial DSR; one-time manual final OOS test; UI tab + `qsts autoresearch` | IMPLEMENTED (tested on synthetic data; smoke-run on real data, no strategy found yet) |
 | 12 | Strategy allocation (risk parity/inverse vol/min-var with shrinkage, health, cash), correlation clusters, effective bets, beta, sector exposure, confidence calibration, decay detection | IMPLEMENTED |
 | 13/16 | BrokerAdapter, PaperBroker (same fill model as backtest), ExecutionService | IMPLEMENTED |
 | 15 | NotificationService: log, email IMPLEMENTED; Telegram, Discord UNVERIFIED; WhatsApp PLACEHOLDER | PARTIAL |
@@ -90,6 +91,13 @@ because concurrent positions are not independent.
 - [x] Gemini verified against official docs and a live call
 - [x] Trading 212 official docs read and summarised (no code yet)
 - [ ] Point-in-time S&P 500 membership source
+
+### Automatic research loop
+- [x] Uses research-period data only; never opens the OOS vault (test asserts zero vault accesses)
+- [x] Every evaluated strategy persisted and counted once (re-proposals of a known version are not re-counted)
+- [x] Leaderboard DSR is deflated by the total number of trials (more trials -> lower DSR, tested)
+- [x] Final test only for research-validated candidates, once per version; its results never reach the AI context
+- [x] AI proposals: schema-validated, long-only enforced, malformed ones logged and not backtested
 
 ### Phases 9–21 (implemented parts)
 - [x] AI output rejected when it invents features, adds unexpected fields (e.g. performance claims) or breaks numeric ranges; cached; budgeted

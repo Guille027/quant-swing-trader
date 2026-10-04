@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Default random seed for reproducible experiments.
     default_seed: int = Field(default=42)
 
+    # Research: data from oos_start onwards is the out-of-sample vault (used once per strategy version).
+    oos_start: str = "2023-01-01"
+    benchmark: str = "SPY"
+    gemini_model: str = "gemini-2.5-flash"
+    ai_max_calls_per_day: int = 50
+
     @model_validator(mode="after")
     def _check_environment_separation(self) -> "Settings":
         if self.live_trading_enabled and self.env is not Environment.LIVE:

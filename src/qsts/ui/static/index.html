@@ -13,6 +13,7 @@
   <div class="brand">QSTS <span id="env" class="pill"></span> <span id="mode" class="pill"></span></div>
   <nav>
     <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="auto">Investigación IA</button>
     <button data-tab="signals">Señales</button>
     <button data-tab="charts">Gráficos</button>
     <button data-tab="strategies">Estrategias</button>
@@ -37,6 +38,37 @@
     <select id="mode-select"></select> <input id="mode-reason" placeholder="motivo"> <label><input type="checkbox" id="mode-confirm"> confirmo</label>
     <button id="mode-apply">Cambiar modo</button> <span id="mode-msg" class="muted"></span>
   </div>
+</section>
+
+<section id="tab-auto" class="tab">
+  <div class="card">
+    <h3>Investigación automática: ¿qué hace?</h3>
+    <p>La app busca sola <b>estrategias de compra</b> para tus acciones y se queda con las <b>más consistentes</b>:</p>
+    <ol class="steps">
+      <li><b>Evolución:</b> combina indicadores al azar, se queda con las mejores combinaciones y las va mejorando en cada ciclo (parte siempre de lo mejor que encontró antes).</li>
+      <li><b>IA (Gemini):</b> lee qué ha funcionado y qué no, y propone ideas nuevas.</li>
+      <li><b>Prueba:</b> cada estrategia se prueba sobre <b id="ar-period">el pasado</b>, dividido en 3 tramos. Su <b>consistencia</b> es su resultado en el <i>peor</i> tramo: tiene que funcionar en todos, no solo de media.</li>
+      <li><b>Validación:</b> las mejores pasan exámenes extra (costes dobles, cambios de parámetros, ventanas móviles, comparación con estrategias simples de referencia).</li>
+    </ol>
+    <p class="warn">Los datos desde <b id="ar-oos">2023</b> están <b>guardados bajo llave</b>: la búsqueda nunca los ve. Solo se abren una vez por estrategia, con el botón <b>Test final</b>, para comprobarla con datos nuevos para ella.<br>
+    Ojo: probar miles de estrategias sobre el mismo pasado siempre encuentra alguna que parece buena <i>por suerte</i>. Por eso se cuenta cada prueba, y la columna <b>Fiabilidad</b> baja cuantas más pruebas se hacen. Nada de esto es una recomendación de inversión.</p>
+  </div>
+  <div class="card">
+    <h3>Control</h3>
+    <div class="row">
+      <button id="ar-start" class="primary">▶ Empezar a investigar</button>
+      <button id="ar-stop">■ Detener</button>
+      <label><input type="checkbox" id="ar-ai" checked> usar IA (Gemini)</label>
+      <label>Ciclos <select id="ar-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
+      <span id="ar-msg" class="muted"></span>
+    </div>
+    <dl id="ar-state"></dl>
+  </div>
+  <div class="card"><h3>Ranking: estrategias más consistentes</h3>
+    <p class="muted" id="ar-board-note"></p>
+    <table id="ar-board"></table></div>
+  <div class="card"><h3>Detalle</h3><div id="ar-detail" class="muted">Pulsa una fila del ranking para ver su detalle.</div></div>
+  <div class="card"><h3>Qué está haciendo ahora</h3><pre id="ar-log" class="muted">—</pre></div>
 </section>
 
 <section id="tab-signals" class="tab">

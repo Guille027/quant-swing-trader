@@ -53,6 +53,8 @@ def _clean(obj):
         return float(obj)
     if isinstance(obj, (np.integer,)):
         return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
     return obj
 
 
@@ -129,7 +131,14 @@ class ExperimentTracker:
         with self.sf() as s:
             sv = s.get(m.StrategyVersion, e.strategy_version_id)
             ds = s.get(m.DatasetVersion, e.dataset_version_id)
-        fp = dataset_fingerprint({k: data[k] for k in e.config["symbols"] if k in data})
+        data = {k: data[k] for k in e.config["symbols"] if k in data}
+        fp = dataset_fingerprint(data)
+        if fp != ds.spec["frames"] and e.config.get("end"):
+            # experiments run on a research view (data cut at the OOS boundary): rebuild that view
+            end_ts = pd.Timestamp(e.config["end"])
+            cut = {k: v[v.index <= end_ts] for k, v in data.items()}
+            if dataset_fingerprint(cut) == ds.spec["frames"]:
+                data, fp = cut, ds.spec["frames"]
         if fp != ds.spec["frames"]:
             bad = sorted(k for k in ds.spec["frames"] if fp.get(k) != ds.spec["frames"][k])
             return {"reproduced": False, "reason": f"dataset differs for {bad}"}

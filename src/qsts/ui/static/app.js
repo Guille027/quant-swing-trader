@@ -23,7 +23,8 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
   b.classList.add("active"); $("#tab-" + b.dataset.tab).classList.add("active");
-  ({ signals: loadSignals, charts: initCharts, strategies: loadStrategies, research: loadExperiments, logs: loadLogs }[b.dataset.tab] || (() => {}))();
+  clearInterval(autoTimer); autoTimer = null;
+  ({ auto: openAuto, signals: loadSignals, charts: initCharts, strategies: loadStrategies, research: loadExperiments, logs: loadLogs }[b.dataset.tab] || (() => {}))();
 });
 
 // ---------------------------------------------------------------- dashboard
@@ -64,6 +65,83 @@ $("#run-scan").onclick = async () => {
       "Escaneados": lastScan.assets_scanned, "Válidos": lastScan.valid_assets, "Setups": lastScan.potential_setups, "Señales": lastScan.final_signals });
   } catch (e) { $("#scan-text").textContent = "Error: " + e.message; }
 };
+
+// ---------------------------------------------------------------- automatic research
+let autoTimer = null, arRows = [], arSel = null, arLastCycles = -1, arPolls = 0;
+const ORIGIN = { evolution: "evolución", ai: "IA", baseline: "referencia" };
+const STATUS = { EVALUATED: "probada", INVALID: "no puntuable", VALIDATED_PASS: '<span class="good">✔ validada</span>',
+  VALIDATED_FAIL: '<span class="bad">✘ no pasa validación</span>', FINAL_PASS: '<span class="good">✔✔ aprobada en test final</span>',
+  FINAL_FAIL: '<span class="bad">✘ suspende test final</span>' };
+const GATES = { min_trades: "suficientes operaciones", overfit_risk: "riesgo de sobreajuste aceptable", max_drawdown: "caída máxima aceptable",
+  walk_forward: "funciona en ventanas móviles (walk-forward)", beats_baselines: "supera a las estrategias de referencia",
+  robustness: "aguanta pequeños cambios de parámetros", costs_2x: "sigue ganando con el doble de costes" };
+function openAuto() { loadAuto(true); autoTimer = setInterval(() => loadAuto(false), 3000); }
+async function loadAuto(full) {
+  let st;
+  try { st = await api("/api/autoresearch/status"); } catch (e) { $("#ar-msg").textContent = e.message; return; }
+  $("#ar-oos").textContent = st.oos_start;
+  $("#ar-start").disabled = st.running; $("#ar-stop").disabled = !st.running;
+  if (!st.ai_available) { $("#ar-ai").checked = false; $("#ar-ai").disabled = true; $("#ar-ai").parentElement.title = "Pon QSTS_GEMINI_API_KEY en .env"; }
+  dl($("#ar-state"), { "Estado": st.running ? '<span class="good">investigando…</span>' : "parado", "Fase": esc(st.phase),
+    "Ciclos (esta sesión)": st.cycles_done, "Probadas (esta sesión)": st.session_trials,
+    "IA": st.ai_available ? "disponible" : '<span class="muted">no configurada</span>', ...(st.error ? { "Error": `<span class="bad">${esc(st.error)}</span>` } : {}) });
+  $("#ar-log").textContent = (st.log || []).slice().reverse().join("\n") || "—";
+  arPolls++;
+  if (full || st.cycles_done !== arLastCycles || (st.running && arPolls % 5 === 0)) { arLastCycles = st.cycles_done; await loadBoard(); }
+}
+async function loadBoard() {
+  let lb;
+  try { lb = await api("/api/autoresearch/leaderboard?limit=25"); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
+  $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
+  $("#ar-board-note").innerHTML = `Estrategias probadas en total: <b>${lb.n_trials}</b> · veces que se ha abierto el periodo guardado: <b>${lb.final_tests_used}</b>. ` +
+    (lb.equivalents_hidden ? `Ocultadas ${lb.equivalents_hidden} variantes equivalentes (mismas operaciones). ` : "") +
+    `<b>Consistencia</b> = Sharpe del peor de los 3 tramos (más alto = mejor; por encima de 0,5 es bueno). <b>Fiabilidad</b> = probabilidad de que no sea suerte, teniendo en cuenta todas las pruebas hechas.`;
+  arRows = lb.rows;
+  table($("#ar-board"), arRows, [["#", r => arRows.indexOf(r) + 1],
+    ["Estrategia", r => `<span class="badge">${ORIGIN[r.origin] || r.origin}</span>${esc(r.rules)}`],
+    ["Consistencia", r => fmt(r.consistency, 3)], ["Sharpe", r => fmt(r.sharpe)], ["Años en positivo", r => pct(r.pct_positive_years)],
+    ["Peor año", r => pct(r.worst_year)], ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades],
+    ["Fiabilidad", r => r.dsr == null ? "—" : pct(r.dsr)], ["Estado", r => STATUS[r.status] || r.status],
+    ["", r => r.status === "VALIDATED_PASS" ? `<button onclick="event.stopPropagation();finalTest('${r.id}')">Test final</button>` : ""]]);
+  [...$("#ar-board").querySelectorAll("tr")].slice(1).forEach((tr, i) => {
+    tr.classList.add("click"); if (arRows[i].id === arSel) tr.classList.add("sel");
+    tr.cells[1].classList.add("rules"); tr.onclick = () => { arSel = arRows[i].id; showDetail(arRows[i]); loadBoard(); };
+  });
+  const cur = arRows.find(r => r.id === arSel); if (cur) showDetail(cur);
+}
+function showDetail(r) {
+  const blocks = (r.blocks || []).map(b => `<tr><td>${b.start} → ${b.end}</td><td>${fmt(b.sharpe)}</td><td>${pct(b.return)}</td><td>${b.trades}</td></tr>`).join("");
+  let h = `<p><span class="badge">${ORIGIN[r.origin] || r.origin}</span><b>${esc(r.rules)}</b></p>
+    <p class="muted">Id ${r.id}${r.strategy_id ? " · en Estrategias como " + esc(r.strategy_id) : ""}</p>
+    <h4>Los 3 tramos del pasado</h4><table><tr><th>Periodo</th><th>Sharpe</th><th>Rentabilidad</th><th>Operaciones</th></tr>${blocks}</table>`;
+  const v = r.validation;
+  if (v) {
+    h += `<h4>Validación: ${v.passed ? '<span class="good">PASA</span>' : '<span class="bad">NO PASA</span>'}</h4><ul>` +
+      Object.entries(v.gates).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${GATES[k] || k}</li>`).join("") + "</ul>" +
+      `<p class="muted">Estrategias de referencia (Sharpe): ${Object.entries(v.baselines || {}).map(([k, x]) => `${k} ${fmt(x)}`).join(" · ")} — esta: ${fmt(v.is_metrics?.sharpe)}</p>`;
+  } else if (r.origin === "baseline") h += `<p class="muted">Estrategia de referencia (muy simple): no se valida ni se opera; sirve de listón. Una estrategia nueva tiene que superarla.</p>`;
+  else h += `<p class="muted">Aún no validada (se validan automáticamente las mejores de cada ciclo).</p>`;
+  if (r.final) {
+    const o = r.final.oos || {};
+    h += `<h4>Test final con datos guardados (${r.final.period.join(" → ")}): ${r.final.decision === "FINAL_PASS" ? '<span class="good">APROBADA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>` +
+      `<p>Rentabilidad ${pct(o.total_return)} · Sharpe ${fmt(o.sharpe)} · Caída máx. ${pct(o.max_drawdown)} · Operaciones ${o.n_trades ?? "—"}</p>`;
+  }
+  $("#ar-detail").classList.remove("muted"); $("#ar-detail").innerHTML = h;
+}
+window.finalTest = async (id) => {
+  if (!confirm("TEST FINAL: se probará esta estrategia con los datos guardados bajo llave.\n\nSolo se puede hacer UNA vez por estrategia y el resultado no se puede usar para seguir ajustándola. Úsalo solo con la estrategia que de verdad elegirías.\n\n¿Continuar?")) return;
+  try { const f = await post(`/api/autoresearch/${id}/final-test`); arSel = id;
+    alert(f.decision === "FINAL_PASS" ? "APROBADA en el test final. Pasa a estado CANDIDATE." : "SUSPENDE el test final. Se marca como rechazada.");
+  } catch (e) { alert(e.message); }
+  loadBoard();
+};
+$("#ar-start").onclick = async () => {
+  try { const r = await post("/api/autoresearch/start", { use_ai: $("#ar-ai").checked, max_cycles: +$("#ar-cycles").value });
+    $("#ar-msg").textContent = r.started ? "En marcha. Cada ciclo tarda unos minutos; puedes seguir usando la app." : "Ya estaba en marcha.";
+  } catch (e) { $("#ar-msg").textContent = e.message; }
+  loadAuto(false);
+};
+$("#ar-stop").onclick = async () => { await post("/api/autoresearch/stop"); $("#ar-msg").textContent = "Deteniendo (termina la prueba en curso)…"; loadAuto(false); };
 
 // ---------------------------------------------------------------- signals
 async function loadSignals() {

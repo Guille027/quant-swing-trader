@@ -102,3 +102,24 @@ def test_split_adjusted_everywhere_and_point_in_time(tmp_path):
     c = TestClient(create_app(ctx))
     closes = [x["close"] for x in c.get("/api/chart/AAA").json()["candles"]]
     assert np.abs(np.diff(np.log(closes))).max() < 0.2
+
+
+def test_autoresearch_endpoints(client):
+    import time
+    c, ctx = client
+    st = c.get("/api/autoresearch/status").json()
+    assert st["running"] is False and "oos_start" in st
+    assert c.post("/api/autoresearch/start", json={"use_ai": False, "max_cycles": 1, "population": 4,
+                                                   "generations": 1}).json()["started"] is True
+    for _ in range(600):
+        st = c.get("/api/autoresearch/status").json()
+        if not st["running"]:
+            break
+        time.sleep(0.2)
+    assert st["running"] is False and st["error"] is None and st["cycles_done"] == 1, st
+    lb = c.get("/api/autoresearch/leaderboard").json()
+    assert lb["n_trials"] > 0 and lb["rows"] and lb["final_tests_used"] == 0
+    assert c.post("/api/autoresearch/nope/final-test").status_code == 404
+    first = lb["rows"][0]
+    if first["status"] != "VALIDATED_PASS":
+        assert c.post(f"/api/autoresearch/{first['id']}/final-test").status_code == 400

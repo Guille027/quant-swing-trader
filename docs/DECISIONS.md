@@ -24,3 +24,10 @@
 13. **Integer parameters**: params are stored as floats; window-length params (detected from feature defaults /
     stop & holding fields) are varied in integer steps by the robustness scan.
 14. **`.gitignore` anchors `/data/`** — the unanchored `data/` silently excluded `src/qsts/data/` from git.
+15. **Automatic research = search + strict accounting, not "learning" in the ML sense.** Fitness is the WORST
+    annualised Sharpe of 3 consecutive research sub-periods minus 0.03 per complexity point (consistency over
+    average). Each cycle the evolution starts from the best evolved strategies so far and the AI sees a summary
+    of research-period results. Because a long search on fixed history always finds lucky rules, every trial is
+    stored and the leaderboard DSR uses the global trial count and the cross-trial Sharpe variance (conservative:
+    similar strategies are counted as independent). The OOS vault is only opened by an explicit, once-per-version
+    final test of a research-validated candidate; its result is never fed back to the search or the AI.

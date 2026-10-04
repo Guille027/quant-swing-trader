@@ -221,6 +221,26 @@ class MonteCarloRun(Base):
     percentiles: Mapped[dict] = mapped_column(JSON)
 
 
+class ResearchCandidate(Base):
+    """Every strategy evaluated by the automatic research loop (one row per strategy version = one trial).
+    Kept forever: the row count is the multiple-testing burden used by the Deflated Sharpe Ratio."""
+    __tablename__ = "research_candidates"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # strategy version id
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    origin: Mapped[str] = mapped_column(String(16))  # evolution | ai | baseline
+    cycle: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[dict] = mapped_column(JSON)
+    fitness: Mapped[float | None] = mapped_column(Float, index=True)  # NULL = not scoreable
+    sr: Mapped[float | None] = mapped_column(Float)  # per-period Sharpe of the research run (for the DSR)
+    metrics: Mapped[dict | None] = mapped_column(JSON)  # research-period metrics only
+    status: Mapped[str] = mapped_column(String(16), index=True)  # EVALUATED|INVALID|VALIDATED_PASS|VALIDATED_FAIL|FINAL_PASS|FINAL_FAIL
+    validation: Mapped[dict | None] = mapped_column(JSON)
+    final: Mapped[dict | None] = mapped_column(JSON)  # OOS vault result (never fed back into the search)
+    strategy_id: Mapped[str | None] = mapped_column(String(64))
+    dataset_id: Mapped[str | None] = mapped_column(String(32))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 class OOSAccessLog(Base):
     """Every read of the reserved out-of-sample dataset is logged (and limited)."""
     __tablename__ = "oos_access_log"

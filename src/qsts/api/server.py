@@ -25,6 +25,8 @@ from qsts.data.adjust import adjust
 from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.db import models as m
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
+from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
+from qsts.research.validation import OOSAccessDenied
 from qsts.risk.engine import PortfolioState
 from qsts.strategy.definition import definition_from_dict
 
@@ -70,6 +72,13 @@ class BacktestBody(BaseModel):
     spread_bps: float = 5.0
     slippage_bps: float = 5.0
     strategy_id: str | None = None
+
+
+class AutoResearchBody(BaseModel):
+    use_ai: bool = True
+    max_cycles: int = 0  # 0 = until stopped
+    population: int = 20
+    generations: int = 4
 
 
 class ApprovalBody(BaseModel):
@@ -244,6 +253,59 @@ def create_app(ctx: AppContext) -> FastAPI:
                    "complexity": sd.complexity(),
                    "equity": [{"time": int(t.timestamp()), "value": v} for t, v in eq.items()],
                    "trades": rec.result.trades.astype(str).to_dict("records")[:500]})
+
+    # ------------------------------------------------------------------ automatic research ("Investigación IA")
+    def _runner() -> AutoResearchRunner:
+        r = ctx.extra.get("autoresearch")
+        if r is None:
+            r = ctx.extra["autoresearch"] = AutoResearchRunner(
+                lambda cfg, log, stop: ctx.autoresearcher(cfg, log=log, stop_event=stop))
+        return r
+
+    def _researcher():
+        r = _runner().researcher
+        if r is None:  # read-only view for the leaderboard / final test when no loop has run yet
+            r = ctx.extra.get("autoresearch_view")
+            if r is None:
+                r = ctx.extra["autoresearch_view"] = ctx.autoresearcher(
+                    AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=False))
+        return r
+
+    @app.get("/api/autoresearch/status")
+    def ar_status():
+        return _j(_runner().status() | {"ai_available": bool(ctx.settings.gemini_api_key),
+                                        "oos_start": ctx.settings.oos_start})
+
+    @app.post("/api/autoresearch/start")
+    def ar_start(body: AutoResearchBody):
+        if not ctx.symbols():
+            raise HTTPException(400, "no hay datos: ejecuta primero `qsts ingest`")
+        cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai,
+                                 population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)))
+        return {"started": _runner().start(cfg, max(0, body.max_cycles))}
+
+    @app.post("/api/autoresearch/stop")
+    def ar_stop():
+        _runner().stop()
+        return {"stopping": True}
+
+    @app.get("/api/autoresearch/leaderboard")
+    def ar_leaderboard(limit: int = 20):
+        try:
+            return _j(_researcher().leaderboard(max(1, min(limit, 200))))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/autoresearch/{vid}/final-test")
+    def ar_final_test(vid: str):
+        try:
+            return _j(_researcher().final_test(vid))
+        except KeyError:
+            raise HTTPException(404, "estrategia desconocida")
+        except OOSAccessDenied as e:
+            raise HTTPException(409, f"el test final ya se usó para esta versión: {e}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     # ------------------------------------------------------------------ scan / signals / approvals
     @app.post("/api/scan")
