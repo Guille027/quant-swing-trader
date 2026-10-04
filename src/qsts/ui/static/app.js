@@ -57,7 +57,8 @@ async function loadSync() {
   $("#sync-setup").style.display = s.enabled ? "none" : "block";
   $("#sync-actions").style.display = s.enabled ? "flex" : "none";
   if (!s.enabled) {
-    $("#sync-body").innerHTML = "Desactivado: los datos solo están en este ordenador.";
+    $("#sync-body").innerHTML = "Desactivado: los datos solo están en este ordenador." + (s.suggested_dir ? ""
+      : ' <span class="bad">No encuentro OneDrive en este ordenador:</span> abre OneDrive (la nube junto al reloj), inicia sesión con la misma cuenta que en el otro ordenador y vuelve a abrir QSTS.');
     if (!$("#sync-dir").value && s.suggested_dir) $("#sync-dir").value = s.suggested_dir;
     return;
   }
@@ -75,11 +76,13 @@ async function loadSync() {
   $("#sync-load").textContent = r ? `Cargar la copia de ${r.machine}` : "Cargar la copia";
 }
 const syncDo = async (path, body, ok) => {
-  $("#sync-msg").textContent = "…";
-  try { const r = await post(path, body); $("#sync-msg").textContent = ok(r); } catch (e) { $("#sync-msg").textContent = e.message; }
+  $("#sync-msg").className = "muted"; $("#sync-msg").textContent = "Un momento…";
+  try { const r = await post(path, body); $("#sync-msg").className = "good"; $("#sync-msg").textContent = ok(r); }
+  catch (e) { $("#sync-msg").className = "bad"; $("#sync-msg").textContent = e.message; }
   loadSync();
 };
-$("#sync-enable").onclick = () => syncDo("/api/sync/enable", { dir: $("#sync-dir").value }, () => "Activado.");
+$("#sync-enable").onclick = () => syncDo("/api/sync/enable", { dir: $("#sync-dir").value },
+  (s) => s.remote ? `Activado. Hay una copia de ${s.remote.machine}: pulsa "Cargar la copia".` : "Activado. Aún no hay ninguna copia en la carpeta.");
 $("#sync-off").onclick = () => { if (confirm("¿Desactivar la copia entre ordenadores? (no se borra nada)")) syncDo("/api/sync/disable", {}, () => "Desactivado."); };
 $("#sync-save").onclick = async () => {
   $("#sync-msg").textContent = "Guardando copia…";

@@ -59,11 +59,13 @@
         Usa <b>un ordenador cada vez</b>: si investigas en los dos a la vez, una de las dos versiones se perdería.</p>
       <div class="row"><label>Carpeta <input id="sync-dir" size="60" placeholder="C:\Users\tú\OneDrive\QSTS"></label>
         <button id="sync-enable" class="primary">Activar</button></div>
-      <p class="muted small">Pon la MISMA carpeta de OneDrive en los dos ordenadores. Las claves (Gemini, Telegram) no se copian: configúralas en cada uno.</p>
+      <p class="muted small">Usa la misma carpeta de OneDrive en los dos ordenadores, pero cada uno con SU ruta (el nombre de usuario de Windows suele ser distinto):
+        la app propone la de este ordenador. Las claves (Gemini, Telegram) no se copian: configúralas en cada uno.</p>
     </div>
     <div class="row" id="sync-actions" style="display:none"><button id="sync-save">Guardar copia ahora</button>
       <button id="sync-load" class="primary" style="display:none">Cargar la copia</button>
-      <button id="sync-off">Desactivar</button><span id="sync-msg" class="muted"></span></div>
+      <button id="sync-off">Desactivar</button></div>
+    <p id="sync-msg"></p>
   </div>
   <div class="card"><h3>Palabras clave</h3>
     <dl class="glossary">

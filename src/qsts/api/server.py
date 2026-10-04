@@ -514,10 +514,11 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.post("/api/sync/enable")
     def sync_enable(body: SyncDirBody):
-        folder = Path(body.dir.strip().strip('"'))
-        if not folder.parent.exists():
-            raise HTTPException(400, f"no existe la carpeta {folder.parent}")
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder = sync.check_dir(body.dir)
+            folder.mkdir(parents=True, exist_ok=True)
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(400, str(e))
         sync.save_state(ctx.settings.state_dir, dir=str(folder))
         return _j(_sync_status())
 

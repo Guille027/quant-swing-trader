@@ -145,3 +145,20 @@ def test_sync_endpoints(tmp_path, monkeypatch):
     assert c.post("/api/autoresearch/start", json={"use_ai": False}).status_code in (400, 409)
     r = c.post("/api/sync/load").json()
     assert r["restarting"] is True and restarted and (tmp_path / "var" / sync.PENDING).exists()
+
+
+def test_onedrive_folder_is_this_computers_own(tmp_path, monkeypatch):
+    home = tmp_path / "Users" / "portatil"
+    (home / "OneDrive - Personal").mkdir(parents=True)
+    assert sync.suggested_dir(home=home, env={}) == str(home / "OneDrive - Personal" / "QSTS")
+    env_dir = tmp_path / "od"
+    env_dir.mkdir()
+    assert sync.suggested_dir(home=home, env={"OneDrive": str(env_dir)}) == str(env_dir / "QSTS")
+    assert sync.suggested_dir(home=tmp_path / "nobody", env={}) is None
+    monkeypatch.setattr(sync, "suggested_dir", lambda: str(home / "OneDrive - Personal" / "QSTS"))
+    with pytest.raises(sync.SyncError) as e:  # the PC's path typed on the laptop
+        sync.check_dir(str(tmp_path / "Users" / "pc" / "OneDrive" / "QSTS"))
+    assert "no existe en este ordenador" in str(e.value) and "OneDrive - Personal" in str(e.value)
+    with pytest.raises(sync.SyncError):
+        sync.check_dir("  ")
+    assert sync.check_dir(f'"{home / "OneDrive - Personal" / "QSTS"}"') == home / "OneDrive - Personal" / "QSTS"

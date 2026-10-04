@@ -36,13 +36,37 @@ def machine_name() -> str:
     return os.environ.get("COMPUTERNAME") or platform.node() or "este ordenador"
 
 
-def suggested_dir() -> str | None:
-    """OneDrive folder of this Windows user (+ \\QSTS), if OneDrive is installed."""
+def suggested_dir(home: Path | None = None, env: dict | None = None) -> str | None:
+    """OneDrive folder of THIS computer's user (+ \\QSTS). Each computer has its own path (the Windows user name
+    usually differs), so the PC's path must not be typed on the laptop."""
+    env = os.environ if env is None else env
     for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-        p = os.environ.get(var)
+        p = env.get(var)
         if p and Path(p).is_dir():
             return str(Path(p) / "QSTS")
+    home = home or Path.home()
+    for cand in [home / "OneDrive", *sorted(home.glob("OneDrive*"))]:  # e.g. "OneDrive - Personal"
+        if cand.is_dir():
+            return str(cand / "QSTS")
     return None
+
+
+def check_dir(raw: str) -> Path:
+    """Validates the folder typed by the user; the error says what to do."""
+    txt = (raw or "").strip().strip('"').strip()
+    sug = suggested_dir()
+    if not txt:
+        raise SyncError("escribe la carpeta" + (f" (en este ordenador: {sug})" if sug else ""))
+    folder = Path(txt)
+    if not folder.is_absolute():
+        raise SyncError("escribe la ruta completa de la carpeta" + (f", por ejemplo {sug}" if sug else ""))
+    if not folder.parent.exists():
+        msg = f"la carpeta {folder.parent} no existe en este ordenador."
+        msg += (f" Aquí la carpeta de OneDrive es: {sug}" if sug else
+                " No encuentro OneDrive en este ordenador: abre OneDrive (la nube junto al reloj) e inicia sesión con "
+                "la misma cuenta que en el otro ordenador; luego vuelve a abrir QSTS.")
+        raise SyncError(msg)
+    return folder
 
 
 def db_file(database_url: str) -> Path | None:
