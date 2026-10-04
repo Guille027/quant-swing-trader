@@ -228,3 +228,14 @@ def test_earnings_download_columns_and_reproduce(client, tmp_path):
     from qsts.research.autoresearch import AutoResearchConfig
     r_off = ctx.autoresearcher(AutoResearchConfig(oos_start=ctx.settings.oos_start, avoid_earnings=False))
     assert r_off.bt.earnings_blackout_days == 0 and r_off.universe_id != r.universe_id  # separate rankings
+
+
+def test_version_shutdown_and_no_cache(client):
+    c, ctx = client
+    assert c.get("/api/status").json()["code_version"]
+    assert c.get("/").headers["cache-control"] == "no-store"
+    assert c.get("/static/app.js").headers["cache-control"] == "no-store"
+    assert c.post("/api/shutdown").status_code == 409  # not started by the launcher
+    hit = []
+    ctx.extra["shutdown"] = lambda: hit.append(1)
+    assert c.post("/api/shutdown").json()["stopping"] and hit == [1]

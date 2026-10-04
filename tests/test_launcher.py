@@ -28,6 +28,8 @@ def test_is_running_false_on_free_port():
 def test_launcher_falls_back_to_browser(monkeypatch):
     calls = []
     monkeypatch.setattr(launcher, "is_running", lambda url, timeout=1.0: True)  # app already open
+    from qsts.research.experiments import code_version
+    monkeypatch.setattr(launcher, "running_version", lambda url: code_version())  # ... and it is this version
     monkeypatch.setattr(launcher, "start_server", lambda port: calls.append("server"))
     monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls.append(("browser", url)))
     monkeypatch.setattr(launcher, "message", lambda text, title="QSTS": calls.append("dialog"))
@@ -43,3 +45,27 @@ def test_launcher_falls_back_to_browser(monkeypatch):
 def test_keep_awake_is_noop_off_windows():
     assert keep_awake(True) is (sys.platform == "win32" and keep_awake(True))
     keep_awake(False)
+
+
+def test_launcher_replaces_an_older_running_version(monkeypatch):
+    calls, state = [], {"up": True}
+    monkeypatch.setattr(launcher, "is_running", lambda url, timeout=1.0: state["up"])
+    monkeypatch.setattr(launcher, "running_version", lambda url: "old-version")
+    def stop(url, port):
+        calls.append("stop-old")
+        state["up"] = False
+        return True
+    def start(port):
+        calls.append("start-new")
+        state["up"] = True
+    monkeypatch.setattr(launcher, "stop_running", stop)
+    monkeypatch.setattr(launcher, "start_server", start)
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls.append("browser"))
+    monkeypatch.setattr(launcher, "message", lambda text, title="QSTS": calls.append("dialog"))
+    monkeypatch.setitem(sys.modules, "webview", None)
+    cwd = os.getcwd()
+    try:
+        launcher.main(port=8798)
+    finally:
+        os.chdir(cwd)
+    assert calls == ["dialog", "stop-old", "start-new", "browser", "dialog"]

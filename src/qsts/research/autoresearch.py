@@ -218,12 +218,16 @@ class AutoResearcher:
         self.dataset_id = hash_obj(dataset_fingerprint(self.research), 32)
         self.benchmark = benchmark
         # a ranking only compares strategies scored on the same symbols, window and scoring rules
-        self.universe_id = hash_obj({"symbols": {k: str(v.index[0].date()) for k, v in sorted(self.research.items())},
-                                     "oos_start": cfg.oos_start, "warmup": cfg.warmup_bars, "blocks": cfg.blocks,
-                                     "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
-                                     "complexity_penalty": cfg.complexity_penalty, "engine": _engine_key(bt_cfg),
-                                     "earnings_data": _earnings_key(self.research),
-                                     "engine_version": ENGINE_VERSION}, 32)
+        key = {"symbols": {k: str(v.index[0].date()) for k, v in sorted(self.research.items())},
+               "oos_start": cfg.oos_start, "warmup": cfg.warmup_bars, "blocks": cfg.blocks,
+               "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
+               "complexity_penalty": cfg.complexity_penalty, "engine": _engine_key(bt_cfg),
+               "engine_version": ENGINE_VERSION}
+        if bt_cfg.earnings_blackout_days or bt_cfg.exit_before_earnings:
+            # the earnings rules make scores depend on the earnings data; with the rules off, strategies that do not
+            # use earnings features score identically, so earlier rankings stay valid
+            key["earnings_data"] = _earnings_key(self.research)
+        self.universe_id = hash_obj(key, 32)
         self.registry, self.tracker = StrategyRegistry(sf), ExperimentTracker(sf)
         self.log = log or (lambda msg: None)
         self.stop_event = stop_event or threading.Event()
@@ -231,6 +235,7 @@ class AutoResearcher:
         self.session_trials = 0
         self._engine: _ConsistencyEvolution | None = None
         self._last_ai_rejections: list[str] = []
+        self._imported = False
         self._adopt_legacy_rows()
 
     def _adopt_legacy_rows(self) -> None:
@@ -356,9 +361,41 @@ class AutoResearcher:
         for sd in (momentum_baseline(), trend_baseline()):
             self.evaluate_and_store(sd, "baseline", 0)
 
+    def import_previous(self, n: int = 30) -> int:
+        """A new ranking (new data or rules) starts from what earlier rankings learnt: their best strategies are
+        re-scored here under the current rules (each re-score is a counted trial)."""
+        if self._imported:
+            return 0
+        self._imported = True
+        R = m.ResearchCandidate
+        with self.sf() as s:
+            if s.scalar(select(func.count()).select_from(R).where(R.universe_id == self.universe_id,
+                                                                  R.origin != "baseline")) >= n:
+                return 0
+            prev = s.scalars(select(R).where(R.universe_id != self.universe_id, R.fitness.is_not(None),
+                                            R.origin.in_(("evolution", "ai"))).order_by(R.fitness.desc()).limit(n * 4)).all()
+        seen, picked = set(), []
+        for r in prev:
+            vid = r.version_id or r.id
+            if vid not in seen:
+                seen.add(vid)
+                picked.append(r)
+            if len(picked) >= n:
+                break
+        picked = [r for r in picked if self.holding_ok(definition_from_dict(r.definition))]
+        for r in picked:
+            self.check_stop()
+            self.evaluate_and_store(definition_from_dict(r.definition), r.origin, 0)
+        if picked:
+            self.log(f"Reaprovechando las {len(picked)} mejores estrategias de investigaciones anteriores "
+                     "(se vuelven a puntuar con las reglas y datos actuales)")
+        return len(picked)
+
     def run_cycle(self, cycle: int) -> dict:
         before = self.session_trials
         self.seed_baselines()
+        self.phase = "reaprovechando investigación anterior"
+        self.import_previous()
         self.phase = "búsqueda evolutiva"
         eng = self.engine()
         eng.cycle = cycle

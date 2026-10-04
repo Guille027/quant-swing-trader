@@ -57,3 +57,8 @@
     assumed at the first OPEN after it; with unknown time both the later information and the earlier gap are assumed.
     Research rankings include the earnings rule and a fingerprint of the earnings columns inside the research window.
     Paper trading reuses the exact engine rules of the strategy's validation experiment.
+23. **Updates must take effect and previous research must carry over.** The launcher compares the running server's
+    code version with the files on disk and replaces an older running copy (API shutdown, or ending the python process
+    holding the port for versions that predate it); the UI is served with `Cache-Control: no-store` and shows its
+    version. With the earnings rules off the ranking id is unchanged from before earnings existed; a new ranking
+    re-scores the best strategies of earlier rankings first (counted as trials) instead of starting from zero.

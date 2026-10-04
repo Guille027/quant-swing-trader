@@ -1,14 +1,17 @@
 """Double-click launcher used by the desktop shortcut (runs under pythonw: no console window).
 
 - Always runs from the project folder, so `.env` and `var/` are found wherever it is started from.
-- If the app is already open, it only opens another window onto it (no second copy of the server).
+- If the SAME version is already open, it only opens another window onto it (no second copy of the server).
+  If an OLDER version is still running (e.g. after `git pull`), it is closed first so the new code is used.
 - There is no console under pythonw: output goes to var/desktop.log.
 - If the native window cannot be created, the app opens in the browser and a small dialog keeps it alive
   ("press OK to close the app").
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +43,48 @@ def is_running(url: str, timeout: float = 1.0) -> bool:
         return False
 
 
+def running_version(url: str) -> str | None:
+    try:
+        with urllib.request.urlopen(f"{url}/api/status", timeout=2) as r:
+            return json.loads(r.read()).get("code_version")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pid_listening(port: int) -> int | None:
+    """Windows: PID of the process listening on 127.0.0.1:<port> (netstat), or None."""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3].upper() in ("LISTENING", "ESCUCHANDO"):
+            return int(parts[4])
+    return None
+
+
+def stop_running(url: str, port: int) -> bool:
+    """Ask the running app to stop; if it is too old to know how, end the python process holding the port."""
+    try:
+        req = urllib.request.Request(f"{url}/api/shutdown", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=3).close()
+    except Exception:  # noqa: BLE001
+        if sys.platform == "win32":
+            pid = _pid_listening(port)
+            if pid:
+                img = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                                     capture_output=True, text=True, timeout=10).stdout.lower()
+                if "python" in img:  # never touch anything that is not a python process
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+    for _ in range(60):
+        if not is_running(url, 0.5):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def message(text: str, title: str = "QSTS") -> None:
     """Blocking information dialog on Windows; plain print elsewhere."""
     if sys.platform == "win32":
@@ -53,7 +98,9 @@ def start_server(port: int) -> None:
     import uvicorn
     from qsts.api.server import create_app
     from qsts.app.context import build_context
-    server = uvicorn.Server(uvicorn.Config(create_app(build_context()), host="127.0.0.1", port=port, log_level="warning"))
+    ctx = build_context()
+    server = uvicorn.Server(uvicorn.Config(create_app(ctx), host="127.0.0.1", port=port, log_level="warning"))
+    ctx.extra["shutdown"] = lambda: setattr(server, "should_exit", True)
     threading.Thread(target=server.run, daemon=True, name="api").start()
 
 
@@ -63,6 +110,16 @@ def main(port: int = PORT) -> None:
     _redirect_output(root)
     url = f"http://127.0.0.1:{port}"
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} launcher start ({url})")
+    if is_running(url):
+        from qsts.research.experiments import code_version
+        mine, theirs = code_version(), running_version(url)
+        if theirs != mine:
+            print(f"replacing running version {theirs} with {mine}")
+            message("Hay una versión anterior de QSTS abierta.\n\nSe cerrará para abrir la versión nueva "
+                    "(si estaba investigando, esa investigación se detiene; lo ya probado queda guardado).")
+            if not stop_running(url, port):
+                message("No se pudo cerrar la versión anterior. Reinicia el ordenador y vuelve a abrir QSTS.")
+                return
     if not is_running(url):
         try:
             start_server(port)

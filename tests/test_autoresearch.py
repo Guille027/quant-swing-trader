@@ -217,3 +217,29 @@ def test_swing_horizon_enforced(sf, data):
                                   take_profit=TakeProfitRule("none"))
     assert r.holding_ok(no_limit) is False and CFG.max_holding_days == 20
     assert "holding_period" in r.ai_context()
+
+
+def test_rules_off_keep_ranking_and_new_rankings_reuse_previous_work(sf, data):
+    from qsts.backtest.engine import ENGINE_VERSION
+    from qsts.core.hashing import hash_obj
+    off = AutoResearcher(sf, data, AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}), BacktestConfig())
+    legacy_key = {"symbols": {k: str(v.index[0].date()) for k, v in sorted(off.research.items())},
+                  "oos_start": CFG.oos_start, "warmup": CFG.warmup_bars, "blocks": CFG.blocks,
+                  "min_trades": CFG.min_trades, "min_block_trades": CFG.min_block_trades,
+                  "complexity_penalty": CFG.complexity_penalty,
+                  "engine": {k: v for k, v in BacktestConfig().to_dict().items()
+                             if k not in ("earnings_blackout_days", "exit_before_earnings")},
+                  "engine_version": ENGINE_VERSION}
+    assert off.universe_id == hash_obj(legacy_key, 32)  # rules off: the ranking from before earnings is kept
+    off.seed_baselines()
+    off.engine().run()
+    best_before = {r["id"] for r in off.leaderboard(5)["rows"]}
+    on = AutoResearcher(sf, data, AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}),
+                        BacktestConfig(earnings_blackout_days=3, exit_before_earnings=True))
+    assert on.universe_id != off.universe_id
+    n = on.import_previous(n=5)
+    assert n > 0 and on.import_previous() == 0  # once per run
+    with sf() as s:
+        imported = s.scalars(select(m.ResearchCandidate.version_id).where(m.ResearchCandidate.universe_id == on.universe_id)).all()
+        old = s.scalars(select(m.ResearchCandidate.version_id).where(m.ResearchCandidate.id.in_(best_before))).all()
+    assert set(imported) & set(old)

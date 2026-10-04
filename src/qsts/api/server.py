@@ -121,6 +121,25 @@ def portfolio_state(ctx: AppContext) -> PortfolioState:
 
 def create_app(ctx: AppContext) -> FastAPI:
     app = FastAPI(title="QSTS", docs_url="/api/docs")
+    if "code_version" not in ctx.extra:
+        from qsts.research.experiments import code_version
+        ctx.extra["code_version"] = code_version()
+
+    @app.middleware("http")
+    async def _no_stale_ui(request, call_next):
+        # after an update the window must load the new screens, never a cached copy
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/shutdown")
+    def shutdown():
+        stop = ctx.extra.get("shutdown")
+        if stop is None:
+            raise HTTPException(409, "este servidor no admite apagado remoto")
+        stop()
+        return {"stopping": True}
 
     # ------------------------------------------------------------------ system
     @app.get("/api/status")
@@ -133,6 +152,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception as e:  # noqa: BLE001
             broker = {"name": ctx.execution.broker.name, "connected": False, "error": repr(e)}
         return _j({"environment": ctx.settings.env.value, "mode": ctx.modes.mode.name,
+                   "code_version": ctx.extra.get("code_version"),
                    "live_enabled_by_config": ctx.settings.live_allowed_by_config,
                    "kill_switch": {"engaged": ctx.kill_switch.is_engaged(), "info": ctx.kill_switch.info()},
                    "broker": broker, "needs_reconcile": ctx.execution.needs_reconcile,

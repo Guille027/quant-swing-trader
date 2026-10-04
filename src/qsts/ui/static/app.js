@@ -133,6 +133,7 @@ $("#mode-select").innerHTML = MODES.map(m => `<option>${m}</option>`).join("");
 async function loadStatus() {
   const s = await api("/api/status");
   $("#env").textContent = s.environment.toUpperCase(); $("#mode").textContent = s.mode;
+  $("#app-version").textContent = "Versión " + (s.code_version || "?");
   $("#mode-select").value = s.mode;
   const b = s.broker || {};
   dl($("#portfolio"), { "Capital": fmt(b.equity), "Cash": fmt(b.cash), "Posiciones": Object.keys(b.positions || {}).length,
