@@ -180,6 +180,11 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"stopping": True}
 
     # ------------------------------------------------------------------ system
+    @app.get("/api/ping")
+    def ping():
+        """Instant 'I am up' for the launcher (no database work)."""
+        return {"ok": True, "code_version": ctx.extra.get("code_version")}
+
     @app.get("/api/status")
     def status():
         try:

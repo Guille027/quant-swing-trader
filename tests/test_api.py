@@ -253,3 +253,10 @@ def test_research_frames_are_cached_until_the_data_changes(client):
     ctx.repo.store_corporate_actions("AAA", acts, "test")
     after = ctx.research_frame("AAA")  # new corporate action -> recomputed (prices before it adjusted)
     assert after["close"].iloc[0] < b["close"].iloc[0] and after.equals(ctx._research_frame("AAA"))
+
+
+def test_ping_is_instant_and_symbols_listed(client):
+    c, ctx = client
+    r = c.get("/api/ping").json()
+    assert r["ok"] is True and "code_version" in r
+    assert ctx.symbols() == ["AAA", "BBB", "SPY"]

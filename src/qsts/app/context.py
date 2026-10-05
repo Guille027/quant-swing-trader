@@ -122,9 +122,9 @@ class AppContext:
         return AutoResearcher(self.sf, data, cfg, bt, ai=ai, log=log, stop_event=stop_event, benchmark=bench)
 
     def symbols(self) -> list[str]:
-        with self.sf() as s:
-            return list(s.scalars(select(m.Asset.symbol).join(m.Price, m.Price.asset_id == m.Asset.id)
-                                  .distinct().order_by(m.Asset.symbol)))
+        with self.sf() as s:  # one index lookup per asset (a DISTINCT over millions of prices was slow)
+            has_bars = select(m.Price.asset_id).where(m.Price.asset_id == m.Asset.id).exists()
+            return list(s.scalars(select(m.Asset.symbol).where(has_bars).order_by(m.Asset.symbol)))
 
     def strategy_counts(self) -> dict[str, int]:
         with self.sf() as s:

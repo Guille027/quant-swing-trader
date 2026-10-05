@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -39,19 +40,62 @@ def _redirect_output(root: Path) -> None:
 
 
 def is_running(url: str, timeout: float = 1.0) -> bool:
+    """Is a QSTS server answering on `url`? Uses the instant /api/ping (any HTTP answer, even 404 from a version
+    without it, means a server is up)."""
     try:
-        with urllib.request.urlopen(f"{url}/api/status", timeout=timeout) as r:
+        with urllib.request.urlopen(f"{url}/api/ping", timeout=timeout) as r:
             return r.status == 200
+    except urllib.error.HTTPError:
+        return True
     except Exception:  # noqa: BLE001
         return False
 
 
 def running_version(url: str) -> str | None:
+    for path in ("/api/ping", "/api/status"):  # /api/status for versions that predate /api/ping
+        try:
+            with urllib.request.urlopen(f"{url}{path}", timeout=10) as r:
+                return json.loads(r.read()).get("code_version")
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def wait_ready(url: str, timeout: float = 180.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_running(url, 2.0):
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def single_instance(root: Path):
+    """Only one launcher at a time (a second double-click while QSTS is opening must not open it twice).
+    Returns the open lock file (keep it until exit) or None if another launcher holds it."""
+    (root / "var").mkdir(exist_ok=True)
+    f = open(root / "var" / "launcher.lock", "a+")
     try:
-        with urllib.request.urlopen(f"{url}/api/status", timeout=2) as r:
-            return json.loads(r.read()).get("code_version")
-    except Exception:  # noqa: BLE001
+        if sys.platform == "win32":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
         return None
+    return f
+
+
+SPLASH = """<!doctype html><html><head><meta charset="utf-8"><style>
+body{background:#0f1218;color:#e6e9ef;font-family:Segoe UI,system-ui,sans-serif;display:flex;align-items:center;
+justify-content:center;height:100vh;margin:0}div{text-align:center}h1{font-weight:600;margin:0 0 12px}
+p{color:#8b93a1;max-width:520px;line-height:1.5}.dot{animation:b 1.2s infinite}@keyframes b{50%%{opacity:.2}}
+</style></head><body><div><h1>Abriendo QSTS<span class="dot">…</span></h1><p>%s</p></div></body></html>"""
+WAIT_TEXT = ("Cargando tus datos. La primera vez después de encender el ordenador (o tras cargar una copia de otro "
+             "ordenador) puede tardar hasta un minuto. No hace falta volver a pulsar el icono.")
 
 
 def _pid_listening(port: int) -> int | None:
@@ -192,7 +236,33 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
             if not is_running(url, 0.5):
                 break
             time.sleep(0.25)
+    lock = single_instance(root)
+    if lock is None:
+        print("another launcher is already opening/running QSTS: nothing to do")
+        return
+    try:
+        _run(url, port)
+    finally:
+        lock.close()
+    print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} closed")
+
+
+def _start_or_explain(port: int):
+    try:
+        return start_server(port)
+    except Exception as e:  # noqa: BLE001
+        from qsts.app.sync import SyncError
+        detail = str(e) if isinstance(e, SyncError) else repr(e)
+        print(f"start failed: {e!r}")
+        raise RuntimeError(f"No se pudo arrancar QSTS:\n\n{detail}\n\nDetalles en var\\desktop.log") from e
+
+
+def _run(url: str, port: int) -> None:
     ctx = None
+    try:
+        import webview
+    except Exception as e:  # noqa: BLE001
+        webview, gui_error = None, e
     if is_running(url):
         from qsts.research.experiments import code_version
         mine, theirs = code_version(), running_version(url)
@@ -203,39 +273,51 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
             if not stop_running(url, port):
                 message("No se pudo cerrar la versión anterior. Reinicia el ordenador y vuelve a abrir QSTS.")
                 return
-    if not is_running(url):
+    box = {"ctx": None}
+    if webview is not None:  # the window appears at once with "Abriendo QSTS…"; the app loads behind it
         try:
-            ctx = start_server(port)
-        except Exception as e:  # noqa: BLE001
-            from qsts.app.sync import SyncError
-            detail = str(e) if isinstance(e, SyncError) else repr(e)
-            message(f"No se pudo arrancar QSTS:\n\n{detail}\n\nDetalles en var\\desktop.log")
+            win = webview.create_window(TITLE, html=SPLASH % WAIT_TEXT, width=1400, height=900, min_size=(900, 600),
+                                        maximized=True, confirm_close=True, text_select=True)
+
+            def boot():
+                try:
+                    if not is_running(url):
+                        box["ctx"] = _start_or_explain(port)
+                    if wait_ready(url):
+                        win.load_url(url)
+                    else:
+                        win.load_html(SPLASH % "QSTS no ha arrancado a tiempo. Cierra esta ventana y vuelve a abrirla; "
+                                               "si se repite, mira var\\desktop.log.")
+                except Exception as e:  # noqa: BLE001
+                    print(f"boot failed: {e!r}")
+                    win.load_html(SPLASH % str(e).replace("\n", "<br>"))
+            webview.start(boot, localization={
+                "global.quitConfirmation": "¿Cerrar QSTS?\n\nSi hay una investigación o una descarga en marcha, se detendrá.",
+                "global.ok": "Aceptar", "global.quit": "Salir", "global.cancel": "Cancelar"})
+            after_close(box["ctx"])
+            return
+        except Exception as e:  # noqa: BLE001 - the native window could not be created (e.g. WebView2 missing)
+            gui_error = e
+            ctx = box["ctx"]
+    # ---- fallback: the browser, kept alive by a small dialog
+    if ctx is None and not is_running(url):
+        try:
+            ctx = _start_or_explain(port)
+        except RuntimeError as e:
+            message(str(e))
             raise
-        for _ in range(120):
-            if is_running(url, 0.5):
-                break
-            time.sleep(0.25)
-        else:
+        if not wait_ready(url):
             message("QSTS no ha arrancado a tiempo. Detalles en var\\desktop.log")
             return
-    try:
-        import webview
-        webview.create_window(TITLE, url, width=1400, height=900, min_size=(900, 600), maximized=True,
-                              confirm_close=True, text_select=True)
-        webview.start(localization={
-            "global.quitConfirmation": "¿Cerrar QSTS?\n\nSi hay una investigación o una descarga en marcha, se detendrá.",
-            "global.ok": "Aceptar", "global.quit": "Salir", "global.cancel": "Cancelar"})
-    except Exception as e:  # noqa: BLE001 - no native window (e.g. WebView2 missing): use the browser
-        print(f"native window unavailable: {e!r}")
-        why = ("Falta el componente de la ventana propia (pywebview): cierra QSTS y haz doble clic en "
-               "'Instalar QSTS.bat' en la carpeta del proyecto." if isinstance(e, ImportError) else
-               "Windows no pudo crear la ventana propia: instala 'Microsoft Edge WebView2 Runtime' (gratis, "
-               "de la web de Microsoft) y vuelve a abrir QSTS.")
-        webbrowser.open(url)
-        message("QSTS está abierta en tu navegador.\n\n" + why + "\n\nDeja este aviso abierto mientras la uses: "
-                "al pulsar Aceptar se CIERRA la app (y se detiene cualquier investigación en marcha).")
+    print(f"native window unavailable: {gui_error!r}")
+    why = ("Falta el componente de la ventana propia (pywebview): cierra QSTS y haz doble clic en "
+           "'Instalar QSTS.bat' en la carpeta del proyecto." if isinstance(gui_error, ImportError) else
+           "Windows no pudo crear la ventana propia: instala 'Microsoft Edge WebView2 Runtime' (gratis, "
+           "de la web de Microsoft) y vuelve a abrir QSTS.")
+    webbrowser.open(url)
+    message("QSTS está abierta en tu navegador.\n\n" + why + "\n\nDeja este aviso abierto mientras la uses: "
+            "al pulsar Aceptar se CIERRA la app (y se detiene cualquier investigación en marcha).")
     after_close(ctx)
-    print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} closed")
 
 
 if __name__ == "__main__":

@@ -69,3 +69,61 @@ def test_launcher_replaces_an_older_running_version(monkeypatch):
     finally:
         os.chdir(cwd)
     assert calls == ["dialog", "stop-old", "start-new", "browser", "dialog"]
+
+
+def test_only_one_launcher_at_a_time(tmp_path):
+    first = launcher.single_instance(tmp_path)
+    assert first is not None and launcher.single_instance(tmp_path) is None  # a second double-click does nothing
+    first.close()
+    again = launcher.single_instance(tmp_path)
+    assert again is not None
+    again.close()
+
+
+def test_is_running_uses_an_instant_ping_and_accepts_old_versions():
+    import http.server
+    import threading
+    class Old(http.server.BaseHTTPRequestHandler):  # a version without /api/ping answers 404: it IS running
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Old)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert launcher.is_running(f"http://127.0.0.1:{srv.server_port}", 1.0) is True
+    finally:
+        srv.shutdown()
+
+
+def test_window_opens_at_once_and_loads_the_app_when_ready(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    class Win:
+        def load_url(self, url):
+            calls.append(("load_url", url))
+        def load_html(self, html):
+            calls.append(("load_html", html[:40]))
+    fake = SimpleNamespace(windows=[])
+    def create_window(title, url=None, html=None, **kw):
+        calls.append(("window", "splash" if html and "Abriendo QSTS" in html else url))
+        return Win()
+    def start(func=None, *a, **kw):
+        func()  # pywebview runs it in a thread once the window exists
+    fake.create_window, fake.start = create_window, start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    state = {"up": False}
+    monkeypatch.setattr(launcher, "is_running", lambda url, timeout=1.0: state["up"])
+    def server(port):
+        calls.append("server")
+        state["up"] = True
+        return "ctx"
+    monkeypatch.setattr(launcher, "start_server", server)
+    monkeypatch.setattr(launcher, "after_close", lambda ctx: calls.append(("after_close", ctx)))
+    cwd = os.getcwd()
+    try:
+        launcher.main(port=8797, argv=[])
+    finally:
+        os.chdir(cwd)
+    assert calls == [("window", "splash"), "server", ("load_url", "http://127.0.0.1:8797"), ("after_close", "ctx")]
