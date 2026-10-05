@@ -122,6 +122,10 @@ class SyncSaveBody(BaseModel):
     force: bool = False
 
 
+class SyncLoadBody(BaseModel):
+    force: bool = False  # load even though the copy has less data than this computer
+
+
 class PaperStopBody(BaseModel):
     reason: str = "detenida por el usuario"
 
@@ -536,7 +540,14 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(409 if isinstance(e, sync.SyncError) else 400, str(e))
 
     @app.post("/api/sync/load")
-    def sync_load():
+    def sync_load(body: SyncLoadBody | None = None):
+        st = _sync_status()
+        if st.get("remote_smaller") and not (body and body.force):
+            rs, ls = (st.get("remote") or {}).get("summary") or {}, st.get("local_summary") or {}
+            raise HTTPException(409, f"OJO: la copia de {(st.get('remote') or {}).get('machine')} tiene MENOS datos que este "
+                                     f"ordenador ({rs.get('strategies_tested') or 0} estrategias y {rs.get('stocks') or 0} "
+                                     f"acciones, frente a {ls.get('strategies_tested') or 0} y {ls.get('stocks') or 0} aquí). "
+                                     "Si la cargas, este ordenador perdería sus datos (quedaría una copia de seguridad).")
         r = ctx.extra.get("autoresearch")
         if r is not None and r.state.running:
             raise HTTPException(409, "detén primero la investigación")

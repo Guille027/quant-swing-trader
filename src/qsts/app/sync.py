@@ -175,10 +175,19 @@ def status(db: Path, state_dir) -> dict:
     else:
         local_changed = signature(db) != st.get("last_signature")
     remote_newer = bool(remote) and remote.get("id") != st.get("last_id")
+    local = summary(db) if db.exists() else {}
+    rs = (remote or {}).get("summary") or {}
+    # loading a copy with clearly less work than this computer has is almost always a mistake (e.g. an empty copy)
+    remote_smaller = bool(remote) and ((rs.get("strategies_tested") or 0) < (local.get("strategies_tested") or 0)
+                                       or (rs.get("stocks") or 0) < (local.get("stocks") or 0))
+    # cloud tools keep both versions when two computers write the same file: "qsts-datos-PC.db.gz", "(1)"...
+    extra = sorted(p.name for p in Path(folder).glob("qsts-datos*") if p.name not in (SNAPSHOT, META)
+                   and not p.name.endswith(".part")) if folder and Path(folder).is_dir() else []
     return {"enabled": bool(folder), "dir": folder, "suggested_dir": suggested_dir(), "machine": machine_name(),
             "remote": remote, "remote_newer": remote_newer, "local_changed": local_changed,
             "conflict": remote_newer and local_changed, "last": {k: st.get(k) for k in ("last_at", "last_action")},
-            "pending_import": (Path(state_dir) / PENDING).exists()}
+            "pending_import": (Path(state_dir) / PENDING).exists(), "local_summary": local,
+            "remote_smaller": remote_smaller, "conflict_files": extra}
 
 
 # ---------------------------------------------------------------------- save (export)
@@ -186,6 +195,9 @@ def export_snapshot(db: Path, state_dir, *, code_version: str | None = None, for
     st = status(db, state_dir)
     if not st["enabled"]:
         raise SyncError("la copia entre ordenadores no está activada")
+    if not _has_work(db):  # an empty computer must never replace a real copy
+        raise SyncError("este ordenador todavía no tiene datos: no hay nada que guardar (si los datos están en el "
+                        "otro ordenador, guarda allí la copia y cárgala aquí)")
     if st["remote_newer"] and not force:
         raise SyncError(f"en la carpeta hay una copia de {st['remote'].get('machine')} ({st['remote'].get('saved_at')}) "
                         "que este ordenador no ha cargado: si guardas, se perdería")
@@ -288,5 +300,7 @@ def auto_save_on_close(database_url: str, state_dir, code_version: str | None = 
         return "la carpeta tiene una copia más nueva de otro ordenador: no se sobrescribe"
     if not st["local_changed"]:
         return "sin cambios desde la última copia"
+    if not _has_work(db):
+        return "este ordenador no tiene datos: no se guarda nada"
     meta = export_snapshot(db, state_dir, code_version=code_version)
     return f"copia guardada ({meta['size'] / 1e6:.0f} MB)"

@@ -66,6 +66,8 @@ async function loadSync() {
   let h = `Carpeta: <b>${esc(s.dir)}</b> · este ordenador: <b>${esc(s.machine)}</b><br>` +
     (r ? `Copia en la carpeta: de <b>${esc(r.machine)}</b>, ${when(r.saved_at)} (${fmt(r.size / 1e6, 0)} MB, ${sm.strategies_tested ?? "?"} estrategias probadas)`
        : "Aún no hay ninguna copia en la carpeta.");
+  if (s.remote_smaller && s.remote_newer) h += `<p class="bad">La copia de la carpeta (de ${esc(r.machine)}) tiene MENOS datos que este ordenador: no la cargues salvo que sepas que es la buena.</p>`;
+  if (s.conflict_files && s.conflict_files.length) h += `<p class="warn small">OneDrive ha guardado versiones duplicadas (${s.conflict_files.map(esc).join(", ")}): pasa cuando los dos ordenadores guardan a la vez o uno aún no había recibido la copia del otro.</p>`;
   if (s.loaded_at_start) h += `<p class="good">✔ Al abrir se cargaron los datos de ${esc(s.loaded_at_start.machine)} (${when(s.loaded_at_start.saved_at)}).</p>`;
   if (s.remote_newer) h += `<p class="warn">Hay una copia <b>más reciente de ${esc(r.machine)}</b> que este ordenador no tiene. Cárgala antes de investigar o simular aquí.` +
     (s.conflict ? ` <b>Ojo:</b> este ordenador también tiene cambios que no están en la copia; al cargarla se perderán (se guarda una copia de seguridad en var\\backups).` : "") + `</p>`;
@@ -98,7 +100,10 @@ $("#sync-load").onclick = async () => {
   if (!confirm("Se cargarán los datos del otro ordenador y SUSTITUIRÁN los de este (antes se guarda una copia de seguridad aquí). QSTS se reiniciará sola. ¿Continuar?")) return;
   $("#sync-msg").textContent = "Preparando la copia (puede tardar un minuto)…";
   try {
-    const r = await post("/api/sync/load", {});
+    const r = await post("/api/sync/load", {}).catch(async (e) => {
+      if (!/MENOS datos/.test(e.message) || !confirm(e.message + "\n\n¿Cargarla igualmente?")) throw e;
+      return post("/api/sync/load", { force: true });
+    });
     $("#sync-msg").textContent = r.restarting ? "Listo: QSTS se está reiniciando con esos datos…" : "Listo: cierra QSTS y vuelve a abrirla para usar esos datos.";
   } catch (e) { $("#sync-msg").textContent = e.message; }
 };

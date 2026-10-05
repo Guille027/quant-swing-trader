@@ -136,6 +136,12 @@ def test_sync_endpoints(tmp_path, monkeypatch):
     (tmp_path / "OneDrive").mkdir()
     s = c.post("/api/sync/enable", json={"dir": str(tmp_path / "OneDrive" / "QSTS")}).json()
     assert s["enabled"] is True and s["remote"] is None
+    assert c.post("/api/sync/save", json={}).status_code == 409  # nothing to save on an empty computer
+    con = sqlite3.connect(tmp_path / "q.db")
+    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
+                "VALUES ('x', 0.5, 'EVALUATED', 'evolution', 1, '{}', '2026-10-01 10:00:00')")
+    con.commit()
+    con.close()
     meta = c.post("/api/sync/save", json={}).json()
     assert (tmp_path / "OneDrive" / "QSTS" / sync.SNAPSHOT).exists() and meta["sha256"]
     restarted = []
@@ -143,7 +149,14 @@ def test_sync_endpoints(tmp_path, monkeypatch):
     sync.save_state(st.state_dir, last_id="older")  # pretend the copy came from another computer
     assert c.get("/api/sync").json()["remote_newer"] is True
     assert c.post("/api/autoresearch/start", json={"use_ai": False}).status_code in (400, 409)
-    r = c.post("/api/sync/load").json()
+    con = sqlite3.connect(tmp_path / "q.db")  # meanwhile this computer did more work than the copy has
+    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
+                "VALUES ('y', 0.6, 'EVALUATED', 'evolution', 2, '{}', '2026-10-02 10:00:00')")
+    con.commit()
+    con.close()
+    refused = c.post("/api/sync/load", json={})
+    assert refused.status_code == 409 and "MENOS datos" in refused.json()["detail"] and not restarted
+    r = c.post("/api/sync/load", json={"force": True}).json()
     assert r["restarting"] is True and restarted and (tmp_path / "var" / sync.PENDING).exists()
 
 
@@ -162,3 +175,21 @@ def test_onedrive_folder_is_this_computers_own(tmp_path, monkeypatch):
     with pytest.raises(sync.SyncError):
         sync.check_dir("  ")
     assert sync.check_dir(f'"{home / "OneDrive - Personal" / "QSTS"}"') == home / "OneDrive - Personal" / "QSTS"
+
+
+def test_an_empty_computer_never_replaces_a_real_copy(two_computers, monkeypatch):
+    shared, pc, laptop = two_computers
+    sync.export_snapshot(pc["db"], pc["state"])  # the PC's real copy (5 strategies)
+    meta_pc = json.loads((shared / sync.META).read_text())
+    with pytest.raises(sync.SyncError, match="no tiene datos"):  # even when forced
+        sync.export_snapshot(laptop["db"], laptop["state"], force=True)
+    assert "no tiene datos" in sync.auto_save_on_close(f"sqlite:///{laptop['db']}", laptop["state"]) or \
+        "no se sobrescribe" in sync.auto_save_on_close(f"sqlite:///{laptop['db']}", laptop["state"])
+    assert json.loads((shared / sync.META).read_text())["id"] == meta_pc["id"]  # untouched
+    # a smaller copy (e.g. made on a computer with less data) is flagged before loading
+    make_db(laptop["db"], 9)
+    sync.save_state(laptop["state"], last_id="something-else")
+    st = sync.status(laptop["db"], laptop["state"])
+    assert st["remote_newer"] and st["remote_smaller"] and st["local_summary"]["strategies_tested"] == 9 + 0
+    (shared / "qsts-datos-PORTATIL.db.gz").write_bytes(b"x")  # what OneDrive does with conflicting writes
+    assert sync.status(laptop["db"], laptop["state"])["conflict_files"] == ["qsts-datos-PORTATIL.db.gz"]
