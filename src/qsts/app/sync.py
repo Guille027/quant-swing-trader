@@ -325,8 +325,23 @@ def smaller_than_local(remote_summary: dict | None, db: Path) -> bool:
             or (rs.get("stocks") or 0) < (local.get("stocks") or 0))
 
 
-def apply_pending_import(database_url: str, state_dir) -> dict | None:
-    """At startup, BEFORE the database is opened: swap in a staged copy (the current data is backed up first)."""
+def _retry(fn, wait_s: float = 30.0, step: float = 0.5):
+    """Windows refuses to delete/replace a file another process still has open (e.g. the previous QSTS that is
+    still closing, or an antivirus scanning the new file): retry for a while instead of failing at once."""
+    import time
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            return fn()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(step)
+
+
+def apply_pending_import(database_url: str, state_dir, wait_s: float = 30.0) -> dict | None:
+    """At startup, BEFORE the database is opened: swap in a staged copy (the current data is backed up first).
+    If the files stay locked, nothing is changed and the copy stays staged for the next start."""
     db = db_file(database_url)
     staged = Path(state_dir) / PENDING
     if db is None or not staged.exists():
@@ -334,20 +349,39 @@ def apply_pending_import(database_url: str, state_dir) -> dict | None:
     meta = _read_json(Path(state_dir) / (PENDING + ".json")) or {}
     backups = Path(state_dir) / "backups"
     backups.mkdir(parents=True, exist_ok=True)
-    if db.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        src, dst = sqlite3.connect(db), sqlite3.connect(backups / f"qsts-antes-de-cargar-{stamp}.db")
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-            src.close()
-        for old in sorted(backups.glob("qsts-antes-de-cargar-*.db"))[:-KEEP_BACKUPS]:
-            old.unlink(missing_ok=True)
-    for suffix in ("-wal", "-shm"):
-        Path(str(db) + suffix).unlink(missing_ok=True)
     db.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged, db)
+    current = [db, Path(str(db) + "-wal"), Path(str(db) + "-shm")]
+    aside = {p: Path(str(p) + ".old") for p in current}  # moved away first: nothing is lost if a step fails
+    moved = []
+    try:
+        if db.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+            def backup():
+                src, dst = sqlite3.connect(db), sqlite3.connect(backups / f"qsts-antes-de-cargar-{stamp}.db")
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+                    src.close()
+            _retry(backup, wait_s)
+            for old in sorted(backups.glob("qsts-antes-de-cargar-*.db"))[:-KEEP_BACKUPS]:
+                old.unlink(missing_ok=True)
+        for p in current:
+            if p.exists():
+                aside[p].unlink(missing_ok=True)
+                _retry(lambda p=p: os.replace(p, aside[p]), wait_s)
+                moved.append(p)
+        _retry(lambda: os.replace(staged, db), wait_s)
+    except PermissionError:
+        for p in moved:  # put everything back as it was; the copy stays staged for the next start
+            if not p.exists():
+                os.replace(aside[p], p)
+        raise SyncError("los datos siguen en uso por otro programa (normalmente QSTS, que aún se está cerrando). "
+                        "Espera unos segundos y vuelve a abrir QSTS; si se repite, reinicia el ordenador. "
+                        "No se ha perdido nada: la copia se cargará al abrirla.") from None
+    for a in aside.values():
+        a.unlink(missing_ok=True)
     (Path(state_dir) / (PENDING + ".json")).unlink(missing_ok=True)
     save_state(state_dir, last_id=meta.get("id"), last_signature=signature(db), last_at=_now(),
                last_action=f"cargada de {meta.get('machine', '?')}")

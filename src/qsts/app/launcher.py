@@ -125,13 +125,47 @@ def start_server(port: int):
     return ctx
 
 
+def _release_data(ctx) -> None:
+    """Close this process's handles on the database so the next start can swap in the loaded copy."""
+    rep = ctx.extra.get("daily_reporter")
+    if rep is not None:
+        rep.stop()
+    try:
+        engine = ctx.sf.kw.get("bind")
+        if engine is not None:
+            engine.dispose()
+    except Exception as e:  # noqa: BLE001
+        print(f"could not release the database: {e!r}")
+
+
+def wait_for_exit(pid: int, timeout: float = 60.0) -> None:
+    """Wait until process `pid` (the previous QSTS) has fully exited and released its files."""
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if handle:
+            k32.WaitForSingleObject(handle, int(timeout * 1000))
+            k32.CloseHandle(handle)
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+
+
 def after_close(ctx) -> None:
     """Window closed: restart if a copy from another computer was loaded, otherwise save this computer's copy."""
     if ctx is None:
         return  # another process owns the server and the data
     if _RESTART.is_set():
         print("restarting to use the loaded data copy")
-        subprocess.Popen([sys.executable, "-m", "qsts.app.launcher", "--wait-free"], cwd=str(project_root()))
+        _release_data(ctx)
+        subprocess.Popen([sys.executable, "-m", "qsts.app.launcher", "--wait-pid", str(os.getpid())],
+                         cwd=str(project_root()))
         return
     try:
         from qsts.app.sync import auto_save_on_close
@@ -147,7 +181,13 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
     _redirect_output(root)
     url = f"http://127.0.0.1:{port}"
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} launcher start ({url})")
-    if "--wait-free" in (argv if argv is not None else sys.argv[1:]):  # restart: the previous copy is closing
+    args = argv if argv is not None else sys.argv[1:]
+    if "--wait-pid" in args:  # restart after loading data: the previous QSTS must have exited completely
+        try:
+            wait_for_exit(int(args[args.index("--wait-pid") + 1]))
+        except (IndexError, ValueError):
+            pass
+    if "--wait-pid" in args or "--wait-free" in args:
         for _ in range(80):
             if not is_running(url, 0.5):
                 break
@@ -167,7 +207,9 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
         try:
             ctx = start_server(port)
         except Exception as e:  # noqa: BLE001
-            message(f"No se pudo arrancar QSTS:\n\n{e!r}\n\nDetalles en var\\desktop.log")
+            from qsts.app.sync import SyncError
+            detail = str(e) if isinstance(e, SyncError) else repr(e)
+            message(f"No se pudo arrancar QSTS:\n\n{detail}\n\nDetalles en var\\desktop.log")
             raise
         for _ in range(120):
             if is_running(url, 0.5):

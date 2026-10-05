@@ -121,7 +121,7 @@ def test_launcher_saves_on_close_and_restarts_after_loading(monkeypatch, tmp_pat
         launcher.after_close(ctx)
     finally:
         launcher._RESTART.clear()
-    assert calls == ["save", ("restart", "--wait-free")]
+    assert calls == ["save", ("restart", str(__import__("os").getpid()))]  # the new one waits for this process
 
 
 def test_sync_endpoints(tmp_path, monkeypatch):
@@ -244,3 +244,31 @@ def test_file_endpoints(tmp_path):
     restarted = []
     ctx.extra["restart_app"] = lambda: restarted.append(True)
     assert c.post("/api/sync/load_file", json={}).json()["restarting"] is True and restarted
+
+
+def test_locked_files_leave_everything_as_it_was(two_computers, monkeypatch):
+    shared, pc, laptop = two_computers
+    sync.export_snapshot(pc["db"], pc["state"])
+    sync.stage_import(laptop["state"])
+    real_replace = sync.os.replace
+    def locked(src, dst):  # Windows: the previous QSTS still has the database open
+        if str(src).endswith(sync.PENDING):
+            raise PermissionError(13, "El proceso no tiene acceso al archivo porque está siendo utilizado por otro proceso")
+        return real_replace(src, dst)
+    monkeypatch.setattr(sync.os, "replace", locked)
+    with pytest.raises(sync.SyncError, match="No se ha perdido nada"):
+        sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"], wait_s=0.2)
+    assert laptop["db"].exists() and rows(laptop["db"]) == 0 and (laptop["state"] / sync.PENDING).exists()
+    monkeypatch.setattr(sync.os, "replace", real_replace)  # next start: the lock is gone
+    assert sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"])["summary"]["strategies_tested"] == 5
+    assert rows(laptop["db"]) == 5 and not list(laptop["db"].parent.glob("*.old"))
+
+
+def test_restart_waits_for_the_previous_process():
+    import subprocess as sp
+    import time
+    from qsts.app import launcher
+    p = sp.Popen([__import__("sys").executable, "-c", "import time; time.sleep(0.5)"])
+    t = time.monotonic()
+    launcher.wait_for_exit(p.pid, timeout=2)  # (on Linux a finished child stays a zombie until reaped)
+    assert time.monotonic() - t >= 0.3 and p.wait() == 0
