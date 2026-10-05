@@ -273,7 +273,8 @@ class AutoResearcher:
         self.research = {k: v for k, v in self.vault.research_view(data).items() if len(v)}
         idx = pd.DatetimeIndex(sorted(set().union(*[d.index for d in self.research.values()])))
         if len(idx) <= cfg.warmup_bars + 252:
-            raise ValueError("not enough research-period data before the OOS boundary")
+            raise ValueError("aún no hay datos suficientes para investigar: descarga acciones en 1 · Datos "
+                             "(o carga la copia de otro ordenador en Inicio)")
         self.index = idx[cfg.warmup_bars:]
         self.start, self.end = self.index[0], self.index[-1]
         self.evaluator = ConsistencyEvaluator(self.research, self.start, self.end, bt_cfg, cfg)
