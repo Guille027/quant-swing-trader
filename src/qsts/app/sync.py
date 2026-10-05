@@ -201,7 +201,13 @@ def export_snapshot(db: Path, state_dir, *, code_version: str | None = None, for
     if st["remote_newer"] and not force:
         raise SyncError(f"en la carpeta hay una copia de {st['remote'].get('machine')} ({st['remote'].get('saved_at')}) "
                         "que este ordenador no ha cargado: si guardas, se perdería")
-    folder = Path(st["dir"])
+    meta = _write_snapshot(db, Path(st["dir"]), state_dir, code_version)
+    save_state(state_dir, last_id=meta["id"], last_signature=signature(db), last_at=meta["saved_at"],
+               last_action="guardada")
+    return meta
+
+
+def _write_snapshot(db: Path, folder: Path, state_dir, code_version: str | None) -> dict:
     folder.mkdir(parents=True, exist_ok=True)
     tmp_db = Path(state_dir) / "sync-export.tmp.db"
     tmp_db.unlink(missing_ok=True)
@@ -222,9 +228,34 @@ def export_snapshot(db: Path, state_dir, *, code_version: str | None = None, for
         _write_json(folder / META, meta)  # last: the other computer only sees a complete copy
     finally:
         tmp_db.unlink(missing_ok=True)
-    save_state(state_dir, last_id=meta["id"], last_signature=signature(db), last_at=meta["saved_at"],
-               last_action="guardada")
     return meta
+
+
+# ---------------------------------------------------------------------- copy as a plain file (no sync client)
+def downloads_dir(home: Path | None = None) -> Path:
+    return (home or Path.home()) / "Downloads"  # shown as "Descargas" on a Spanish Windows
+
+
+def find_downloaded(folder: Path | None = None) -> dict | None:
+    """Newest copy downloaded by hand (e.g. from onedrive.live.com), if any: browsers rename repeats '... (1)'."""
+    folder = folder or downloads_dir()
+    files = sorted((p for p in folder.glob("qsts-datos*.db.gz") if p.is_file()), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return None
+    p = files[-1]
+    return {"path": str(p), "name": p.name, "size": p.stat().st_size,
+            "modified": datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")}
+
+
+def export_to_file(db: Path, state_dir, folder: Path | None = None, code_version: str | None = None) -> dict:
+    """Saves the copy as a file (default: Downloads) to carry it by hand: upload it on the web, a USB stick..."""
+    if not _has_work(db):
+        raise SyncError("este ordenador todavía no tiene datos: no hay nada que guardar")
+    folder = folder or downloads_dir()
+    meta = _write_snapshot(db, folder, state_dir, code_version)
+    save_state(state_dir, last_id=meta["id"], last_signature=signature(db), last_at=meta["saved_at"],
+               last_action="guardada en archivo")
+    return {**meta, "path": str(folder / SNAPSHOT)}
 
 
 # ---------------------------------------------------------------------- load (import)
@@ -239,22 +270,59 @@ def stage_import(state_dir) -> dict:
     if not gz.exists() or _sha256(gz) != meta.get("sha256"):
         raise SyncError("la copia todavía se está sincronizando (OneDrive no la ha terminado de bajar): "
                         "espera un poco y vuelve a intentarlo")
+    _stage(gz, state_dir, meta)
+    return meta
+
+
+def stage_import_file(path, state_dir) -> dict:
+    """Loads a copy downloaded by hand. gzip's own checksum detects an incomplete download; when the matching
+    qsts-datos.json was downloaded too, its identity is kept (the copy is then known as loaded)."""
+    gz = Path(str(path).strip().strip('"'))
+    if not gz.is_file():
+        raise SyncError(f"no encuentro el archivo {gz}")
+    side = _read_json(gz.with_name(META))
+    meta = side if side and side.get("sha256") == _sha256(gz) else None
+    staged_meta = meta or {"id": None, "machine": f"archivo {gz.name}", "sha256": _sha256(gz),
+                           "saved_at": datetime.fromtimestamp(gz.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")}
+    _stage(gz, state_dir, staged_meta)
+    return staged_meta
+
+
+def _stage(gz: Path, state_dir, meta: dict) -> None:
     staged = Path(state_dir) / PENDING
     part = staged.with_name(staged.name + ".part")
-    with gzip.open(gz, "rb") as g, open(part, "wb") as f:
-        shutil.copyfileobj(g, f, 1 << 20)
+    try:
+        with gzip.open(gz, "rb") as g, open(part, "wb") as f:
+            shutil.copyfileobj(g, f, 1 << 20)
+    except (OSError, EOFError) as e:  # truncated / corrupt download
+        part.unlink(missing_ok=True)
+        raise SyncError(f"el archivo está incompleto o dañado ({e.__class__.__name__}): vuelve a descargarlo") from None
     con = sqlite3.connect(part)
     try:
         ok = con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    except sqlite3.DatabaseError:  # not a database at all
+        ok, tables = False, set()
     finally:
         con.close()
     if not ok or "research_candidates" not in tables:
         part.unlink(missing_ok=True)
         raise SyncError("la copia está dañada; vuelve a guardarla desde el otro ordenador")
+    if meta.get("summary") is None:
+        meta["summary"] = summary(part)
     os.replace(part, staged)
     _write_json(Path(state_dir) / (PENDING + ".json"), meta)
-    return meta
+
+
+def discard_pending(state_dir) -> None:
+    for name in (PENDING, PENDING + ".json"):
+        (Path(state_dir) / name).unlink(missing_ok=True)
+
+
+def smaller_than_local(remote_summary: dict | None, db: Path) -> bool:
+    rs, local = remote_summary or {}, summary(db) if db.exists() else {}
+    return ((rs.get("strategies_tested") or 0) < (local.get("strategies_tested") or 0)
+            or (rs.get("stocks") or 0) < (local.get("stocks") or 0))
 
 
 def apply_pending_import(database_url: str, state_dir) -> dict | None:

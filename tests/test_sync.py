@@ -193,3 +193,54 @@ def test_an_empty_computer_never_replaces_a_real_copy(two_computers, monkeypatch
     assert st["remote_newer"] and st["remote_smaller"] and st["local_summary"]["strategies_tested"] == 9 + 0
     (shared / "qsts-datos-PORTATIL.db.gz").write_bytes(b"x")  # what OneDrive does with conflicting writes
     assert sync.status(laptop["db"], laptop["state"])["conflict_files"] == ["qsts-datos-PORTATIL.db.gz"]
+
+
+def test_copy_carried_as_a_downloaded_file(two_computers, tmp_path):
+    shared, pc, laptop = two_computers
+    pc_downloads, lap_downloads = tmp_path / "pc_dl", tmp_path / "lap_dl"
+    meta = sync.export_to_file(pc["db"], pc["state"], pc_downloads)  # no sync folder needed
+    assert meta["path"].endswith(sync.SNAPSHOT) and meta["summary"]["strategies_tested"] == 5
+    lap_downloads.mkdir()
+    # the browser renames repeated downloads; the .json may or may not come along
+    (lap_downloads / "qsts-datos (1).db.gz").write_bytes((pc_downloads / sync.SNAPSHOT).read_bytes())
+    found = sync.find_downloaded(lap_downloads)
+    assert found["name"] == "qsts-datos (1).db.gz"
+    staged = sync.stage_import_file(found["path"], laptop["state"])
+    assert staged["machine"].startswith("archivo") and staged["summary"]["strategies_tested"] == 5
+    sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"])
+    assert rows(laptop["db"]) == 5
+    # with its .json next to it, the copy keeps its identity
+    (lap_downloads / sync.META).write_text((pc_downloads / sync.META).read_text())
+    (lap_downloads / sync.SNAPSHOT).write_bytes((pc_downloads / sync.SNAPSHOT).read_bytes())
+    assert sync.stage_import_file(lap_downloads / sync.SNAPSHOT, laptop["state"])["id"] == meta["id"]
+    sync.discard_pending(laptop["state"])
+    broken = lap_downloads / "qsts-datos (2).db.gz"  # interrupted download
+    broken.write_bytes((pc_downloads / sync.SNAPSHOT).read_bytes()[:2000])
+    with pytest.raises(sync.SyncError, match="incompleto"):
+        sync.stage_import_file(broken, laptop["state"])
+    with pytest.raises(sync.SyncError):
+        sync.export_to_file(tmp_path / "empty.db", laptop["state"], lap_downloads)
+
+
+def test_file_endpoints(tmp_path):
+    from fastapi.testclient import TestClient
+    from qsts.api.server import create_app
+    from qsts.app.context import build_context
+    st = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path}/q.db", state_dir=tmp_path / "var")
+    ctx = build_context(st)
+    ctx.extra["downloads_dir"] = tmp_path / "Downloads"
+    (tmp_path / "Downloads").mkdir()
+    c = TestClient(create_app(ctx))
+    assert c.get("/api/sync").json()["downloaded"] is None
+    assert c.post("/api/sync/load_file", json={}).status_code == 400
+    con = sqlite3.connect(tmp_path / "q.db")
+    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
+                "VALUES ('x', 0.5, 'EVALUATED', 'evolution', 1, '{}', '2026-10-01 10:00:00')")
+    con.commit()
+    con.close()
+    saved = c.post("/api/sync/save_file").json()
+    assert saved["path"] == str(tmp_path / "Downloads" / sync.SNAPSHOT)
+    assert c.get("/api/sync").json()["downloaded"]["name"] == sync.SNAPSHOT
+    restarted = []
+    ctx.extra["restart_app"] = lambda: restarted.append(True)
+    assert c.post("/api/sync/load_file", json={}).json()["restarting"] is True and restarted

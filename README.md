@@ -31,7 +31,9 @@ double-click **`Instalar QSTS.bat`** (installs the app with its native window an
 icon). Then on BOTH computers: Inicio → "Usar QSTS en
 varios ordenadores" → the same OneDrive folder → Activar. Closing the app saves a compressed copy of the data there;
 opening it on the other computer offers to load it (the local data is backed up to `var/backups` first). Use one
-computer at a time: copies are not merged. Secrets (`.env`: Gemini key, Telegram) are not copied: enter them in the
+computer at a time: copies are not merged. If the cloud folder does not reach the other computer (e.g. different
+OneDrive accounts), carry the copy as a file: "Guardar copia en Descargas" on one computer, download/copy
+`qsts-datos.db.gz` into the other one's Downloads folder and press "Cargar la copia descargada". Secrets (`.env`: Gemini key, Telegram) are not copied: enter them in the
 app on each computer (Investigación IA → Gemini key; Simulación → Telegram).
 
 ## Windows (cmd)

@@ -65,6 +65,16 @@
     <div class="row" id="sync-actions" style="display:none"><button id="sync-save">Guardar copia ahora</button>
       <button id="sync-load" class="primary" style="display:none">Cargar la copia</button>
       <button id="sync-off">Desactivar</button></div>
+    <div id="sync-file" class="small" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
+      <p><b>¿El otro ordenador no recibe la copia por OneDrive?</b> Llévala como archivo (sirve la web de OneDrive, el correo o un pendrive):</p>
+      <ol>
+        <li>En el ordenador que tiene los datos: <button id="sync-save-file">Guardar copia en Descargas</button>
+          (crea <code>qsts-datos.db.gz</code>; en onedrive.live.com basta con descargar ese archivo de la carpeta QSTS).</li>
+        <li>Deja ese archivo en la carpeta <b>Descargas</b> del otro ordenador y allí pulsa
+          <button id="sync-load-file" class="primary">Cargar la copia descargada</button></li>
+      </ol>
+      <p id="sync-file-info" class="muted"></p>
+    </div>
     <p id="sync-msg"></p>
   </div>
   <div class="card"><h3>Palabras clave</h3>

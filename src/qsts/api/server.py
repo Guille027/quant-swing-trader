@@ -124,6 +124,7 @@ class SyncSaveBody(BaseModel):
 
 class SyncLoadBody(BaseModel):
     force: bool = False  # load even though the copy has less data than this computer
+    path: str | None = None  # load_file: a copy downloaded by hand (default: newest in Downloads)
 
 
 class PaperStopBody(BaseModel):
@@ -514,7 +515,49 @@ def create_app(ctx: AppContext) -> FastAPI:
     def sync_status():
         st = _sync_status()
         loaded = ctx.extra.get("sync_loaded")
-        return _j({**st, "loaded_at_start": loaded, "code_version": ctx.extra.get("code_version")})
+        try:
+            downloaded = sync.find_downloaded(ctx.extra.get("downloads_dir"))
+        except OSError:
+            downloaded = None
+        return _j({**st, "loaded_at_start": loaded, "code_version": ctx.extra.get("code_version"),
+                   "downloaded": downloaded, "downloads_dir": str(ctx.extra.get("downloads_dir") or sync.downloads_dir())})
+
+    @app.post("/api/sync/save_file")
+    def sync_save_file():
+        try:
+            return _j(sync.export_to_file(_db(), ctx.settings.state_dir, ctx.extra.get("downloads_dir"),
+                                          code_version=ctx.extra.get("code_version")))
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409 if isinstance(e, sync.SyncError) else 400, str(e))
+
+    @app.post("/api/sync/load_file")
+    def sync_load_file(body: SyncLoadBody):
+        _check_idle()
+        path = body.path or (sync.find_downloaded(ctx.extra.get("downloads_dir")) or {}).get("path")
+        if not path:
+            raise HTTPException(400, "no encuentro ninguna copia (qsts-datos….db.gz) en tu carpeta de Descargas")
+        try:
+            meta = sync.stage_import_file(path, ctx.settings.state_dir)
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409, str(e))
+        rs, ls = meta.get("summary") or {}, sync.summary(_db()) if _db().exists() else {}
+        if sync.smaller_than_local(rs, _db()) and not body.force:
+            sync.discard_pending(ctx.settings.state_dir)
+            raise HTTPException(409, f"OJO: ese archivo tiene MENOS datos que este ordenador ({rs.get('strategies_tested') or 0} "
+                                     f"estrategias y {rs.get('stocks') or 0} acciones, frente a "
+                                     f"{ls.get('strategies_tested') or 0} y {ls.get('stocks') or 0} aquí). Si lo cargas, "
+                                     "este ordenador perdería sus datos (quedaría una copia de seguridad).")
+        restart = ctx.extra.get("restart_app")
+        if restart is not None:
+            restart()
+        return _j({"staged": meta, "restarting": restart is not None})
+
+    def _check_idle():
+        r = ctx.extra.get("autoresearch")
+        if r is not None and r.state.running:
+            raise HTTPException(409, "detén primero la investigación")
+        if _data_runner().state.running:
+            raise HTTPException(409, "espera a que termine la descarga de datos")
 
     @app.post("/api/sync/enable")
     def sync_enable(body: SyncDirBody):

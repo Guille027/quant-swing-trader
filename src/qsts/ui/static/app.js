@@ -54,6 +54,10 @@ function previousNote(lb) {
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 async function loadSync() {
   let s; try { s = await api("/api/sync"); } catch (e) { $("#sync-body").textContent = e.message; return; }
+  const d = s.downloaded;
+  $("#sync-file-info").innerHTML = d ? `En Descargas hay: <b>${esc(d.name)}</b> (${fmt(d.size / 1e6, 0)} MB, ${when(d.modified)}).`
+    : `No hay ninguna copia descargada en ${esc(s.downloads_dir)}.`;
+  $("#sync-load-file").disabled = !d;
   $("#sync-setup").style.display = s.enabled ? "none" : "block";
   $("#sync-actions").style.display = s.enabled ? "flex" : "none";
   if (!s.enabled) {
@@ -95,6 +99,25 @@ $("#sync-save").onclick = async () => {
     } else $("#sync-msg").textContent = "";
   }
   loadSync();
+};
+$("#sync-save-file").onclick = async () => {
+  $("#sync-msg").className = "muted"; $("#sync-msg").textContent = "Guardando copia en Descargas…";
+  try { const r = await post("/api/sync/save_file", {}); $("#sync-msg").className = "good";
+    $("#sync-msg").textContent = `Guardada: ${r.path} (${fmt(r.size / 1e6, 0)} MB). Súbela o cópiala al otro ordenador.`; }
+  catch (e) { $("#sync-msg").className = "bad"; $("#sync-msg").textContent = e.message; }
+  loadSync();
+};
+$("#sync-load-file").onclick = async () => {
+  if (!confirm("Se cargarán los datos de ese archivo y SUSTITUIRÁN los de este ordenador (antes se guarda una copia de seguridad). QSTS se reiniciará sola. ¿Continuar?")) return;
+  $("#sync-msg").className = "muted"; $("#sync-msg").textContent = "Preparando la copia (puede tardar un minuto)…";
+  try {
+    const r = await post("/api/sync/load_file", {}).catch(async (e) => {
+      if (!/MENOS datos/.test(e.message) || !confirm(e.message + "\n\n¿Cargarlo igualmente?")) throw e;
+      return post("/api/sync/load_file", { force: true });
+    });
+    $("#sync-msg").className = "good";
+    $("#sync-msg").textContent = r.restarting ? "Listo: QSTS se está reiniciando con esos datos…" : "Listo: cierra QSTS y vuelve a abrirla para usar esos datos.";
+  } catch (e) { $("#sync-msg").className = "bad"; $("#sync-msg").textContent = e.message; }
 };
 $("#sync-load").onclick = async () => {
   if (!confirm("Se cargarán los datos del otro ordenador y SUSTITUIRÁN los de este (antes se guarda una copia de seguridad aquí). QSTS se reiniciará sola. ¿Continuar?")) return;
