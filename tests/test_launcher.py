@@ -127,3 +127,75 @@ def test_window_opens_at_once_and_loads_the_app_when_ready(monkeypatch):
     finally:
         os.chdir(cwd)
     assert calls == [("window", "splash"), "server", ("load_url", "http://127.0.0.1:8797"), ("after_close", "ctx")]
+
+
+def test_a_stuck_previous_qsts_on_the_port_is_ended(monkeypatch):
+    """A previous QSTS that hung while closing keeps the port without answering: it is ended, then QSTS starts."""
+    held = {"busy": True}
+    ended, real_end = [], launcher._end_python
+    monkeypatch.setattr(launcher, "ON_WINDOWS", True)
+    monkeypatch.setattr(launcher, "is_running", lambda url, timeout=1.0: False)
+    monkeypatch.setattr(launcher, "port_in_use", lambda port: held["busy"])
+    monkeypatch.setattr(launcher, "_pid_listening", lambda port: 4242)
+    monkeypatch.setattr(launcher, "_image_name", lambda pid: "pythonw.exe")
+    def end(pid):
+        ended.append(pid)
+        held["busy"] = False
+        return True
+    monkeypatch.setattr(launcher, "_end_python", end)
+    assert launcher.server_state("http://127.0.0.1:1", 1) == "stale"
+    assert launcher.clear_stale(1) is None and ended == [4242]
+    # something that is not python is never touched: the user is told what holds the port
+    held["busy"] = True
+    monkeypatch.setattr(launcher, "_image_name", lambda pid: "OtroPrograma.exe")
+    monkeypatch.setattr(launcher, "_end_python", real_end)
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("killed")))
+    monkeypatch.setattr(launcher.time, "sleep", lambda s: None)
+    msg = launcher.clear_stale(1)
+    assert msg and "OtroPrograma.exe" in msg and "4242" in msg
+
+
+def test_a_server_that_cannot_start_is_reported_at_once(monkeypatch, tmp_path):
+    """The port is taken: the server stops, the wait ends at once and the reason is shown (not a 3-minute wait)."""
+    import time
+    monkeypatch.setenv("QSTS_DATABASE_URL", f"sqlite:///{tmp_path}/q.db")
+    monkeypatch.setenv("QSTS_STATE_DIR", str(tmp_path / "var"))
+    monkeypatch.setitem(launcher._SERVER, "thread", None)
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        launcher.start_server(port)
+        t0 = time.monotonic()
+        assert launcher.wait_ready(f"http://127.0.0.1:{port}/nothing-here", timeout=60) is False
+        assert time.monotonic() - t0 < 30
+    assert launcher._SERVER["errors"], "the reason must be kept"
+    page = launcher.failure_page(tmp_path, "La parte interna de QSTS no ha respondido <b>")
+    assert "&lt;b&gt;" in page and "Motivo" in page
+    monkeypatch.setitem(launcher._SERVER, "thread", None)
+
+
+def test_a_new_start_waits_while_the_previous_one_saves_its_copy(monkeypatch, tmp_path):
+    import threading
+    monkeypatch.setattr(launcher, "project_root", lambda: tmp_path)
+    ran = []
+    monkeypatch.setattr(launcher, "_run", lambda url, port: ran.append(launcher.get_state(tmp_path)))
+    other = launcher.single_instance(tmp_path)  # the previous QSTS, still saving its data copy
+    launcher.set_state(tmp_path, "closing")
+    threading.Timer(0.5, lambda: (launcher.set_state(tmp_path, None), other.close())).start()
+    cwd = os.getcwd()
+    try:
+        launcher.main(port=8796, argv=[])
+    finally:
+        os.chdir(cwd)
+    assert ran == ["opening"] and launcher.get_state(tmp_path) is None
+    # while it is open (not closing), a second double-click still does nothing
+    other = launcher.single_instance(tmp_path)
+    launcher.set_state(tmp_path, "open")
+    ran.clear()
+    try:
+        launcher.main(port=8796, argv=[])
+    finally:
+        os.chdir(cwd)
+        other.close()
+    assert ran == []

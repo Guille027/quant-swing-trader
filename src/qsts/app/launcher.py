@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+import html
 import json
+import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -25,6 +28,10 @@ from pathlib import Path
 PORT = 8765
 TITLE = "QSTS — Investigación de estrategias"
 _RESTART = threading.Event()
+_SERVER: dict = {"thread": None, "server": None, "errors": []}  # this process's API server
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # the local app never goes through a proxy
+CLOSING_WAIT = 300.0  # seconds a new start waits for the previous QSTS to finish saving its data copy
+ON_WINDOWS = sys.platform == "win32"
 
 
 def project_root() -> Path:
@@ -43,7 +50,7 @@ def is_running(url: str, timeout: float = 1.0) -> bool:
     """Is a QSTS server answering on `url`? Uses the instant /api/ping (any HTTP answer, even 404 from a version
     without it, means a server is up)."""
     try:
-        with urllib.request.urlopen(f"{url}/api/ping", timeout=timeout) as r:
+        with _OPENER.open(f"{url}/api/ping", timeout=timeout) as r:
             return r.status == 200
     except urllib.error.HTTPError:
         return True
@@ -54,18 +61,46 @@ def is_running(url: str, timeout: float = 1.0) -> bool:
 def running_version(url: str) -> str | None:
     for path in ("/api/ping", "/api/status"):  # /api/status for versions that predate /api/ping
         try:
-            with urllib.request.urlopen(f"{url}{path}", timeout=10) as r:
+            with _OPENER.open(f"{url}{path}", timeout=10) as r:
                 return json.loads(r.read()).get("code_version")
         except Exception:  # noqa: BLE001
             continue
     return None
 
 
-def wait_ready(url: str, timeout: float = 180.0) -> bool:
+def port_in_use(port: int) -> bool:
+    """Is something listening on 127.0.0.1:<port> (answering or not)?"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+        sk.settimeout(1.0)
+        return sk.connect_ex(("127.0.0.1", port)) == 0
+
+
+def server_state(url: str, port: int) -> str:
+    """'up' = a QSTS answers; 'stale' = something holds the port but does not answer (e.g. a previous QSTS that
+    hung while closing); 'free' = nothing there."""
+    if is_running(url, 2.0):
+        return "up"
+    if not port_in_use(port):
+        return "free"
+    for _ in range(3):  # a busy app can be slow to answer: give it a few seconds
+        if is_running(url, 3.0):
+            return "up"
+    return "stale" if port_in_use(port) else "free"
+
+
+def _server_alive() -> bool:
+    t = _SERVER["thread"]
+    return t is None or t.is_alive()
+
+
+def wait_ready(url: str, timeout: float = 180.0, alive=_server_alive) -> bool:
+    """Wait for the app to answer; give up at once if this process's server stopped (e.g. the port was taken)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if is_running(url, 2.0):
             return True
+        if alive is not None and not alive():
+            return False
         time.sleep(0.3)
     return False
 
@@ -89,11 +124,41 @@ def single_instance(root: Path):
     return f
 
 
+def _state_file(root: Path) -> Path:
+    return root / "var" / "launcher.state"
+
+
+def set_state(root: Path, state: str | None) -> None:
+    """What the launcher holding the lock is doing ('opening', 'open', 'closing'); None when it is done."""
+    try:
+        if state is None:
+            _state_file(root).unlink(missing_ok=True)
+        else:
+            _state_file(root).write_text(state, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def get_state(root: Path) -> str | None:
+    try:
+        f = _state_file(root)
+        if time.time() - f.stat().st_mtime > 3600:  # left over by a crash
+            return None
+        return f.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 SPLASH = """<!doctype html><html><head><meta charset="utf-8"><style>
 body{background:#0f1218;color:#e6e9ef;font-family:Segoe UI,system-ui,sans-serif;display:flex;align-items:center;
 justify-content:center;height:100vh;margin:0}div{text-align:center}h1{font-weight:600;margin:0 0 12px}
 p{color:#8b93a1;max-width:520px;line-height:1.5}.dot{animation:b 1.2s infinite}@keyframes b{50%%{opacity:.2}}
 </style></head><body><div><h1>Abriendo QSTS<span class="dot">…</span></h1><p>%s</p></div></body></html>"""
+ERROR_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
+body{background:#0f1218;color:#e6e9ef;font-family:Segoe UI,system-ui,sans-serif;margin:0;padding:28px}
+h1{font-weight:600;margin:0 0 12px;font-size:22px}p{color:#c9cdd4;max-width:900px;line-height:1.5}
+pre{background:#0b0e12;border:1px solid #262c36;border-radius:6px;padding:10px;white-space:pre-wrap;font-size:12px;
+color:#8b93a1;max-height:55vh;overflow:auto}</style></head><body><h1>QSTS no ha podido abrirse</h1>%s</body></html>"""
 WAIT_TEXT = ("Cargando tus datos. La primera vez después de encender el ordenador (o tras cargar una copia de otro "
              "ordenador) puede tardar hasta un minuto. No hace falta volver a pulsar el icono.")
 
@@ -111,25 +176,61 @@ def _pid_listening(port: int) -> int | None:
     return None
 
 
+def _image_name(pid: int) -> str:
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return out.split(",")[0].strip('"') if out.startswith('"') else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _end_python(pid: int | None) -> bool:
+    """End process `pid` if (and only if) it is a python process other than this one (an old QSTS)."""
+    if not pid or pid == os.getpid() or not ON_WINDOWS:
+        return False
+    if "python" not in _image_name(pid).lower():  # never touch anything that is not a python process
+        return False
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+    wait_for_exit(pid, 15)
+    return True
+
+
 def stop_running(url: str, port: int) -> bool:
-    """Ask the running app to stop; if it is too old to know how, end the python process holding the port."""
+    """Close the running (older) QSTS: its server first, then its process, so its window and any research it was
+    running close too (they would keep writing to the same data with old code)."""
+    pid = _pid_listening(port) if ON_WINDOWS else None
     try:
         req = urllib.request.Request(f"{url}/api/shutdown", data=b"{}", method="POST",
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=3).close()
-    except Exception:  # noqa: BLE001
-        if sys.platform == "win32":
-            pid = _pid_listening(port)
-            if pid:
-                img = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                                     capture_output=True, text=True, timeout=10).stdout.lower()
-                if "python" in img:  # never touch anything that is not a python process
-                    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+        _OPENER.open(req, timeout=3).close()
+    except Exception:  # noqa: BLE001 - too old to know how: end its process
+        _end_python(pid)
     for _ in range(60):
         if not is_running(url, 0.5):
-            return True
+            break
         time.sleep(0.25)
-    return False
+    else:
+        return False
+    _end_python(pid)
+    return True
+
+
+def clear_stale(port: int) -> str | None:
+    """Something holds the port without answering. If it is a python process (a previous QSTS that hung while
+    closing) it is ended. Returns None when the port is free again, otherwise what to tell the user."""
+    pid = _pid_listening(port) if ON_WINDOWS else None
+    name = _image_name(pid) if pid else ""
+    if pid and "python" in name.lower():
+        print(f"ending a previous QSTS that holds port {port} without answering (PID {pid})")
+        _end_python(pid)
+    for _ in range(40):
+        if not port_in_use(port):
+            return None
+        time.sleep(0.25)
+    who = f"el programa {name} (PID {pid})" if pid and name else "otro programa"
+    return (f"El puerto {port}, que usa QSTS, está ocupado por {who} y no responde. Reinicia el ordenador y vuelve "
+            "a abrir QSTS. Si se repite, cierra ese programa o pásale esta pantalla a Claude.")
 
 
 def message(text: str, title: str = "QSTS") -> None:
@@ -165,8 +266,58 @@ def start_server(port: int):
     server = uvicorn.Server(uvicorn.Config(create_app(ctx), host="127.0.0.1", port=port, log_level="warning"))
     ctx.extra["shutdown"] = lambda: setattr(server, "should_exit", True)
     ctx.extra["restart_app"] = _restart_soon
-    threading.Thread(target=server.run, daemon=True, name="api").start()
+    errors: list[str] = []
+
+    class Capture(logging.Handler):  # uvicorn reports e.g. "port already in use" through its logger, then exits
+        def emit(self, record):
+            errors.append(record.getMessage()[:500])
+    logging.getLogger("uvicorn.error").addHandler(Capture(logging.ERROR))
+
+    def serve():
+        try:
+            server.run()
+        except BaseException as e:  # noqa: BLE001 - SystemExit when it cannot start
+            errors.append(f"el servidor se ha detenido: {e!r}")
+            print(f"server stopped: {e!r}")
+    t = threading.Thread(target=serve, daemon=True, name="api")
+    _SERVER.update(thread=t, server=server, errors=errors)
+    t.start()
     return ctx
+
+
+def stop_server(timeout: float = 5.0) -> None:
+    """Close this process's server (and its port) before exiting."""
+    server, t = _SERVER["server"], _SERVER["thread"]
+    if server is not None:
+        server.should_exit = True
+    if t is not None:
+        t.join(timeout)
+
+
+def log_tail(root: Path, lines: int = 25) -> str:
+    """The last lines this start wrote to var/desktop.log."""
+    try:
+        with open(root / "var" / "desktop.log", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 20000))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    text = text[text.rfind("--- "):] if "--- " in text else text
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def failure_page(root: Path, reason: str) -> str:
+    errs = _SERVER["errors"][-5:]
+    body = f"<p>{html.escape(reason)}</p>"
+    if errs:
+        body += "<p>Motivo:</p><pre>" + html.escape("\n".join(errs)) + "</pre>"
+    body += ("<p>Cierra esta ventana y vuelve a abrir QSTS. Si se repite, reinicia el ordenador; si aun así no abre, "
+             "haz una captura de esta pantalla y pásasela a Claude.</p>")
+    tail = log_tail(root)
+    if tail:
+        body += "<p>Últimas líneas del registro (var\\desktop.log):</p><pre>" + html.escape(tail) + "</pre>"
+    return ERROR_PAGE % body
 
 
 def _release_data(ctx) -> None:
@@ -205,6 +356,7 @@ def after_close(ctx) -> None:
     """Window closed: restart if a copy from another computer was loaded, otherwise save this computer's copy."""
     if ctx is None:
         return  # another process owns the server and the data
+    set_state(project_root(), "closing")
     if _RESTART.is_set():
         print("restarting to use the loaded data copy")
         _release_data(ctx)
@@ -237,12 +389,20 @@ def main(port: int = PORT, argv: list[str] | None = None) -> None:
                 break
             time.sleep(0.25)
     lock = single_instance(root)
+    if lock is None and get_state(root) == "closing":  # the previous QSTS is still saving its data copy
+        print("the previous QSTS is closing (saving its data copy): waiting for it")
+        deadline = time.monotonic() + CLOSING_WAIT
+        while lock is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+            lock = single_instance(root)
     if lock is None:
         print("another launcher is already opening/running QSTS: nothing to do")
         return
+    set_state(root, "opening")
     try:
         _run(url, port)
     finally:
+        set_state(root, None)
         lock.close()
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} closed")
 
@@ -263,7 +423,15 @@ def _run(url: str, port: int) -> None:
         import webview
     except Exception as e:  # noqa: BLE001
         webview, gui_error = None, e
-    if is_running(url):
+    root = project_root()
+    state = server_state(url, port)
+    if state == "stale":
+        problem = clear_stale(port)
+        if problem:
+            print(f"port problem: {problem}")
+            message(problem)
+            return
+    if state == "up":
         from qsts.research.experiments import code_version
         mine, theirs = code_version(), running_version(url)
         if theirs != mine:
@@ -281,16 +449,19 @@ def _run(url: str, port: int) -> None:
 
             def boot():
                 try:
+                    t0 = time.monotonic()
                     if not is_running(url):
                         box["ctx"] = _start_or_explain(port)
                     if wait_ready(url):
+                        print(f"ready after {time.monotonic() - t0:.1f}s")
+                        set_state(root, "open")
                         win.load_url(url)
                     else:
-                        win.load_html(SPLASH % "QSTS no ha arrancado a tiempo. Cierra esta ventana y vuelve a abrirla; "
-                                               "si se repite, mira var\\desktop.log.")
+                        print("the app did not answer: " + "; ".join(_SERVER["errors"][-3:]))
+                        win.load_html(failure_page(root, "La parte interna de QSTS no ha respondido."))
                 except Exception as e:  # noqa: BLE001
                     print(f"boot failed: {e!r}")
-                    win.load_html(SPLASH % str(e).replace("\n", "<br>"))
+                    win.load_html(failure_page(root, str(e)))
             webview.start(boot, localization={
                 "global.quitConfirmation": "¿Cerrar QSTS?\n\nSi hay una investigación o una descarga en marcha, se detendrá.",
                 "global.ok": "Aceptar", "global.quit": "Salir", "global.cancel": "Cancelar"})
@@ -307,7 +478,8 @@ def _run(url: str, port: int) -> None:
             message(str(e))
             raise
         if not wait_ready(url):
-            message("QSTS no ha arrancado a tiempo. Detalles en var\\desktop.log")
+            message("QSTS no ha podido abrirse.\n\n" + "\n".join(_SERVER["errors"][-3:]) +
+                    "\n\nÚltimas líneas del registro (var\\desktop.log):\n" + log_tail(root, 12))
             return
     print(f"native window unavailable: {gui_error!r}")
     why = ("Falta el componente de la ventana propia (pywebview): cierra QSTS y haz doble clic en "
@@ -321,4 +493,12 @@ def _run(url: str, port: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # never linger after the window is closed: a process stuck while exiting would keep the port and the
+        # data busy, and the next start could not open
+        stop_server()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
