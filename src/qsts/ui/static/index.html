@@ -15,6 +15,7 @@
     <button data-tab="home" class="active">🏠 Inicio</button>
     <button data-tab="data">1 · Datos</button>
     <button data-tab="auto">2 · Investigación IA</button>
+    <button data-tab="intra">Intradía</button>
     <button data-tab="paper">3 · Simulación</button>
     <button data-tab="charts">Gráficos</button>
     <button id="adv-toggle" class="ghost" title="Herramientas para usuarios avanzados">Avanzado ▾</button>
@@ -243,6 +244,63 @@
       <h4>Operaciones <span id="ar-bt-ntr" class="muted"></span></h4><div class="scroll"><table id="ar-bt-trades"></table></div>
     </div></div>
   <div class="card"><h3>Qué está haciendo ahora</h3><pre id="ar-log" class="muted">—</pre></div>
+</section>
+
+<section id="tab-intra" class="tab">
+  <div class="card">
+    <h3>Laboratorio intradía: ¿qué hace?</h3>
+    <p>Prueba estrategias de <b>un solo día</b> (todas las operaciones se cierran antes del cierre de la bolsa) basadas en la
+      <b>ruptura del rango de apertura</b>: mira el máximo y el mínimo de los primeros minutos (5, 15, 30 o 60) y entra si el precio rompe ese rango:
+      <b>largo</b> (compra) si rompe el máximo, <b>corto</b> (apuesta a la bajada) si rompe el mínimo. Busca sola la mejor combinación de:
+      tamaño del rango, dirección, cómo confirmar la ruptura (vela que cierra fuera o simple toque), dónde va el stop, objetivo de beneficio,
+      hasta cuándo se puede entrar y <b>filtros de contexto</b> (tamaño del rango frente a la volatilidad diaria, volumen de la apertura,
+      hueco de apertura, tendencia diaria). Es decir, un patrón de precio combinado con su contexto.</p>
+    <ol class="steps">
+      <li><b>Velas:</b> de <b>5 minutos</b> (Yahoo solo da los últimos 60 días) o de <b>1 hora</b> (unos 2,9 años; con ellas el rango es la primera hora).
+        Las velas descargadas se guardan, así que la historia crece si las actualizas a menudo.</li>
+      <li><b>Búsqueda:</b> las mismas reglas que la investigación diaria: 3 tramos y dos mitades de las acciones, cuenta la peor nota y se penalizan las reglas complicadas.</li>
+      <li><b>Examen previo y test final:</b> la primera vez que se usa un tipo de velas, el último 25% de las sesiones se guarda bajo llave; la búsqueda nunca lo ve.
+        Cuando la historia guardada se duplica, empieza una época nueva con sesiones nuevas bajo llave.</li>
+    </ol>
+    <p class="warn"><b>Antes de fiarte:</b> operar dentro del día cuesta más (aquí se cuentan <b id="it-cost">0,10%</b> por operación al entrar y otro tanto al salir; si tu bróker cobra más, cuenta más).
+      En Trading 212 los <b>cortos</b> solo se pueden hacer con <b>CFD</b> (producto apalancado, con sus propios costes y riesgos).
+      Con 60 días de velas de 5 minutos no se puede demostrar nada: la app lo marca como <b>orientativo</b> hasta tener bastantes sesiones.
+      <b>Actualiza las velas al menos cada 50 días</b>: Yahoo borra las antiguas y los días perdidos no se recuperan.</p>
+  </div>
+  <div class="card"><h3>Velas descargadas</h3>
+    <div id="it-data" class="muted">—</div>
+    <div class="row">
+      <label>Velas <select id="it-ds"><option value="5m">de 5 minutos</option><option value="1h">de 1 hora</option></select></label>
+      <label title="Las acciones con más dinero negociado de las que tienes en Datos. Las que ya tienen velas se actualizan siempre.">Acciones
+        <select id="it-n"><option value="50">las 50 más negociadas</option><option value="100" selected>las 100 más negociadas</option><option value="200">las 200 más negociadas</option></select></label>
+      <button id="it-ingest">⬇ Descargar / actualizar velas</button>
+      <span id="it-ingest-msg" class="muted"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Control</h3>
+    <div class="row">
+      <button id="it-start" class="primary">▶ Empezar a investigar</button>
+      <button id="it-stop">■ Detener</button>
+      <label>Ciclos <select id="it-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
+      <span id="it-msg" class="muted"></span>
+    </div>
+    <dl id="it-state"></dl>
+  </div>
+  <div class="card bar"><h3>El listón a superar</h3>
+    <p class="muted">Mantener las mismas acciones sin hacer nada durante el periodo de búsqueda.</p>
+    <div id="it-passive" class="kpis"></div></div>
+  <div class="card callout" id="it-best" style="display:none"></div>
+  <div class="card"><h3>Ranking intradía</h3><p class="muted" id="it-note"></p><table id="it-board"></table></div>
+  <div class="card" id="it-detail-card"><h3>Detalle</h3><div id="it-detail" class="muted">Pulsa una fila del ranking para ver su detalle y su curva.</div>
+    <div id="it-bt" style="display:none">
+      <h4>Curva <span id="it-bt-note" class="muted"></span></h4>
+      <div id="it-chart" class="chart"></div>
+      <p class="muted"><span class="sw" style="background:#4c8dff"></span> búsqueda &nbsp; <span class="sw" style="background:#ab47bc"></span> examen previo
+        <span id="it-oos-legend" style="display:none">&nbsp; <span class="sw" style="background:#ffb74d"></span> test final</span> · capital inicial 10.000</p>
+      <h4>Últimas operaciones</h4><div class="scroll"><table id="it-trades"></table></div>
+    </div></div>
+  <div class="card"><h3>Qué está haciendo ahora</h3><pre id="it-log" class="muted">—</pre></div>
 </section>
 
 <section id="tab-signals" class="tab">

@@ -134,6 +134,39 @@ class MarketDataRepository:
         return [{"symbol": r[0], "name": r[1], "sector": r[2], "first": str(pd.Timestamp(r[3]).date()),
                  "last": str(pd.Timestamp(r[4]).date()), "bars": int(r[5])} for r in rows]
 
+    def coverage(self, timeframe: Timeframe) -> dict[str, dict]:
+        """Per symbol with bars of `timeframe`: first/last bar and count (index lookups per asset, no full scan)."""
+        with self.sf() as s:
+            ids = dict(s.execute(select(m.Asset.id, m.Asset.symbol)).all())
+            if not ids:
+                return {}
+            rows = s.execute(select(m.Price.asset_id, func.min(m.Price.ts), func.max(m.Price.ts), func.count())
+                             .where(m.Price.asset_id.in_(list(ids)), m.Price.timeframe == Timeframe(timeframe).value)
+                             .group_by(m.Price.asset_id)).all()
+        return {ids[a]: {"first": pd.Timestamp(f).tz_localize("UTC"), "last": pd.Timestamp(la).tz_localize("UTC"),
+                         "bars": int(n)} for a, f, la, n in rows}
+
+    def liquid_symbols(self, n: int, days: int = 90) -> list[str]:
+        """The `n` symbols with the highest average traded value (close x volume) over the last `days` days of the
+        stored daily data; only symbols still trading (last bar within 10 days of the newest one)."""
+        with self.sf() as s:
+            ids = dict(s.execute(select(m.Asset.id, m.Asset.symbol)).all())
+            if not ids:
+                return []
+            last = dict(s.execute(select(m.Price.asset_id, func.max(m.Price.ts))
+                                  .where(m.Price.asset_id.in_(list(ids)), m.Price.timeframe == Timeframe.D1.value)
+                                  .group_by(m.Price.asset_id)).all())
+            if not last:
+                return []
+            newest = max(last.values())
+            alive = [a for a, t in last.items() if t >= newest - pd.Timedelta(days=10)]
+            rows = s.execute(select(m.Price.asset_id, func.avg(m.Price.close * m.Price.volume), func.count())
+                             .where(m.Price.asset_id.in_(alive), m.Price.timeframe == Timeframe.D1.value,
+                                    m.Price.ts >= newest - pd.Timedelta(days=days))
+                             .group_by(m.Price.asset_id)).all()
+        ranked = sorted((r for r in rows if r[2] >= 20 and r[1]), key=lambda r: -r[1])
+        return [ids[r[0]] for r in ranked[:n]]
+
     # ------------------------------------------------------------------ corporate actions
     def store_corporate_actions(self, symbol: str, actions: pd.DataFrame, source: str) -> int:
         aid = self.asset_id(symbol)

@@ -16,7 +16,13 @@ import pandas as pd
 from qsts.data.bars import OHLCV, Timeframe
 from qsts.data.providers.base import MarketDataProvider, empty_actions, empty_earnings, utc_bounds
 
-_INTERVAL = {Timeframe.D1: "1d", Timeframe.W1: "1wk", Timeframe.H1: "1h"}
+_INTERVAL = {Timeframe.D1: "1d", Timeframe.W1: "1wk", Timeframe.H1: "1h", Timeframe.M15: "15m", Timeframe.M5: "5m"}
+# How far back Yahoo serves each intraday interval (checked live 2026-10-05): a request with explicit dates must lie
+# within the last 60 calendar days (5m/15m) or 730 calendar days (1h); a request by period ("60d" / "730d") counts
+# trading sessions and reaches further back (1h: ~2.9 years). Older ranges are served through the period form.
+MAX_HISTORY = {Timeframe.M5: pd.Timedelta(days=58), Timeframe.M15: pd.Timedelta(days=58),
+               Timeframe.H1: pd.Timedelta(days=728)}
+MAX_PERIOD = {Timeframe.M5: "60d", Timeframe.M15: "60d", Timeframe.H1: "730d"}
 
 
 def _local_dates(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
@@ -62,11 +68,19 @@ class YFinanceProvider(MarketDataProvider):
         if timeframe not in _INTERVAL:
             raise ValueError(f"Yahoo has no native {timeframe.value} bars; build 4H from 1H with resample_intraday_to_4h")
         s, e = utc_bounds(start, end)
-        h = self._ticker(symbol).history(start=None if s is None else s.strftime("%Y-%m-%d"),
-                                         end=None if e is None else e.strftime("%Y-%m-%d"),
-                                         interval=_INTERVAL[timeframe], auto_adjust=False, actions=False,
-                                         back_adjust=False, repair=False, keepna=False, timeout=self.timeout,
-                                         raise_errors=True)
+        common = dict(interval=_INTERVAL[timeframe], auto_adjust=False, actions=False, back_adjust=False,
+                      repair=False, keepna=False, timeout=self.timeout, raise_errors=True)
+        if timeframe in MAX_HISTORY and (s is None or s < pd.Timestamp.now(tz="UTC") - MAX_HISTORY[timeframe]):
+            h = self._ticker(symbol).history(period=MAX_PERIOD[timeframe], **common)  # as far back as Yahoo goes
+            if h is not None and len(h):
+                idx = pd.DatetimeIndex(h.index).tz_convert("UTC")
+                keep = (idx >= s) if s is not None else np.ones(len(h), dtype=bool)
+                if e is not None:
+                    keep &= idx < e
+                h = h[keep]
+        else:
+            h = self._ticker(symbol).history(start=None if s is None else s.strftime("%Y-%m-%d"),
+                                             end=None if e is None else e.strftime("%Y-%m-%d"), **common)
         if h is None or h.empty:
             raise ValueError(f"Yahoo returned no data for {symbol}")
         return h

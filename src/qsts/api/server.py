@@ -35,6 +35,7 @@ from qsts.execution.paper import PaperError, PaperTrading
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
 from qsts.notify.telegram import Telegram, TelegramError
 from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
+from qsts.research import intraday as itd
 from qsts.research.validation import OOSAccessDenied
 from qsts.risk.engine import PortfolioState
 from qsts.strategy.definition import definition_from_dict
@@ -101,6 +102,17 @@ class IngestBody(BaseModel):
     symbols: list[str] = []
     sample: int | None = None  # sp500: random sample size (None = all)
     start: str = "2010-01-01"
+
+
+class IntradayIngestBody(BaseModel):
+    dataset: str = "5m"  # 5m | 1h
+    n_symbols: int = 100  # the most traded stocks you have (those already downloaded are always updated)
+
+
+class IntradayStartBody(BaseModel):
+    dataset: str = "5m"
+    max_cycles: int = 0  # 0 = until stopped
+    ignore_sync: bool = False
 
 
 class PaperStartBody(BaseModel):
@@ -344,6 +356,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     # ------------------------------------------------------------------ data manager ("Datos")
     def _invalidate_research_views():
         ctx.extra.pop("autoresearch_view", None)
+        ctx.extra.pop("intraday_views", None)
         r = ctx.extra.get("autoresearch")
         if r is not None and not r.state.running:
             r.researcher = None
@@ -771,6 +784,116 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(404, "estrategia desconocida")
         except OOSAccessDenied as e:
             raise HTTPException(409, f"el test final ya se usó para esta versión: {e}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    # ------------------------------------------------------------------ intraday lab ("Intradía")
+    def _dataset(name: str) -> str:
+        if name not in itd.DATASETS:
+            raise HTTPException(400, "tipo de velas desconocido (5m o 1h)")
+        return name
+
+    def _intraday_build(dataset: str, log, stop) -> itd.IntradayLab:
+        tf = itd.DATASETS[dataset]
+        syms = sorted(ctx.repo.coverage(tf))
+        if not syms:
+            raise ValueError(f"no hay velas de {dataset}: descárgalas primero")
+        bars, daily = {}, {}
+        for sym in syms:
+            if stop is not None and stop.is_set():
+                raise itd.StopRequested()
+            try:
+                bars[sym] = ctx.research_frame(sym, tf)
+            except (KeyError, ValueError) as e:  # DataQualityError is a ValueError
+                log(f"{sym}: velas descartadas ({e})"[:200])
+                continue
+            try:
+                daily[sym] = ctx.research_frame(sym)
+            except (KeyError, ValueError):
+                pass  # without daily bars the ATR / trend filters simply skip this stock
+        return itd.IntradayLab(ctx.sf, dataset, bars, daily, log=log, stop_event=stop)
+
+    def _intraday_runner() -> itd.IntradayRunner:
+        r = ctx.extra.get("intraday")
+        if r is None:
+            r = ctx.extra["intraday"] = itd.IntradayRunner(_intraday_build,
+                                                           on_finish=lambda: ctx.extra.pop("intraday_views", None))
+        return r
+
+    def _intraday_lab(dataset: str) -> itd.IntradayLab:
+        r = _intraday_runner()
+        if r.state.running and r.state.dataset == dataset:
+            if r.lab is None:
+                raise HTTPException(409, "cargando las velas…")
+            return r.lab
+        views = ctx.extra.setdefault("intraday_views", {})
+        if dataset not in views:
+            try:
+                views[dataset] = _intraday_build(dataset, lambda msg: None, None)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        return views[dataset]
+
+    @app.get("/api/intraday/status")
+    def intraday_status():
+        return _j(_intraday_runner().status() | {"boundaries": itd.boundaries(ctx.sf)})
+
+    @app.get("/api/intraday/data")
+    def intraday_data():
+        out = {}
+        for ds, tf in itd.DATASETS.items():
+            cov = ctx.repo.coverage(tf)
+            out[ds] = {"symbols": len(cov), "bars": sum(c["bars"] for c in cov.values()),
+                       "first": str(min(c["first"] for c in cov.values()).date()) if cov else None,
+                       "last": str(max(c["last"] for c in cov.values()).date()) if cov else None}
+        return _j({"datasets": out, "daily_symbols": len(ctx.symbols())})
+
+    @app.post("/api/intraday/ingest")
+    def intraday_ingest(body: IntradayIngestBody):
+        ds = _dataset(body.dataset)
+        tf = itd.DATASETS[ds]
+        have = sorted(ctx.repo.coverage(tf))
+        new = ctx.repo.liquid_symbols(max(1, min(body.n_symbols, 300)))
+        if not have and not new:
+            raise HTTPException(400, "primero descarga precios diarios en 1 · Datos")
+        syms = sorted(set(have) | set(new))
+        started = _data_runner().start(f"intraday-{ds}", syms, "2000-01-01", incremental=True, timeframe=tf)
+        if not started:
+            raise HTTPException(409, "ya hay una descarga en marcha")
+        return {"started": True, "symbols": len(syms), "new": len(set(syms) - set(have))}
+
+    @app.post("/api/intraday/start")
+    def intraday_start(body: IntradayStartBody):
+        ds = _dataset(body.dataset)
+        newer = _sync_newer()
+        if newer and not body.ignore_sync:
+            raise HTTPException(409, f"Hay datos más recientes de {newer} en la carpeta compartida: cárgalos antes en "
+                                     "Inicio. Si investigas ahora y luego los cargas, perderás lo que hagas aquí.")
+        ctx.extra.pop("intraday_views", None)
+        return {"started": _intraday_runner().start(ds, max(0, body.max_cycles))}
+
+    @app.post("/api/intraday/stop")
+    def intraday_stop():
+        _intraday_runner().stop()
+        return {"stopping": True}
+
+    @app.get("/api/intraday/leaderboard")
+    def intraday_leaderboard(dataset: str = "5m", limit: int = 25):
+        return _j(_intraday_lab(_dataset(dataset)).leaderboard(max(1, min(limit, 100))))
+
+    @app.get("/api/intraday/{rid}/curve")
+    def intraday_curve(rid: str, dataset: str = "5m"):
+        try:
+            return _j(_intraday_lab(_dataset(dataset)).curve(rid))
+        except KeyError:
+            raise HTTPException(404, "regla desconocida")
+
+    @app.post("/api/intraday/{rid}/final-test")
+    def intraday_final_test(rid: str, dataset: str = "5m"):
+        try:
+            return _j(_intraday_lab(_dataset(dataset)).final_test(rid))
+        except KeyError:
+            raise HTTPException(404, "regla desconocida")
         except ValueError as e:
             raise HTTPException(400, str(e))
 

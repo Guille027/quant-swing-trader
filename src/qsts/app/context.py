@@ -60,9 +60,12 @@ class AppContext:
 
     def _research_frame(self, symbol: str, timeframe: Timeframe = Timeframe.D1) -> pd.DataFrame:
         from qsts.data.adjust import adjust
-        from qsts.data.quality import validate_and_clean
+        from qsts.data.quality import QualityConfig, validate_and_clean
         raw = self.load_bars(symbol, timeframe)[["open", "high", "low", "close", "volume"]]
-        vb = validate_and_clean(raw, symbol, timeframe)
+        # intraday history has gaps by nature (Yahoo serves only recent bars; missed days are never filled):
+        # they are kept as gaps, never filled, and the intraday lab handles them
+        cfg = QualityConfig(max_missing_fraction=1.0, max_missing_gap=10 ** 9) if timeframe.intraday else QualityConfig()
+        vb = validate_and_clean(raw, symbol, timeframe, cfg)
         df = adjust(vb.df, self.repo.load_corporate_actions(symbol), "total")
         ev = self.repo.load_earnings(symbol)
         if len(ev) and timeframe is Timeframe.D1:  # point-in-time earnings columns (qsts.data.earnings)

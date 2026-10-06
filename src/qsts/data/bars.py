@@ -18,6 +18,8 @@ _CAL_START, _CAL_END = "1990-01-01", "2035-12-31"
 
 
 class Timeframe(str, Enum):
+    M5 = "5m"
+    M15 = "15m"
     H1 = "1h"
     H4 = "4h"
     D1 = "1d"
@@ -25,11 +27,12 @@ class Timeframe(str, Enum):
 
     @property
     def intraday(self) -> bool:
-        return self in (Timeframe.H1, Timeframe.H4)
+        return self in (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4)
 
     @property
     def duration(self) -> pd.Timedelta:
-        return {Timeframe.H1: pd.Timedelta(hours=1), Timeframe.H4: pd.Timedelta(hours=4),
+        return {Timeframe.M5: pd.Timedelta(minutes=5), Timeframe.M15: pd.Timedelta(minutes=15),
+                Timeframe.H1: pd.Timedelta(hours=1), Timeframe.H4: pd.Timedelta(hours=4),
                 Timeframe.D1: pd.Timedelta(days=1), Timeframe.W1: pd.Timedelta(weeks=1)}[self]
 
 

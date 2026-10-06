@@ -27,7 +27,7 @@ function goTab(name) {
   $("#tab-" + name).classList.add("active");
   if ($(`#adv button[data-tab="${name}"]`)) $("#adv").classList.add("open");
   clearInterval(autoTimer); autoTimer = null;
-  ({ home: loadHome, data: openData, auto: openAuto, paper: loadPaper, signals: loadSignals, charts: initCharts, strategies: loadStrategies,
+  ({ home: loadHome, data: openData, auto: openAuto, intra: openIntra, paper: loadPaper, signals: loadSignals, charts: initCharts, strategies: loadStrategies,
      research: loadExperiments, logs: loadLogs }[name] || (() => {}))();
 }
 document.querySelectorAll("nav button[data-tab]").forEach(b => b.onclick = () => goTab(b.dataset.tab));
@@ -436,6 +436,157 @@ $("#ar-start").onclick = async () => {
   loadAuto(false);
 };
 $("#ar-stop").onclick = async () => { await post("/api/autoresearch/stop"); $("#ar-msg").textContent = "Deteniendo (termina la prueba en curso)…"; loadAuto(false); };
+
+// ---------------------------------------------------------------- intraday lab
+const IT_GATES = { min_trades: "suficientes operaciones (60 o más)", costs_2x: "sigue ganando con el doble de costes",
+  robustness: "aguanta que se cambie un ajuste (reglas vecinas)",
+  pre_exam: "aprueba el examen previo (sesiones que la búsqueda nunca vio): gana dinero, supera a no hacer nada y conserva al menos la mitad de su Sharpe" };
+const IT_ORIGIN = { random: "nueva", evolution: "mejorada" };
+const DSNAME = { "5m": "5 minutos", "1h": "1 hora" };
+const daysSince = (d) => d ? (Date.now() - Date.parse(d)) / 864e5 : 0;
+let itSel = null, itRows = [], itChart = null, itSeries = [], itPolls = 0, itJob = false, itRunning = null, itDsSet = false;
+function openIntra() { loadIntra(true); autoTimer = setInterval(() => loadIntra(false), 3000); }
+async function loadIntra(full) {
+  let st, job;
+  try { [st, job] = await Promise.all([api("/api/intraday/status"), api("/api/data/job")]); }
+  catch (e) { $("#it-msg").textContent = e.message; return; }
+  if (!itDsSet && st.dataset) { $("#it-ds").value = st.dataset; itDsSet = true; }
+  $("#it-start").disabled = st.running; $("#it-stop").disabled = !st.running;
+  const mine = job.running && String(job.kind || "").startsWith("intraday");
+  $("#it-ingest").disabled = job.running;
+  if (job.running) $("#it-ingest-msg").innerHTML = mine ? `Descargando <b>${esc(job.current || "")}</b> · ${job.done}/${job.total}` : "Hay otra descarga en marcha (en 1 · Datos).";
+  else if (itJob) { $("#it-ingest-msg").textContent = "Terminado: " + (job.message || ""); full = true; }
+  itJob = mine;
+  dl($("#it-state"), { "Estado": st.running ? `<span class="good">investigando (velas de ${DSNAME[st.dataset] || esc(st.dataset)})…</span>` : "parado",
+    "Fase": esc(st.phase), "Probadas (esta sesión)": st.session_trials ?? 0,
+    ...(st.error ? { "Error": `<span class="bad">${esc(st.error)}</span>` } : {}) });
+  $("#it-log").textContent = (st.log || []).slice().reverse().join("\n") || "—";
+  if (full || itRunning !== st.running || (st.running && ++itPolls % 5 === 0)) { itRunning = st.running; await loadIntraData(); await loadIntraBoard(); }
+}
+async function loadIntraData() {
+  try {
+    const d = await api("/api/intraday/data"), x = d.datasets;
+    const line = (k) => x[k].symbols ? `Velas de ${DSNAME[k]}: <b>${x[k].symbols}</b> acciones, del <b>${x[k].first}</b> al <b>${x[k].last}</b>` +
+        (k === "5m" && daysSince(x[k].last) > 40 ? ' <span class="bad">· actualízalas ya (Yahoo solo guarda 60 días)</span>' : "")
+      : `Velas de ${DSNAME[k]}: <span class="muted">ninguna todavía</span>`;
+    $("#it-data").innerHTML = line("5m") + "<br>" + line("1h") + (d.daily_symbols ? "" : '<br><span class="bad">Primero descarga precios diarios en 1 · Datos.</span>');
+    $("#it-data").classList.remove("muted");
+  } catch (e) { $("#it-data").textContent = e.message; }
+}
+async function loadIntraBoard() {
+  let lb; const ds = $("#it-ds").value;
+  try { lb = await api(`/api/intraday/leaderboard?dataset=${ds}&limit=25`); }
+  catch (e) { $("#it-note").textContent = e.message; table($("#it-board"), [], []); $("#it-passive").innerHTML = ""; $("#it-best").style.display = "none"; return; }
+  if (ds !== $("#it-ds").value) return;
+  const p = lb.periods, n = lb.sessions, c = lb.costs;
+  $("#it-cost").textContent = (c.bps_per_side / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }) + "%";
+  $("#it-note").innerHTML = `Velas de <b>${DSNAME[ds]}</b>, <b>${lb.symbols}</b> acciones. Búsqueda: <b>${p.search[0]} → ${p.search[1]}</b> (${n.search} sesiones) · ` +
+    `examen previo: ${p.pre_exam[0]} → ${p.pre_exam[1]} (${n.pre_exam}) · bajo llave desde <b>${p.oos_start}</b> (${n.oos} sesiones${lb.epoch > 1 ? `, época ${lb.epoch}` : ""}). ` +
+    `Reglas probadas aquí: <b>${lb.n_trials_here}</b> (${lb.n_trials} en total con la investigación diaria; todas cuentan para la Fiabilidad). ` +
+    `Hasta ${c.max_positions} operaciones al día, arriesgando un ${pct(c.risk_per_trade)} del capital en cada una (sin apalancamiento). ` +
+    (lb.can_validate ? "" : `<br><span class="bad">Orientativo:</span> para validar hacen falta ${lb.min_sessions.search} sesiones de búsqueda (hay ${n.search}). Actualiza las velas a menudo: la historia guardada crece.`) +
+    (lb.can_final ? "" : ` El test final necesita ${lb.min_sessions.oos} sesiones bajo llave (hay ${n.oos}).`) +
+    ` <b>Consistencia</b> = Sharpe del peor tramo y de la peor mitad de las acciones. <b>Pulsa una fila para ver su curva.</b>`;
+  const pv = lb.passive || {};
+  const kp = (l, v, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s || ""}</div></div>`;
+  $("#it-passive").innerHTML = kp("Rentabilidad", pct(pv.total_return)) + kp("Sharpe", fmt(pv.sharpe)) + kp("Caída máx.", pct(pv.max_drawdown));
+  itRows = lb.rows;
+  const val = itRows.find(r => r.status === "VALIDATED_PASS"), fin = itRows.find(r => r.status === "FINAL_PASS");
+  const cb = $("#it-best");
+  if (fin) { cb.style.display = "block"; cb.innerHTML = `<h3>👉 Regla aprobada en el test final</h3><p><b>${esc(fin.rules)}</b></p>
+      <p class="muted">Aun así, síguela primero sin dinero real durante semanas: dentro del día los costes reales y el deslizamiento pesan mucho.</p>`; }
+  else if (val) { cb.style.display = "block"; cb.innerHTML = `<h3>👉 Candidata para el test final</h3><p><b>${esc(val.rules)}</b> · consistencia ${fmt(val.consistency, 3)}</p>` +
+      (lb.can_final ? `<button onclick="itFinal('${val.id}')">Hacer el test final</button>` : '<p class="muted">El test final necesita más sesiones bajo llave.</p>'); }
+  else cb.style.display = "none";
+  table($("#it-board"), itRows, [["#", r => itRows.indexOf(r) + 1],
+    ["Regla", r => `<span class="badge">${IT_ORIGIN[r.origin] || esc(r.origin)}</span>${esc(r.rules)}`],
+    ["Consistencia", r => fmt(r.consistency, 3)], ["Sharpe", r => fmt(r.sharpe)], ["Rentabilidad", r => pct(r.total_return)],
+    ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades], ["Ganadoras", r => pct(r.win_rate)],
+    ["Media/operación", r => r.avg_trade == null ? "—" : (r.avg_trade * 100).toFixed(2) + "%"], ["Cortos", r => pct(r.short_share)],
+    ["Fiabilidad", r => r.dsr == null ? "—" : pct(r.dsr)], ["Estado", r => STATUS[r.status] || r.status],
+    ["", r => r.status === "VALIDATED_PASS" && lb.can_final ? `<button onclick="event.stopPropagation();itFinal('${r.id}')">Test final</button>` : ""]]);
+  [...$("#it-board").querySelectorAll("tr")].slice(1).forEach((tr, i) => {
+    if (!itRows[i]) return;
+    tr.classList.add("click"); if (itRows[i].id === itSel) tr.classList.add("sel");
+    tr.cells[1].classList.add("rules");
+    tr.onclick = () => { itSel = itRows[i].id; itDetail(itRows[i]); itCurve(itSel); loadIntraBoard();
+      $("#it-detail-card").scrollIntoView({ behavior: "smooth" }); };
+  });
+  const cur = itRows.find(r => r.id === itSel); if (cur) itDetail(cur);
+}
+function itDetail(r) {
+  const blocks = (r.blocks || []).map(b => `<tr><td>${b.start} → ${b.end}</td><td>${fmt(b.sharpe)}</td><td>${pct(b.return)}</td><td>${b.trades}</td></tr>`).join("");
+  let h = `<p><b>${esc(r.rules)}</b></p><p class="muted">Id ${r.id} · complejidad ${r.complexity ?? 0} (filtros + objetivo) · opera ${pct(r.days_traded)} de los días · ${pct(r.short_share)} en corto</p>
+    <h4>Los 3 tramos de la búsqueda</h4><table><tr><th>Periodo</th><th>Sharpe</th><th>Rentabilidad</th><th>Operaciones</th></tr>${blocks}</table>` +
+    (r.halves && r.halves.length ? `<p class="muted">Con cada mitad de las acciones (peor tramo): ` +
+      r.halves.map(x => `mitad ${x.name}: <b>${fmt(x.consistency, 3)}</b> (${x.n_trades} operaciones)`).join(" · ") + `.</p>` : "");
+  const v = r.validation;
+  if (v) {
+    h += `<h4>Validación: ${v.passed ? '<span class="good">PASA</span>' : '<span class="bad">NO PASA</span>'}</h4><ul>` +
+      Object.entries(v.gates).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${IT_GATES[k] || k}</li>`).join("") + "</ul>" +
+      `<p class="muted small">Con el doble de costes: Sharpe ${fmt(v.costs_2x.sharpe)} · reglas vecinas que aguantan: ${pct(v.robustness)}</p>`;
+    const pe = v.pre_exam;
+    if (pe) h += `<h4>Examen previo (${pe.period.join(" → ")}): ${pe.passed ? '<span class="good">APRUEBA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>
+      <table><tr><th></th><th>Rentabilidad</th><th>Sharpe</th><th>Caída máx.</th></tr>
+        <tr><td><b>Esta regla</b></td><td>${pct(pe.metrics.total_return)}</td><td>${fmt(pe.metrics.sharpe)}</td><td>${pct(pe.metrics.max_drawdown)}</td></tr>
+        <tr><td>Mismas acciones sin hacer nada</td><td>${pct(pe.passive.total_return)}</td><td>${fmt(pe.passive.sharpe)}</td><td>${pct(pe.passive.max_drawdown)}</td></tr></table>`;
+  } else h += '<p class="muted">Aún no validada (se validan solas las mejores de cada ciclo cuando hay bastantes sesiones).</p>';
+  if (r.final) {
+    const f = r.final, o = f.oos || {}, pv = f.passive || {};
+    const FC = { positive: "gana dinero", beats_passive: "supera a mantener las mismas acciones sin hacer nada (Sharpe)",
+      limited_decay: `conserva al menos la mitad de su Sharpe de búsqueda (${fmt(f.research_sharpe)})` };
+    h += `<h4>Test final (${f.period.join(" → ")}): ${f.decision === "FINAL_PASS" ? '<span class="good">APROBADA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>
+      <table><tr><th></th><th>Rentabilidad</th><th>Sharpe</th><th>Caída máx.</th><th>Operaciones</th></tr>
+        <tr><td><b>Esta regla</b></td><td>${pct(o.total_return)}</td><td>${fmt(o.sharpe)}</td><td>${pct(o.max_drawdown)}</td><td>${o.n_trades ?? "—"}</td></tr>
+        <tr><td>Mismas acciones sin hacer nada</td><td>${pct(pv.total_return)}</td><td>${fmt(pv.sharpe)}</td><td>${pct(pv.max_drawdown)}</td><td>—</td></tr></table><ul>` +
+      Object.entries(f.checks || {}).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${FC[k] || k}</li>`).join("") + "</ul>";
+  }
+  $("#it-detail").classList.remove("muted"); $("#it-detail").innerHTML = h;
+}
+async function itCurve(id) {
+  $("#it-bt").style.display = "block"; $("#it-bt-note").textContent = "calculando…";
+  let d; try { d = await api(`/api/intraday/${id}/curve?dataset=${$("#it-ds").value}`); } catch (e) { $("#it-bt-note").textContent = e.message; return; }
+  if (id !== itSel) return;
+  $("#it-bt-note").textContent = d.includes_oos ? `· incluye el test final (desde ${d.oos_start})` : `· sin las sesiones bajo llave (desde ${d.oos_start})`;
+  if (!itChart) itChart = LightweightCharts.createChart($("#it-chart"), opts());
+  itSeries.forEach(x => itChart.removeSeries(x)); itSeries = [];
+  const pre = Date.parse(d.pre_exam_start) / 1000, cut = Date.parse(d.oos_start) / 1000;
+  [[d.equity.filter(q => q.time < pre), "#4c8dff", "búsqueda"], [d.equity.filter(q => q.time >= pre && q.time < cut), "#ab47bc", "examen previo"],
+   [d.equity.filter(q => q.time >= cut), "#ffb74d", "test final"]].forEach(([data, color, title]) => {
+    if (data.length) { const s = itChart.addLineSeries({ color, lineWidth: 2, title }); s.setData(data); itSeries.push(s); } });
+  $("#it-oos-legend").style.display = d.includes_oos ? "inline" : "none";
+  itChart.timeScale().fitContent();
+  const hm = (mins) => { const t = 9 * 60 + 30 + mins; return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+  table($("#it-trades"), d.trades, [["Día", t => t.date], ["Acción", t => t.symbol],
+    ["Lado", t => t.side === "largo" ? '<span class="buy">largo</span>' : '<span class="sell">corto</span>'],
+    ["Entrada (hora de Nueva York)", t => hm(t.entry_min)], ["Salida", t => t.exit], ["R", t => fmt(t.r)],
+    ["Resultado", t => `<span class="${t.net >= 0 ? "up" : "down"}">${(t.net * 100).toFixed(2)}%</span>`], ["Peso en la cartera", t => pct(t.weight)]]);
+}
+window.itFinal = async (id) => {
+  if (!confirm("TEST FINAL INTRADÍA: se probará esta regla con las sesiones guardadas bajo llave.\n\nPara aprobar tiene que: ganar dinero, superar a mantener las mismas acciones sin hacer nada (Sharpe) y conservar al menos la mitad de su Sharpe de búsqueda.\n\nSolo se puede hacer UNA vez por regla. Cuantos más tests finales hagas, más fácil es que alguna apruebe por suerte.\n\n¿Continuar?")) return;
+  try { const f = await post(`/api/intraday/${id}/final-test?dataset=${$("#it-ds").value}`); itSel = id;
+    alert(f.decision === "FINAL_PASS" ? "APROBADA en el test final." : "SUSPENDE el test final.");
+  } catch (e) { alert(e.message); }
+  loadIntraBoard(); itCurve(id);
+};
+$("#it-ds").onchange = () => { itSel = null; $("#it-bt").style.display = "none";
+  $("#it-detail").innerHTML = "Pulsa una fila del ranking para ver su detalle y su curva."; loadIntraBoard(); };
+$("#it-ingest").onclick = async () => {
+  try { const r = await post("/api/intraday/ingest", { dataset: $("#it-ds").value, n_symbols: +$("#it-n").value });
+    $("#it-ingest-msg").textContent = `Empezando: ${r.symbols} acciones (${r.new} nuevas)…`; itJob = true; }
+  catch (e) { $("#it-ingest-msg").textContent = e.message; }
+};
+$("#it-start").onclick = async () => {
+  const body = { dataset: $("#it-ds").value, max_cycles: +$("#it-cycles").value };
+  try { const r = await post("/api/intraday/start", body).catch(async (e) => {
+      if (!/más recientes/.test(e.message) || !confirm(e.message + "\n\n¿Investigar igualmente?")) throw e;
+      return post("/api/intraday/start", { ...body, ignore_sync: true });
+    });
+    $("#it-msg").textContent = r.started ? "En marcha. Cargar las velas tarda unos segundos; cada ciclo prueba 80 reglas." : "Ya estaba en marcha.";
+  } catch (e) { $("#it-msg").textContent = e.message; }
+  loadIntra(false);
+};
+$("#it-stop").onclick = async () => { await post("/api/intraday/stop"); $("#it-msg").textContent = "Deteniendo…"; loadIntra(false); };
 
 // ---------------------------------------------------------------- paper trading
 let paperChart = null, paperSeries = [];

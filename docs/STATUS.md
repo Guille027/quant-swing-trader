@@ -125,6 +125,13 @@ because concurrent positions are not independent.
       the strategy's own stocks) re-judged from stored metrics
       (no new vault access), CANDIDATE/PAPER demoted and paper sessions stopped (tested)
 - [x] AI proposals: schema-validated, long-only enforced, malformed ones logged and not backtested
+- [x] Research options: horizon 5/10/20 days, up to 2 or 3 conditions, "partir de cero"; candle/calendar features
+      (all pass the causality test)
+- [x] Intraday lab (5-minute / 1-hour bars, opening-range breakout, long/short, context filters): exact fills on
+      hand-made days, no change of earlier trades when later data is removed, no edge on random walks, OOS boundary
+      fixed per dataset in the DB (new epoch only when history doubles), search never loads the vault, final test
+      once per rule and epoch (tests)
+- [ ] Intraday: more pattern families (gap fade/continuation, VWAP); simulation of intraday rules day by day
 
 ### Data manager / speed (2026-10-04)
 - [x] Download jobs validate every symbol; failures reported per symbol, never filled

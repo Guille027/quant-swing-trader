@@ -17,21 +17,25 @@ import pandas as pd
 
 from qsts.core.power import keep_awake
 from qsts.data.bars import Timeframe, nyse_schedule
-from qsts.data.quality import DataQualityError, validate_and_clean
+from qsts.data.quality import DataQualityError, QualityConfig, validate_and_clean
 from qsts.data.repository import MarketDataRepository
 
 
 FX_SERIES, FX_PAIR = "EURUSD", "EURUSD=X"  # US dollars per euro
 
 
-def ingest_one(repo: MarketDataRepository, prov, symbol: str, start, end, asset_fields: dict | None = None) -> dict:
-    raw = prov.get_bars(symbol, Timeframe.D1, pd.Timestamp(start), pd.Timestamp(end))
-    vb = validate_and_clean(raw, symbol, Timeframe.D1)
+def ingest_one(repo: MarketDataRepository, prov, symbol: str, start, end, asset_fields: dict | None = None,
+               timeframe: Timeframe = Timeframe.D1) -> dict:
+    raw = prov.get_bars(symbol, timeframe, pd.Timestamp(start), pd.Timestamp(end))
+    # a missing intraday day is kept as a gap (never filled) instead of rejecting the whole download
+    cfg = QualityConfig(max_missing_fraction=1.0, max_missing_gap=10 ** 9) if timeframe.intraday else QualityConfig()
+    vb = validate_and_clean(raw, symbol, timeframe, cfg)
     repo.upsert_asset(symbol, **(asset_fields or {}))
     n = repo.store_bars(vb, prov.name)
-    acts = prov.get_corporate_actions(symbol)
-    if len(acts):
-        repo.store_corporate_actions(symbol, acts, prov.name)
+    if timeframe is Timeframe.D1:  # splits/dividends come with the daily download
+        acts = prov.get_corporate_actions(symbol)
+        if len(acts):
+            repo.store_corporate_actions(symbol, acts, prov.name)
     return {"symbol": symbol, "bars": n, "warnings": sorted({i.code for i in vb.report.issues})}
 
 
@@ -82,7 +86,7 @@ class DataJobRunner:
 
     def start(self, kind: str, symbols: list[str], start: str = "2010-01-01", *, incremental: bool = False,
               asset_fields: dict[str, dict] | None = None, memberships: tuple | None = None,
-              bars: bool = True, earnings: bool = True) -> bool:
+              bars: bool = True, earnings: bool = True, timeframe: Timeframe = Timeframe.D1) -> bool:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
@@ -91,7 +95,7 @@ class DataJobRunner:
                                   started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
             self._thread = threading.Thread(target=self._run, daemon=True, name="datajob",
                                             args=(symbols, start, incremental, asset_fields or {}, memberships,
-                                                  bars, earnings))
+                                                  bars, earnings, Timeframe(timeframe)))
             self._thread.start()
             return True
 
@@ -106,7 +110,10 @@ class DataJobRunner:
         else:
             self.state.earnings_missing += 1
 
-    def _run(self, symbols, start, incremental, asset_fields, memberships, bars=True, earnings=True) -> None:
+    def _run(self, symbols, start, incremental, asset_fields, memberships, bars=True, earnings=True,
+             timeframe: Timeframe = Timeframe.D1) -> None:
+        intraday = timeframe.intraday
+        earnings = earnings and not intraday
         keep_awake(True)
         try:
             prov = self.provider_factory()
@@ -126,7 +133,11 @@ class DataJobRunner:
                     time.sleep(self.pause)
                     continue
                 s = start
-                if incremental:
+                if incremental and intraday:  # intraday: re-read the last days (Yahoo keeps only recent history)
+                    last = self.repo.last_bar(sym, timeframe)
+                    if last is not None:
+                        s = (last - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+                elif incremental:
                     last = self.repo.last_bar(sym)
                     if last is not None and last >= last_done:
                         self.state.up_to_date += 1
@@ -138,7 +149,7 @@ class DataJobRunner:
                         s = (last - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
                 for attempt in (1, 2):
                     try:
-                        r = ingest_one(self.repo, prov, sym, s, end, asset_fields.get(sym))
+                        r = ingest_one(self.repo, prov, sym, s, end, asset_fields.get(sym), timeframe)
                         self.state.ok += 1
                         self.log(f"{sym}: {r['bars']} barras" + (f" (avisos: {', '.join(r['warnings'])})" if r["warnings"] else ""))
                         if earnings:
@@ -156,7 +167,7 @@ class DataJobRunner:
                         self.log(f"{sym}: FALLO ({e!r})"[:200])
                 self.state.done += 1
                 time.sleep(self.pause)
-            if hasattr(prov, "get_fx") and not self._stop.is_set():
+            if hasattr(prov, "get_fx") and not self._stop.is_set() and not intraday:
                 try:  # euro/dollar rate, to show amounts of EUR accounts in euros
                     self.repo.store_fx(FX_SERIES, prov.get_fx(FX_PAIR), prov.name)
                 except Exception as e:  # noqa: BLE001 - optional

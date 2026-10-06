@@ -269,6 +269,38 @@ class ResearchCandidate(Base):
     __table_args__ = (Index("ix_candidate_version_universe", "version_id", "universe_id"),)
 
 
+class IntradayBoundary(Base):
+    """Start of the out-of-sample part of an intraday dataset, fixed the first time the dataset is used. A new epoch
+    (later boundary, fresh unseen sessions) starts only when the stored history has at least doubled."""
+    __tablename__ = "intraday_boundaries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(8), index=True)  # 5m | 1h
+    epoch: Mapped[int] = mapped_column(Integer)
+    oos_start: Mapped[datetime] = mapped_column(Date)
+    n_sessions: Mapped[int] = mapped_column(Integer)  # sessions stored when it was set
+    set_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    __table_args__ = (UniqueConstraint("dataset", "epoch", name="uq_intraday_epoch"),)
+
+
+class IntradayCandidate(Base):
+    """Every intraday rule evaluated by the intraday lab (one row per rule and universe = one trial, kept forever)."""
+    __tablename__ = "intraday_candidates"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(8), index=True)
+    universe_id: Mapped[str] = mapped_column(String(32), index=True)
+    version_id: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    origin: Mapped[str] = mapped_column(String(16))  # random | evolution
+    cycle: Mapped[int] = mapped_column(Integer)
+    rule: Mapped[dict] = mapped_column(JSON)
+    fitness: Mapped[float | None] = mapped_column(Float, index=True)
+    sr: Mapped[float | None] = mapped_column(Float)
+    metrics: Mapped[dict | None] = mapped_column(JSON)  # search-window metrics only
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    validation: Mapped[dict | None] = mapped_column(JSON)
+    final: Mapped[dict | None] = mapped_column(JSON)
+
+
 class PaperSession(Base):
     """A forward paper-trading run of ONE frozen strategy version, from the day it was started onwards."""
     __tablename__ = "paper_sessions"

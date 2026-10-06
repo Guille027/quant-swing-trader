@@ -128,3 +128,17 @@
     ranking. New causal features describe candles and calendar instead of indicators: close location in the range,
     body, wicks, NR-type range rank, range expansion, up/down streak, day of week, session of the month and sessions
     to month end (from the NYSE calendar, so no look-ahead). Every feature passes the automatic causality test.
+34. **An intraday lab, with the same discipline and its own vault.** The user asked for opening-range breakouts on
+    5-minute to 1-hour candles, long and short. Yahoo serves 5-minute bars for 60 sessions only and 1-hour bars for
+    ~730 (checked live), so intraday bars are stored and accumulate. Rules (one trade per stock and day, flat at the
+    close): range of the first 5-60 minutes, breakout by a closing bar (entry next open) or a stop order at the edge,
+    stop at the other edge or the middle, optional target in R, entry window, and context filters (range vs daily
+    ATR, opening volume vs its own past, opening gap, daily trend joined at the open via `align_higher_timeframe`).
+    Fills are conservative (stop before target in the same bar, ambiguous bars skipped or stopped, gaps fill at the
+    open; 10 bps per side; at most 10 trades a day, no leverage). Each dataset gets an out-of-sample boundary stored
+    in the database at first use (last 25% of sessions); the search never loads those sessions, a new epoch starts
+    only when the stored history has doubled. Same score (worst block of all stocks and two halves, complexity
+    penalty), same pre-exam and final-test verdict, all trials counted with the daily ones. Below 120 search / 60
+    vault sessions the lab is labelled exploratory and offers no validation or final test. Tests check exact fills
+    on hand-made days, that earlier trades do not change when later data is removed, and that close-confirmed rules
+    earn nothing on a random walk without costs. Shorts at Trading 212 need CFDs (stated in the UI, not modelled).
