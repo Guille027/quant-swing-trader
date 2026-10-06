@@ -142,3 +142,20 @@
     vault sessions the lab is labelled exploratory and offers no validation or final test. Tests check exact fills
     on hand-made days, that earlier trades do not change when later data is removed, and that close-confirmed rules
     earn nothing on a random walk without costs. Shorts at Trading 212 need CFDs (stated in the UI, not modelled).
+35. **The launcher must never wait silently on a dead port.** A start could wait 3 minutes and only point to the log
+    when port 8765 was held by a previous QSTS that stopped answering (e.g. stuck while exiting). Now: a port that is
+    held but silent is cleared if (and only if) a python process holds it, anything else is named to the user; an
+    older version is closed completely (window and research), not only its server; the server thread is watched,
+    so a failed start is reported at once with its reason and the last log lines in the window; local checks
+    bypass system proxies; a start while the previous QSTS is still saving its data copy waits for it; the launcher
+    process exits hard once everything is saved, so it can never linger holding the port or the database.
+36. **More intraday patterns and a forward test, same rules.** Two families join the opening-range breakout: the
+    opening gap (fade back to yesterday's close or follow it; entry at a later bar's open because the gap is only
+    known after the open; stop in daily ATRs) and the VWAP (follow a cross, or bet on the return after a stretch;
+    the VWAP uses bars up to the signal only). All share the conservative exit simulation and the lab's scoring;
+    their trials are counted and every family passes the hand-made-day, no-look-ahead and random-walk tests.
+    Existing ORB rules keep their identity. A frozen rule can be simulated day by day on sessions after it was
+    started (a genuine forward test): each finished session is recorded once in an append-only journal (later data
+    revisions never change it), flat every night so no overnight currency effect, and sent by Telegram. While the
+    app is open, stored intraday bars are refreshed after each session, which is what lets the 60-day 5-minute
+    history grow.

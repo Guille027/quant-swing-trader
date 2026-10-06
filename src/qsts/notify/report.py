@@ -133,3 +133,34 @@ def daily_messages(v: dict) -> list[str]:
         s.append("\n<i>Simulación con dinero ficticio: tú decides si operas.</i>")
     out.append("\n".join(s))
     return out
+
+
+# ---------------------------------------------------------------------- intraday paper simulation
+def intraday_day_message(view: dict, day: dict) -> str:
+    """One recorded session of the intraday paper simulation (`day`: journal row as a dict with its trades)."""
+    from qsts.data.bars import nyse_schedule
+    cur = view.get("currency", "EUR")
+    d = pd.Timestamp(day["day"])
+    opens = nyse_schedule(d, d)["market_open"]
+    open_t = opens.iloc[0] if len(opens) else None
+    ds = {"5m": "velas de 5 min", "1h": "velas de 1 hora"}.get(view.get("dataset"), view.get("dataset"))
+    lines = [f"📊 <b>Simulación intradía</b> · {escape(ds)} · {day_name(d.tz_localize(TZ) if d.tz is None else d)}",
+             f"Regla: <i>{escape(view.get('rule', ''))}</i>"]
+    trades = day.get("trades") or []
+    if not trades:
+        lines.append("Hoy la regla no ha encontrado ninguna operación.")
+    else:
+        lines.append(f"{len(trades)} operación(es):")
+        for t in trades:
+            at = (open_t + pd.Timedelta(minutes=t["entry_min"])).tz_convert(TZ).strftime("%H:%M") if open_t is not None else "?"
+            icon = "🟢" if t["net"] >= 0 else "🔴"
+            lines.append(f"{icon} {escape(t['symbol'])} {t['side']} a las {at} → {escape(t['exit'])} "
+                         f"{pct(t['net'], 2)} ({signed(t['pnl'], cur)})")
+    before = day["equity"] - day["pnl"]
+    lines.append(f"<b>Resultado del día: {signed(day['pnl'], cur)}</b> ({pct(day['pnl'] / before if before else 0, 2)})"
+                 + (f" · mantener las mismas acciones: {pct(day['passive'], 2)}" if day.get("passive") is not None else ""))
+    lines.append(f"Cuenta simulada: {money(day['equity'], cur)} ({pct(view.get('return'), 2)} desde el "
+                 f"{escape(str(view.get('start')))}, {view.get('n_days')} sesiones)")
+    lines.append("<i>Calculado después del cierre con las velas de Yahoo: muestra lo que habría hecho la regla, "
+                 "no son señales en directo. Nada de esto es una recomendación de inversión.</i>")
+    return "\n".join(lines)

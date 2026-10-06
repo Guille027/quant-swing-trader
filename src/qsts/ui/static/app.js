@@ -445,7 +445,7 @@ const IT_ORIGIN = { random: "nueva", evolution: "mejorada" };
 const DSNAME = { "5m": "5 minutos", "1h": "1 hora" };
 const daysSince = (d) => d ? (Date.now() - Date.parse(d)) / 864e5 : 0;
 let itSel = null, itRows = [], itChart = null, itSeries = [], itPolls = 0, itJob = false, itRunning = null, itDsSet = false;
-function openIntra() { loadIntra(true); autoTimer = setInterval(() => loadIntra(false), 3000); }
+function openIntra() { loadIntra(true); loadIntraPaper(true); autoTimer = setInterval(() => loadIntra(false), 3000); }
 async function loadIntra(full) {
   let st, job;
   try { [st, job] = await Promise.all([api("/api/intraday/status"), api("/api/data/job")]); }
@@ -455,7 +455,7 @@ async function loadIntra(full) {
   const mine = job.running && String(job.kind || "").startsWith("intraday");
   $("#it-ingest").disabled = job.running;
   if (job.running) $("#it-ingest-msg").innerHTML = mine ? `Descargando <b>${esc(job.current || "")}</b> · ${job.done}/${job.total}` : "Hay otra descarga en marcha (en 1 · Datos).";
-  else if (itJob) { $("#it-ingest-msg").textContent = "Terminado: " + (job.message || ""); full = true; }
+  else if (itJob) { $("#it-ingest-msg").textContent = "Terminado: " + (job.message || ""); full = true; loadIntraPaper(true); }
   itJob = mine;
   dl($("#it-state"), { "Estado": st.running ? `<span class="good">investigando (velas de ${DSNAME[st.dataset] || esc(st.dataset)})…</span>` : "parado",
     "Fase": esc(st.phase), "Probadas (esta sesión)": st.session_trials ?? 0,
@@ -475,7 +475,7 @@ async function loadIntraData() {
 }
 async function loadIntraBoard() {
   let lb; const ds = $("#it-ds").value;
-  try { lb = await api(`/api/intraday/leaderboard?dataset=${ds}&limit=25`); }
+  try { lb = await api(`/api/intraday/leaderboard?dataset=${ds}&limit=25&family=${$("#it-family").value}`); }
   catch (e) { $("#it-note").textContent = e.message; table($("#it-board"), [], []); $("#it-passive").innerHTML = ""; $("#it-best").style.display = "none"; return; }
   if (ds !== $("#it-ds").value) return;
   const p = lb.periods, n = lb.sessions, c = lb.costs;
@@ -487,6 +487,7 @@ async function loadIntraBoard() {
     (lb.can_validate ? "" : `<br><span class="bad">Orientativo:</span> para validar hacen falta ${lb.min_sessions.search} sesiones de búsqueda (hay ${n.search}). Actualiza las velas a menudo: la historia guardada crece.`) +
     (lb.can_final ? "" : ` El test final necesita ${lb.min_sessions.oos} sesiones bajo llave (hay ${n.oos}).`) +
     ` <b>Consistencia</b> = Sharpe del peor tramo y de la peor mitad de las acciones. <b>Pulsa una fila para ver su curva.</b>`;
+  $("#it-family-counts").textContent = "Probadas: " + Object.entries(lb.by_family || {}).map(([f, k]) => `${lb.family_names[f]} ${k}`).join(" · ");
   const pv = lb.passive || {};
   const kp = (l, v, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s || ""}</div></div>`;
   $("#it-passive").innerHTML = kp("Rentabilidad", pct(pv.total_return)) + kp("Sharpe", fmt(pv.sharpe)) + kp("Caída máx.", pct(pv.max_drawdown));
@@ -499,7 +500,7 @@ async function loadIntraBoard() {
       (lb.can_final ? `<button onclick="itFinal('${val.id}')">Hacer el test final</button>` : '<p class="muted">El test final necesita más sesiones bajo llave.</p>'); }
   else cb.style.display = "none";
   table($("#it-board"), itRows, [["#", r => itRows.indexOf(r) + 1],
-    ["Regla", r => `<span class="badge">${IT_ORIGIN[r.origin] || esc(r.origin)}</span>${esc(r.rules)}`],
+    ["Regla", r => `<span class="badge">${esc(r.family_name || "rango de apertura")}</span>${esc(r.rules)}`],
     ["Consistencia", r => fmt(r.consistency, 3)], ["Sharpe", r => fmt(r.sharpe)], ["Rentabilidad", r => pct(r.total_return)],
     ["Caída máx.", r => pct(r.max_drawdown)], ["Operaciones", r => r.n_trades], ["Ganadoras", r => pct(r.win_rate)],
     ["Media/operación", r => r.avg_trade == null ? "—" : (r.avg_trade * 100).toFixed(2) + "%"], ["Cortos", r => pct(r.short_share)],
@@ -515,8 +516,14 @@ async function loadIntraBoard() {
   const cur = itRows.find(r => r.id === itSel); if (cur) itDetail(cur);
 }
 function itDetail(r) {
+  const keep = $("#itp-cap") ? [$("#itp-cap").value, $("#itp-cur").value] : null;  // the board refreshes while typing
   const blocks = (r.blocks || []).map(b => `<tr><td>${b.start} → ${b.end}</td><td>${fmt(b.sharpe)}</td><td>${pct(b.return)}</td><td>${b.trades}</td></tr>`).join("");
-  let h = `<p><b>${esc(r.rules)}</b></p><p class="muted">Id ${r.id} · complejidad ${r.complexity ?? 0} (filtros + objetivo) · opera ${pct(r.days_traded)} de los días · ${pct(r.short_share)} en corto</p>
+  let h = `<p><span class="badge">${esc(r.family_name || "")}</span><b>${esc(r.rules)}</b></p>
+    <p class="muted">Id ${r.id} · ${IT_ORIGIN[r.origin] || esc(r.origin)} · complejidad ${r.complexity ?? 0} (ajustes extra) · opera ${pct(r.days_traded)} de los días · ${pct(r.short_share)} en corto</p>
+    <p><label>Capital <input id="itp-cap" type="number" min="100" step="1" style="width:110px"></label>
+      <select id="itp-cur"><option value="EUR">€</option><option value="USD">$</option></select>
+      <button onclick="itPaperStart('${r.id}')">Simular día a día →</button>
+      <span class="muted small">con sesiones nuevas, desde la próxima apertura${["VALIDATED_PASS", "FINAL_PASS"].includes(r.status) ? "" : " · ojo: esta regla aún no ha pasado la validación"}</span></p>
     <h4>Los 3 tramos de la búsqueda</h4><table><tr><th>Periodo</th><th>Sharpe</th><th>Rentabilidad</th><th>Operaciones</th></tr>${blocks}</table>` +
     (r.halves && r.halves.length ? `<p class="muted">Con cada mitad de las acciones (peor tramo): ` +
       r.halves.map(x => `mitad ${x.name}: <b>${fmt(x.consistency, 3)}</b> (${x.n_trades} operaciones)`).join(" · ") + `.</p>` : "");
@@ -542,7 +549,56 @@ function itDetail(r) {
       Object.entries(f.checks || {}).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${FC[k] || k}</li>`).join("") + "</ul>";
   }
   $("#it-detail").classList.remove("muted"); $("#it-detail").innerHTML = h;
+  let cap = ""; try { cap = localStorage.getItem("itp-cap") || ""; } catch (e) { /* storage unavailable */ }
+  $("#itp-cap").value = keep ? keep[0] : (cap || "2000");
+  if (keep) $("#itp-cur").value = keep[1];
 }
+window.itPaperStart = async (id) => {
+  const cap = +$("#itp-cap").value, cur = $("#itp-cur").value;
+  if (!(cap >= 100)) { alert("Escribe el capital (al menos 100)."); return; }
+  if (!confirm(`Simular esta regla día a día con ${fmt(cap)} ${cur === "EUR" ? "€" : "$"}, empezando en la próxima apertura.\n\n` +
+    "Cada noche (con la app abierta) se descargan las velas del día y se calcula lo que habría hecho la regla. No opera ni envía nada a ningún bróker. ¿Continuar?")) return;
+  try { localStorage.setItem("itp-cap", String(cap)); } catch (e) { /* storage unavailable */ }
+  try { await post("/api/intraday/paper/start", { rid: id, dataset: $("#it-ds").value, capital: cap, currency: cur }); }
+  catch (e) { alert(e.message); return; }
+  loadIntraPaper(true); $("#itp-card").scrollIntoView({ behavior: "smooth" });
+};
+let itpChart = null, itpSeries = null;
+async function loadIntraPaper(refresh) {
+  let v; try { v = await api(`/api/intraday/paper?refresh=${refresh ? "true" : "false"}`); } catch (e) { $("#itp-body").textContent = e.message; return; }
+  $("#itp-stop").style.display = v.active ? "inline-block" : "none";
+  if (!v.id) { $("#itp-body").innerHTML = "Aún no hay ninguna. Elige una regla del ranking, ábrela y pulsa <b>Simular día a día</b>."; $("#itp-more").style.display = "none"; return; }
+  const sym = v.currency === "USD" ? " $" : " €";
+  const mon = (x) => x == null ? "—" : x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + sym;
+  const sgn = (x) => (x >= 0 ? "+" : "") + mon(x);
+  $("#itp-body").classList.remove("muted");
+  $("#itp-body").innerHTML = `${v.active ? '<span class="good">En marcha</span>' : `<span class="muted">Detenida (${esc(v.stopped_at || "")})</span>`} · velas de ${DSNAME[v.dataset] || esc(v.dataset)} · ` +
+    `<span class="badge">${esc(v.family)}</span>${esc(v.rule)}<br>Empieza en la sesión del <b>${v.start}</b> con ${mon(v.capital)} · ${v.symbols} acciones.` +
+    (v.n_days ? "" : " Todavía no ha pasado ninguna sesión completa.") +
+    (v.days_waiting ? ` <span class="warn">Faltan las velas de ${v.days_waiting} sesión(es): se descargan solas por la noche con la app abierta (o pulsa «Descargar / actualizar velas»).</span>` : "") +
+    (v.auto_state ? ` <span class="muted small">Automático: ${esc(v.auto_state)}.</span>` : "");
+  $("#itp-more").style.display = v.n_days ? "block" : "none";
+  if (!v.n_days) return;
+  const kp = (l, x, s) => `<div class="kpi"><div class="l">${l}</div><div class="v">${x}</div><div class="s">${s || ""}</div></div>`;
+  $("#itp-kpis").innerHTML = kp("Cuenta simulada", mon(v.equity), sgn(v.pnl)) + kp("Rentabilidad", pct(v.return), `mismas acciones sin hacer nada: ${pct(v.passive_return)}`) +
+    kp("Sesiones", v.n_days, `última: ${v.last_day}`) + kp("Operaciones", v.n_trades, `ganadoras: ${pct(v.win_rate)}`);
+  if (!itpChart) itpChart = LightweightCharts.createChart($("#itp-chart"), opts());
+  if (itpSeries) itpChart.removeSeries(itpSeries);
+  itpSeries = itpChart.addLineSeries({ color: "#4c8dff", lineWidth: 2, title: "cuenta" }); itpSeries.setData(v.equity_curve);
+  itpChart.timeScale().fitContent();
+  const hm = (mins) => { const t = 9 * 60 + 30 + mins; return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+  table($("#itp-last"), v.last_trades, [["Acción", t => esc(t.symbol)], ["Lado", t => t.side === "largo" ? '<span class="buy">largo</span>' : '<span class="sell">corto</span>'],
+    ["Entrada (hora de Nueva York)", t => hm(t.entry_min)], ["Salida", t => esc(t.exit)], ["Importe", t => mon(t.amount)],
+    ["Resultado", t => `<span class="${t.net >= 0 ? "up" : "down"}">${(t.net * 100).toFixed(2)}% (${sgn(t.pnl)})</span>`]]);
+  table($("#itp-days"), v.days, [["Sesión", d => d.day], ["Operaciones", d => d.trades], ["Resultado", d => `<span class="${d.pnl >= 0 ? "up" : "down"}">${sgn(d.pnl)}</span>`],
+    ["Cuenta", d => mon(d.equity)], ["Mantener las acciones", d => pct(d.passive)]]);
+}
+$("#itp-stop").onclick = async () => {
+  if (!confirm("¿Detener la simulación intradía? Lo ya registrado se conserva.")) return;
+  try { await post("/api/intraday/paper/stop"); } catch (e) { alert(e.message); }
+  loadIntraPaper(false);
+};
+$("#it-family").onchange = () => loadIntraBoard();
 async function itCurve(id) {
   $("#it-bt").style.display = "block"; $("#it-bt-note").textContent = "calculando…";
   let d; try { d = await api(`/api/intraday/${id}/curve?dataset=${$("#it-ds").value}`); } catch (e) { $("#it-bt-note").textContent = e.message; return; }

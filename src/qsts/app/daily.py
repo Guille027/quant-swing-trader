@@ -36,9 +36,17 @@ class DailyReporter:
     def __init__(self, sf, paper: Callable[[], object], telegram: Callable[[], object | None],
                  data_runner: Callable[[], object] | None = None, last_bar: Callable[[str], pd.Timestamp | None] | None = None,
                  benchmark: str = "SPY", delay_min: int = 45, poll_seconds: float = 120.0,
-                 log: Callable[[str], None] | None = None, blocked: Callable[[], str | None] | None = None):
-        """`blocked()`: a reason not to send now (e.g. newer data from another computer waits to be loaded)."""
+                 log: Callable[[str], None] | None = None, blocked: Callable[[], str | None] | None = None,
+                 intraday_paper: Callable[[], object] | None = None,
+                 intraday_data: Callable[[], dict] | None = None,
+                 intraday_update: Callable[[str, list[str]], bool] | None = None):
+        """`blocked()`: a reason not to send now (e.g. newer data from another computer waits to be loaded).
+        Intraday (optional): `intraday_data()` -> {dataset: (symbols with bars, newest bar)}; `intraday_update(dataset,
+        symbols)` starts their download; `intraday_paper()` -> the intraday paper simulation."""
         self.sf, self.paper, self.telegram = sf, paper, telegram
+        self.intraday_paper, self.intraday_data, self.intraday_update = intraday_paper, intraday_data, intraday_update
+        self.intraday_state = "se comprueba en unos segundos"
+        self._intraday_fresh: dict = {}  # "*" -> latest session the stored intraday bars are known to cover
         self.data_runner, self.last_bar, self.benchmark = data_runner, last_bar, benchmark
         self.delay_min, self.poll, self.blocked = delay_min, poll_seconds, blocked
         self.logs: deque[str] = deque(maxlen=50)
@@ -152,7 +160,77 @@ class DailyReporter:
             except Exception as e:  # noqa: BLE001 - the reporter must never take the app down
                 self._set(f"error: {e!r}"[:200])
                 self.log(f"Aviso diario: error {e!r}"[:300])
+            try:
+                self.intraday_tick()
+            except Exception as e:  # noqa: BLE001
+                self.intraday_state = f"error: {e!r}"[:200]
+                self.log(f"Intradía: error {e!r}"[:300])
             self._stop.wait(self.poll)
+
+    # ------------------------------------------------------------------ intraday bars + intraday simulation
+    def intraday_tick(self, now: pd.Timestamp | None = None) -> str:
+        """Keep the stored intraday bars up to date (Yahoo keeps 5-minute bars only 60 days: downloading them every
+        day while the app is open is what lets the history grow), then record the intraday simulation's new
+        sessions and send each one by Telegram."""
+        if self.intraday_data is None:
+            return self.intraday_state
+        from qsts.research.intraday import session_dates
+        now = now or pd.Timestamp.now(tz="UTC")
+        due = due_session(now, self.delay_min)
+        if self._intraday_fresh.get("*") != due:  # bars not yet known to cover the latest session
+            runner = self.data_runner() if self.data_runner else None
+            waiting = False
+            for ds, (symbols, newest) in sorted((self.intraday_data() or {}).items()):
+                have = session_dates(pd.DatetimeIndex([newest]))[0] if newest is not None else None
+                if not symbols or (have is not None and have >= due):
+                    continue
+                key = ("intraday", ds, due.date())
+                n, last = self._attempts.get(key, (0, None))
+                if n >= MAX_UPDATE_ATTEMPTS:
+                    continue  # Yahoo has nothing newer for this session: try again with the next one
+                if runner is not None and runner.state.running:
+                    self.intraday_state = "esperando a que termine otra descarga"
+                    return self.intraday_state
+                if last is not None and now - last < pd.Timedelta(minutes=RETRY_MINUTES):
+                    waiting = True
+                    continue
+                if self.intraday_update is not None and self.intraday_update(ds, list(symbols)):
+                    self._attempts[key] = (n + 1, now)
+                    self.log(f"Descargando las velas de {ds} del {due.date()} ({len(symbols)} acciones)")
+                    self.intraday_state = f"descargando las velas de {ds} del {due.date()}"
+                    return self.intraday_state
+                waiting = True
+            if not waiting:
+                self._intraday_fresh["*"] = due
+        ip = self.intraday_paper() if self.intraday_paper else None
+        if ip is None or ip.active() is None:
+            self.intraday_state = "velas al día" if self._intraday_fresh.get("*") == due else "actualizando velas"
+            return self.intraday_state
+        ip.update()
+        view = ip.view(refresh=False)
+        ps = ip.active()
+        pending = [d for d in ip.journal(ps.id) if d.notified_at is None]
+        tg = self.telegram()
+        why = self.blocked() if self.blocked is not None else None
+        if not pending or tg is None or why:
+            self.intraday_state = ("simulación al día" if not pending else
+                                   "Telegram no configurado" if tg is None else f"en espera: {why}")
+            return self.intraday_state
+        from qsts.notify.report import intraday_day_message
+        for d in pending[:-3]:  # older sessions (app closed for days) are in the app; only the last 3 are sent
+            ip.mark_notified(d.id)
+        for d in pending[-3:]:
+            try:
+                tg.send(intraday_day_message(view, {"day": str(d.day), "equity": d.equity, "pnl": d.pnl,
+                                                    "passive": d.passive, "trades": d.trades}))
+            except TelegramError as e:
+                self.log(f"Intradía: aviso NO enviado: {e}")
+                self.intraday_state = f"error al enviar: {e}"
+                return self.intraday_state
+            ip.mark_notified(d.id)
+            self.log(f"Intradía: resultado del {d.day} enviado por Telegram")
+        self.intraday_state = "simulación al día; aviso enviado"
+        return self.intraday_state
 
     def stop(self) -> None:
         self._stop.set()

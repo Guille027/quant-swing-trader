@@ -8,19 +8,24 @@ import pytest
 from qsts.data.bars import Timeframe, nyse_schedule, to_canonical
 from qsts.db import models as m
 from qsts.research import intraday as itd
-from qsts.research.intraday import IntradayLab, ORBRule, prepare_symbol, simulate_symbol
+from qsts.research.intraday import GapRule, IntradayLab, ORBRule, VWAPRule, prepare_symbol, simulate_symbol
 
 
-def synthetic_intraday(start, end, seed=0, bar_min=5, vol=0.002):
-    """Random-walk bars for every NYSE session in [start, end] (half days included)."""
+def synthetic_intraday(start, end, seed=0, bar_min=5, vol=0.002, gap_vol=0.006):
+    """Random-walk bars for every NYSE session in [start, end] (half days included), with overnight gaps."""
     rng = np.random.default_rng(seed)
     sched = nyse_schedule(start, end)
     stamps = []
     for o, c in zip(sched["market_open"], sched["market_close"]):
         stamps.append(pd.date_range(o, c, freq=f"{bar_min}min", inclusive="left"))
     idx = stamps[0].append(stamps[1:]) if len(stamps) > 1 else stamps[0]
-    close = 100 * np.exp(np.cumsum(rng.normal(0, vol, len(idx))))
-    open_ = np.r_[100.0, close[:-1]]
+    eps = rng.normal(0, vol, len(idx))
+    jump = np.zeros(len(idx))
+    first = np.r_[0, np.cumsum([len(x) for x in stamps])[:-1]]
+    jump[first] = rng.normal(0, gap_vol, len(first))  # the open differs from the previous close
+    log_close = np.log(100) + np.cumsum(eps + jump)
+    close = np.exp(log_close)
+    open_ = np.exp(log_close - eps)
     hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, vol / 3, len(idx))))
     lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, vol / 3, len(idx))))
     vol_ = rng.integers(1_000, 5_000, len(idx)).astype(float)
@@ -97,6 +102,49 @@ def test_hand_made_breakouts_follow_the_rules_exactly():
                                ORBRule(range_min=15, direction="long", cutoff_min=15), 5, 0.0)) == 0
 
 
+GAP_DAY = [(102, 102.3, 101.8, 102.0), (102.0, 102.1, 101.7, 101.8), (101.8, 101.9, 101.2, 101.4),  # opens +2%
+           (101.4, 101.5, 100.5, 100.6),   # entry at this open (15 min)
+           (100.6, 100.7, 99.8, 100.0)]    # back to yesterday's close (100): the gap is closed
+
+
+def test_hand_made_gap_day():
+    flat = [(100, 100, 100, 100)] * 2
+    sd = prepare_symbol(pd.concat([_day("2025-03-03", flat), _day("2025-03-04", GAP_DAY)]), None, 5)
+    assert sd.gap[1] == pytest.approx(0.02)
+    rule = GapRule(mode="fade", min_gap=0.01, entry_min=15, stop_atr=0.5, target="fill")
+    assert len(simulate_symbol(sd, rule, 5, 0.0)) == 0  # without the daily ATR there is no stop: no trade
+    sd.atr_pct[:] = 0.02
+    t = simulate_symbol(sd, rule, 5, 0.0)
+    assert len(t) == 1 and t["direction"].iloc[0] == -1 and t["entry_min"].iloc[0] == 15 and t["exit"].iloc[0] == 2
+    assert t["net"].iloc[0] == pytest.approx((101.4 - 100.0) / 101.4)
+    assert t["r"].iloc[0] == pytest.approx(1.4 / (0.5 * 0.02 * 101.4))
+    go = simulate_symbol(sd, GapRule(mode="go", min_gap=0.01, entry_min=15, stop_atr=0.5), 5, 0.0)
+    assert go["direction"].iloc[0] == 1 and go["r"].iloc[0] == pytest.approx(-1.0) and go["exit"].iloc[0] == 1
+    assert len(simulate_symbol(sd, GapRule(mode="go", min_gap=0.01, entry_min=15, confirm=True), 5, 0.0)) == 0
+    assert len(simulate_symbol(sd, GapRule(mode="fade", min_gap=0.03), 5, 0.0)) == 0  # gap too small
+    assert len(simulate_symbol(sd, GapRule(mode="fade", min_gap=0.01, side="down"), 5, 0.0)) == 0
+    late = GapRule(mode="fade", min_gap=0.01, entry_min=30, target="fill")  # the gap closed before the entry
+    assert len(simulate_symbol(sd, late, 5, 0.0)) == 0
+
+
+VWAP_DAY = [(100, 100.2, 99.8, 100.0), (100.0, 100.1, 99.5, 99.6), (99.6, 99.7, 99.3, 99.4),
+            (99.4, 100.0, 99.4, 99.9),     # closes back above the VWAP
+            (99.95, 100.6, 99.9, 100.5)]   # entry at this open, then flat at 100.5
+
+
+def test_hand_made_vwap_cross():
+    sd = prepare_symbol(_day("2025-03-03", VWAP_DAY), None, 5)
+    sd.atr_pct[:] = 0.02
+    tp = np.array([(h + lo + c) / 3 for _, h, lo, c in VWAP_DAY])
+    vwap = np.cumsum(tp) / np.arange(1, 6)  # equal volumes
+    assert VWAP_DAY[3][3] > vwap[3] and VWAP_DAY[2][3] <= vwap[2]  # the cross happens in bar 3
+    t = simulate_symbol(sd, VWAPRule(mode="cross", direction="long", start_min=15, stop_atr=0.5), 5, 0.0)
+    assert len(t) == 1 and t["entry_min"].iloc[0] == 20 and t["exit"].iloc[0] == 0
+    assert t["net"].iloc[0] == pytest.approx((100.5 - 99.95) / 99.95)
+    assert len(simulate_symbol(sd, VWAPRule(mode="cross", direction="long", start_min=30), 5, 0.0)) == 0  # too early
+    assert len(simulate_symbol(sd, VWAPRule(mode="cross", direction="short", start_min=15), 5, 0.0)) == 0
+
+
 def test_a_day_still_in_progress_is_not_a_whole_day():
     bars = _two_days()
     partial = bars[bars.index < pd.Timestamp("2025-03-04 17:00", tz="UTC")]  # second day cut at 12:00 New York
@@ -144,13 +192,31 @@ def test_trades_do_not_depend_on_later_data():
     cut = pd.Timestamp("2025-04-15", tz="UTC")
     rules = [ORBRule(), ORBRule(confirm="touch", stop="mid", target_r=2.0, min_rel_vol=1.0),
              ORBRule(range_min=30, direction="long", trend="with", min_range_atr=0.1, gap_min=0.0),
-             ORBRule(range_min=5, direction="short", trend="against", max_range_atr=1.0, gap_max=0.0)]
+             ORBRule(range_min=5, direction="short", trend="against", max_range_atr=1.0, gap_max=0.0),
+             GapRule(mode="fade", min_gap=0.001, target="fill", confirm=True), GapRule(mode="go", min_gap=0.001, target="2R"),
+             VWAPRule(mode="cross", target="1R", trend="with"), VWAPRule(mode="revert", stretch_atr=0.25, target="vwap")]
     full_sd = prepare_symbol(bars, daily, 5)
     cut_sd = prepare_symbol(bars[bars.index < cut], daily[daily.index < cut], 5)
     for rule in rules:
         a = simulate_symbol(full_sd, rule, 5, 10.0)
         b = simulate_symbol(cut_sd, rule, 5, 10.0)
+        assert len(a) > 20, rule
         pd.testing.assert_frame_equal(a[a["session"] < cut].reset_index(drop=True), b.reset_index(drop=True))
+
+
+def test_gap_and_vwap_rules_have_no_edge_on_a_random_walk():
+    frames = [prepare_symbol(synthetic_intraday("2024-01-02", "2025-06-30", seed=30 + i, vol=0.003),
+                             synthetic_daily_frame("2023-01-02", "2025-06-30", seed=60 + i), 5) for i in range(4)]
+    rules = [GapRule(mode=mo, min_gap=0.002, entry_min=e, target=tg) for mo, e, tg in
+             itertools.product(["fade", "go"], [5, 30], ["close", "1R"])]
+    rules += [GapRule(mode="fade", min_gap=0.002, target="fill")]
+    rules += [VWAPRule(mode=mo, start_min=st, stretch_atr=0.25, target=tg) for mo, st, tg in
+              itertools.product(["cross", "revert"], [15, 60], ["close", "2R"])]
+    rules += [VWAPRule(mode="revert", stretch_atr=0.25, target="vwap")]
+    for rule in rules:
+        net = pd.concat([simulate_symbol(sd, rule, 5, 0.0) for sd in frames])["net"]
+        assert len(net) > 300, rule
+        assert abs(net.mean() / net.std() * np.sqrt(len(net))) < 3.0, rule
 
 
 def test_no_edge_on_a_random_walk_without_costs():
@@ -197,7 +263,10 @@ def test_search_cycle_stores_every_trial_and_final_test_runs_once(sf):
     lb = lab.leaderboard()
     assert lb["rows"] and lb["n_trials"] >= n and lb["sessions"]["oos"] == len(lab.oos_sessions)
     row = lb["rows"][0]
-    assert "Rango de los primeros" in row["rules"] and row["final"] is None
+    assert row["family"] in itd.FAMILIES and len(row["rules"]) > 40 and row["final"] is None
+    assert sum(lb["by_family"].values()) == lb["n_trials_here"] == n
+    only_gap = lab.leaderboard(family="gap")["rows"]
+    assert all(r["family"] == "gap" for r in only_gap)
     curve = lab.curve(row["id"])
     assert curve["includes_oos"] is False and pd.Timestamp(curve["equity"][-1]["time"], unit="s", tz="UTC") < lab.oos_start
     with pytest.raises(ValueError, match="validación"):
@@ -221,12 +290,20 @@ def test_search_cycle_stores_every_trial_and_final_test_runs_once(sf):
 def test_random_and_mutated_rules_stay_inside_the_space(sf):
     bars, daily = universe(4, "2025-01-02", "2025-06-30")
     lab = IntradayLab(sf, "5m", bars, daily, seed=3)
-    space = {**itd.COMMON, **itd.SPACE["5m"]}
-    for _ in range(50):
+    seen = set()
+    for _ in range(150):
         r = lab.mutate(lab.random_rule())
-        assert r.valid() and all(getattr(r, k) in v for k, v in space.items())
+        seen.add(r.family)
+        space = itd.family_space(r.family, "5m")
+        assert r.valid() and all(getattr(r, k) in v for k, v in space.items()) and r == r.canonical()
         assert itd.rule_from_dict(r.to_dict()) == r and r.version_id == itd.rule_from_dict(r.to_dict()).version_id
+    assert seen == {"orb", "gap", "vwap"}
     assert ORBRule().complexity() == 0 and ORBRule(target_r=2.0, trend="with").complexity() == 2
+    # the first ORB rules (stored before other families existed) keep their identity
+    assert "family" not in ORBRule().to_dict() and itd.rule_from_dict(ORBRule().to_dict()) == ORBRule()
+    assert not GapRule(mode="go", target="fill").valid() and not VWAPRule(mode="cross", target="vwap").valid()
+    only = IntradayLab(sf, "5m", bars, daily, seed=3, families=("gap",))
+    assert {only.random_rule().family for _ in range(20)} == {"gap"}
 
 
 def test_intraday_endpoints(tmp_path):
@@ -278,3 +355,101 @@ def test_intraday_endpoints(tmp_path):
     assert c.get(f"/api/intraday/{rid}/curve?dataset=5m").json()["equity"]
     assert c.post(f"/api/intraday/{rid}/final-test?dataset=5m").status_code == 400
     assert c.get("/api/intraday/nope/curve?dataset=5m").status_code == 404
+    fam = c.get("/api/intraday/leaderboard?dataset=5m&family=gap").json()
+    assert all(r["family"] == "gap" for r in fam["rows"]) and set(fam["by_family"]) == {"orb", "gap", "vwap"}
+    # day-by-day simulation of a frozen rule
+    assert c.get("/api/intraday/paper").json()["active"] is False
+    assert c.post("/api/intraday/paper/start", json={"rid": "nope", "dataset": "5m"}).status_code == 404
+    assert c.post("/api/intraday/paper/start", json={"rid": rid, "dataset": "5m", "capital": 2363}).json()["session_id"]
+    v = c.get("/api/intraday/paper").json()
+    assert v["active"] is True and v["capital"] == 2363 and v["symbols"] == 3 and v["n_days"] == 0
+    assert c.post("/api/intraday/paper/start", json={"rid": rid, "dataset": "5m"}).status_code == 400  # one at a time
+    assert c.post("/api/intraday/paper/stop").json() == {"stopped": True}
+    assert c.post("/api/intraday/paper/stop").status_code == 400
+
+
+# ---------------------------------------------------------------------- day-by-day simulation of a frozen rule
+def _paper_data(end="2025-06-30", n=5):
+    bars = {f"S{i}": synthetic_intraday("2025-01-02", end, seed=70 + i) for i in range(n)}
+    daily = {f"S{i}": synthetic_daily_frame("2024-01-02", end, seed=80 + i) for i in range(n)}
+    return bars, daily
+
+
+def test_intraday_paper_records_new_sessions_once(sf):
+    from qsts.execution.intraday_paper import IntradayPaper
+    from qsts.execution.paper import PaperError
+    state = {"data": _paper_data("2025-05-30")}
+    paper = IntradayPaper(sf, lambda ds, syms: ({s: state["data"][0][s] for s in syms}, state["data"][1]))
+    rule = ORBRule(range_min=15, direction="both").to_dict()
+    with pytest.raises(PaperError):
+        paper.start(rule, "5m", ["S0"], 50)  # capital too small
+    sid = paper.start(rule, "5m", [f"S{i}" for i in range(5)], 2363, "EUR", now=pd.Timestamp("2025-05-15 15:00", tz="UTC"))
+    with pytest.raises(PaperError):
+        paper.start(rule, "5m", ["S0"], 1000)  # one at a time
+    ps = paper.active()
+    assert ps.id == sid and str(ps.start) == "2025-05-16"  # 15:00 UTC: that day's session had already opened
+    first = paper.update()
+    assert [str(d.day) for d in first][0] == "2025-05-16" and str(first[-1].day) == "2025-05-30"
+    eq = 2363.0
+    for d in first:  # the account moves only by that day's trades
+        assert d.equity == pytest.approx(eq + d.pnl) and sum(t["amount"] for t in d.trades) <= eq * 1.0001
+        assert d.pnl == pytest.approx(sum(t["pnl"] for t in d.trades))
+        eq = d.equity
+    assert paper.update() == []  # nothing new: nothing recorded twice
+    # data revised afterwards (re-download) + new sessions: recorded days stay as they were, only new ones are added
+    revised = _paper_data("2025-06-30")
+    revised[0]["S0"] = revised[0]["S0"] * 1.01
+    state["data"] = revised
+    more = paper.update()
+    assert str(more[0].day) == "2025-06-02" and str(more[-1].day) == "2025-06-30"
+    j = paper.journal(sid)
+    assert [(d.day, d.equity) for d in j[:len(first)]] == [(d.day, d.equity) for d in first]
+    assert more[0].equity == pytest.approx(first[-1].equity + more[0].pnl)
+    v = paper.view(now=pd.Timestamp("2025-07-01 12:00", tz="UTC"))
+    assert v["active"] and v["n_days"] == len(j) and v["equity"] == pytest.approx(j[-1].equity)
+    assert v["return"] == pytest.approx(j[-1].equity / 2363 - 1) and v["days_waiting"] == 0
+    assert v["equity_curve"][0]["value"] == 2363 and len(v["equity_curve"]) == len(j) + 1
+    paper.stop()
+    assert paper.active() is None and paper.view()["active"] is False and paper.view()["n_days"] == len(j)
+
+
+def test_intraday_day_message_reads_well():
+    from qsts.notify.report import intraday_day_message
+    view = {"currency": "EUR", "dataset": "5m", "rule": "Rango de los primeros 15 min", "return": 0.012,
+            "start": "2025-05-16", "n_days": 3}
+    day = {"day": "2025-05-20", "equity": 2390.0, "pnl": 12.0, "passive": -0.004,
+           "trades": [{"symbol": "AAPL", "side": "largo", "entry_min": 20, "exit": "objetivo", "net": 0.008, "pnl": 15.1},
+                      {"symbol": "MSFT", "side": "corto", "entry_min": 45, "exit": "stop", "net": -0.005, "pnl": -3.1}]}
+    msg = intraday_day_message(view, day)
+    assert "martes 20 may" in msg and "AAPL largo a las 15:50" in msg and "objetivo" in msg  # 9:30 New York = 15:30 Madrid
+    assert "+12,00 €" in msg and "2.390,00 €" in msg and "no son señales en directo" in msg
+    assert "Hoy la regla no ha encontrado" in intraday_day_message(view, {**day, "trades": []})
+
+
+def test_reporter_keeps_intraday_bars_fresh_and_sends_each_session(sf):
+    from qsts.app.daily import DailyReporter
+    from qsts.execution.intraday_paper import IntradayPaper
+    data = _paper_data("2025-06-30")
+    paper = IntradayPaper(sf, lambda ds, syms: ({s: data[0][s] for s in syms}, data[1]))
+    paper.start(ORBRule().to_dict(), "5m", [f"S{i}" for i in range(5)], 2000, now=pd.Timestamp("2025-06-20", tz="UTC"))
+    newest = {"t": pd.Timestamp("2025-06-26 19:55", tz="UTC")}
+    started, sent = [], []
+
+    class Runner:
+        state = type("S", (), {"running": False})()
+    class Tg:
+        def send(self, text):
+            sent.append(text)
+    rep = DailyReporter(sf, paper=lambda: None, telegram=lambda: Tg(), data_runner=lambda: Runner(),
+                        intraday_paper=lambda: paper, intraday_data=lambda: {"5m": (["S0", "S1"], newest["t"])},
+                        intraday_update=lambda ds, syms: started.append((ds, syms)) or True)
+    now = pd.Timestamp("2025-07-01 12:00", tz="UTC")  # latest finished session: 2025-06-30
+    assert "descargando" in rep.intraday_tick(now) and started == [("5m", ["S0", "S1"])]
+    assert "descargando" not in rep.intraday_tick(now) and len(started) == 1  # retries wait 20 minutes
+    newest["t"] = pd.Timestamp("2025-06-30 19:55", tz="UTC")  # the download brought the latest session
+    rep._attempts.clear()
+    rep.intraday_tick(now)
+    assert len(sent) == 3 and "Simulación intradía" in sent[-1] and "lunes 30 jun" in sent[-1]  # the last 3 sessions
+    assert all(d.notified_at is not None for d in paper.journal(paper.active().id))  # older ones: in the app only
+    rep.intraday_tick(now)
+    assert len(sent) == 3 and len(started) == 1  # nothing twice

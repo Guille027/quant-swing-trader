@@ -31,6 +31,7 @@ from qsts.data.adjust import adjust
 from qsts.data.quality import DataQualityError, validate_and_clean
 from qsts.data.universe import UniverseList, fetch_sp500
 from qsts.db import models as m
+from qsts.execution.intraday_paper import IntradayPaper
 from qsts.execution.paper import PaperError, PaperTrading
 from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
 from qsts.notify.telegram import Telegram, TelegramError
@@ -107,6 +108,13 @@ class IngestBody(BaseModel):
 class IntradayIngestBody(BaseModel):
     dataset: str = "5m"  # 5m | 1h
     n_symbols: int = 100  # the most traded stocks you have (those already downloaded are always updated)
+
+
+class IntradayPaperBody(BaseModel):
+    rid: str
+    dataset: str = "5m"
+    capital: float = 2000.0
+    currency: str = "EUR"
 
 
 class IntradayStartBody(BaseModel):
@@ -507,7 +515,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         if r is None:
             r = ctx.extra["daily_reporter"] = DailyReporter(
                 ctx.sf, _paper, _telegram, _data_runner, ctx.repo.last_bar, benchmark=ctx.settings.benchmark,
-                delay_min=ctx.settings.daily_report_delay_min, blocked=_sync_block_reason)
+                delay_min=ctx.settings.daily_report_delay_min, blocked=_sync_block_reason,
+                intraday_paper=_intraday_paper, intraday_data=_intraday_coverage, intraday_update=_intraday_download)
         return r
 
     # ------------------------------------------------------------------ several computers (OneDrive copy)
@@ -834,6 +843,66 @@ def create_app(ctx: AppContext) -> FastAPI:
                 raise HTTPException(400, str(e))
         return views[dataset]
 
+    def _intraday_frames(dataset: str, symbols: list[str]) -> tuple[dict, dict]:
+        tf = itd.DATASETS[dataset]
+        bars, daily = {}, {}
+        for sym in symbols:
+            try:
+                bars[sym] = ctx.research_frame(sym, tf)
+            except (KeyError, ValueError):
+                continue
+            try:
+                daily[sym] = ctx.research_frame(sym)
+            except (KeyError, ValueError):
+                pass
+        return bars, daily
+
+    def _intraday_paper() -> IntradayPaper:
+        p = ctx.extra.get("intraday_paper")
+        if p is None:
+            p = ctx.extra["intraday_paper"] = IntradayPaper(ctx.sf, _intraday_frames)
+        return p
+
+    def _intraday_coverage() -> dict:
+        out = {}
+        for ds, tf in itd.DATASETS.items():
+            cov = ctx.repo.coverage(tf)
+            if cov:
+                out[ds] = (sorted(cov), max(c["last"] for c in cov.values()))
+        return out
+
+    def _intraday_download(dataset: str, symbols: list[str]) -> bool:
+        return _data_runner().start(f"intraday-{dataset}", symbols, "2000-01-01", incremental=True,
+                                    timeframe=itd.DATASETS[dataset])
+
+    @app.get("/api/intraday/paper")
+    def intraday_paper_view(refresh: bool = True):
+        v = _intraday_paper().view(refresh=refresh)
+        rep = ctx.extra.get("daily_reporter")
+        return _j(v | {"auto_state": rep.intraday_state if rep is not None else None})
+
+    @app.post("/api/intraday/paper/start")
+    def intraday_paper_start(body: IntradayPaperBody):
+        lab = _intraday_lab(_dataset(body.dataset))
+        try:
+            row = lab.get_row(body.rid)
+        except KeyError:
+            raise HTTPException(404, "regla desconocida")
+        try:
+            sid = _intraday_paper().start(row.rule, lab.dataset, sorted(lab.days), body.capital, body.currency,
+                                          candidate_id=row.id, pc=lab.pc)
+        except PaperError as e:
+            raise HTTPException(400, str(e))
+        return {"session_id": sid}
+
+    @app.post("/api/intraday/paper/stop")
+    def intraday_paper_stop():
+        try:
+            _intraday_paper().stop()
+        except PaperError as e:
+            raise HTTPException(400, str(e))
+        return {"stopped": True}
+
     @app.get("/api/intraday/status")
     def intraday_status():
         return _j(_intraday_runner().status() | {"boundaries": itd.boundaries(ctx.sf)})
@@ -878,8 +947,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"stopping": True}
 
     @app.get("/api/intraday/leaderboard")
-    def intraday_leaderboard(dataset: str = "5m", limit: int = 25):
-        return _j(_intraday_lab(_dataset(dataset)).leaderboard(max(1, min(limit, 100))))
+    def intraday_leaderboard(dataset: str = "5m", limit: int = 25, family: str | None = None):
+        return _j(_intraday_lab(_dataset(dataset)).leaderboard(max(1, min(limit, 100)), family=family))
 
     @app.get("/api/intraday/{rid}/curve")
     def intraday_curve(rid: str, dataset: str = "5m"):

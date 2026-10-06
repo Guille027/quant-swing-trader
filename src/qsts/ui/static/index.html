@@ -249,12 +249,18 @@
 <section id="tab-intra" class="tab">
   <div class="card">
     <h3>Laboratorio intradía: ¿qué hace?</h3>
-    <p>Prueba estrategias de <b>un solo día</b> (todas las operaciones se cierran antes del cierre de la bolsa) basadas en la
-      <b>ruptura del rango de apertura</b>: mira el máximo y el mínimo de los primeros minutos (5, 15, 30 o 60) y entra si el precio rompe ese rango:
-      <b>largo</b> (compra) si rompe el máximo, <b>corto</b> (apuesta a la bajada) si rompe el mínimo. Busca sola la mejor combinación de:
-      tamaño del rango, dirección, cómo confirmar la ruptura (vela que cierra fuera o simple toque), dónde va el stop, objetivo de beneficio,
-      hasta cuándo se puede entrar y <b>filtros de contexto</b> (tamaño del rango frente a la volatilidad diaria, volumen de la apertura,
-      hueco de apertura, tendencia diaria). Es decir, un patrón de precio combinado con su contexto.</p>
+    <p>Prueba estrategias de <b>un solo día</b> (todas las operaciones se cierran antes del cierre de la bolsa), <b>largas</b> (compra) y
+      <b>cortas</b> (apuesta a la bajada), con tres tipos de patrón de precio:</p>
+    <ul class="steps">
+      <li><b>Rango de apertura:</b> mira el máximo y el mínimo de los primeros minutos (5, 15, 30 o 60) y entra si el precio rompe ese rango
+        (largo si rompe el máximo, corto si rompe el mínimo).</li>
+      <li><b>Hueco de apertura:</b> si la acción abre bastante por encima o por debajo del cierre de ayer, apuesta a que el hueco
+        <b>se cierra</b> (vuelve al cierre de ayer) o a que <b>continúa</b>. Entra unos minutos después de la apertura, nunca en el precio de apertura exacto.</li>
+      <li><b>VWAP</b> (precio medio del día ponderado por volumen): sigue al precio cuando <b>cruza</b> el VWAP, o apuesta a que <b>vuelve</b> a él
+        cuando se ha alejado mucho.</li>
+    </ul>
+    <p>Para cada uno busca sola la mejor combinación de ajustes (stop, objetivo de beneficio, horario) y de <b>filtros de contexto</b>
+      (volatilidad diaria, volumen de la apertura, tendencia diaria). Es decir, un patrón de precio combinado con su contexto.</p>
     <ol class="steps">
       <li><b>Velas:</b> de <b>5 minutos</b> (Yahoo solo da los últimos 60 días) o de <b>1 hora</b> (unos 2,9 años; con ellas el rango es la primera hora).
         Las velas descargadas se guardan, así que la historia crece si las actualizas a menudo.</li>
@@ -291,7 +297,10 @@
     <p class="muted">Mantener las mismas acciones sin hacer nada durante el periodo de búsqueda.</p>
     <div id="it-passive" class="kpis"></div></div>
   <div class="card callout" id="it-best" style="display:none"></div>
-  <div class="card"><h3>Ranking intradía</h3><p class="muted" id="it-note"></p><table id="it-board"></table></div>
+  <div class="card"><h3>Ranking intradía</h3><p class="muted" id="it-note"></p>
+    <label class="small">Mostrar <select id="it-family"><option value="">todos los patrones</option><option value="orb">rango de apertura</option>
+      <option value="gap">hueco de apertura</option><option value="vwap">VWAP</option></select></label> <span id="it-family-counts" class="muted small"></span>
+    <table id="it-board"></table></div>
   <div class="card" id="it-detail-card"><h3>Detalle</h3><div id="it-detail" class="muted">Pulsa una fila del ranking para ver su detalle y su curva.</div>
     <div id="it-bt" style="display:none">
       <h4>Curva <span id="it-bt-note" class="muted"></span></h4>
@@ -299,6 +308,17 @@
       <p class="muted"><span class="sw" style="background:#4c8dff"></span> búsqueda &nbsp; <span class="sw" style="background:#ab47bc"></span> examen previo
         <span id="it-oos-legend" style="display:none">&nbsp; <span class="sw" style="background:#ffb74d"></span> test final</span> · capital inicial 10.000</p>
       <h4>Últimas operaciones</h4><div class="scroll"><table id="it-trades"></table></div>
+    </div></div>
+  <div class="card" id="itp-card"><h3>Simulación día a día <button id="itp-stop" class="small-btn" style="display:none">■ Detener</button></h3>
+    <p class="muted small">Congela una regla y la sigue <b>con sesiones nuevas</b> (desde la siguiente apertura): la prueba más honesta,
+      porque son días que ninguna búsqueda ha visto. Cada noche, con la app abierta, se descargan las velas del día, se calcula lo que
+      habría hecho la regla y, si tienes Telegram, te llega el resumen. No son señales en directo y no se envía nada a ningún bróker.</p>
+    <div id="itp-body" class="muted">—</div>
+    <div id="itp-more" style="display:none">
+      <div id="itp-kpis" class="kpis"></div>
+      <div id="itp-chart" class="chart small"></div>
+      <h4>Última sesión</h4><div class="scroll"><table id="itp-last"></table></div>
+      <h4>Sesión a sesión</h4><div class="scroll"><table id="itp-days"></table></div>
     </div></div>
   <div class="card"><h3>Qué está haciendo ahora</h3><pre id="it-log" class="muted">—</pre></div>
 </section>

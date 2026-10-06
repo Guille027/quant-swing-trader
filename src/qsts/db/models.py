@@ -293,12 +293,46 @@ class IntradayCandidate(Base):
     origin: Mapped[str] = mapped_column(String(16))  # random | evolution
     cycle: Mapped[int] = mapped_column(Integer)
     rule: Mapped[dict] = mapped_column(JSON)
+    family: Mapped[str | None] = mapped_column(String(8))  # orb (NULL in the first rows) | gap | vwap
     fitness: Mapped[float | None] = mapped_column(Float, index=True)
     sr: Mapped[float | None] = mapped_column(Float)
     metrics: Mapped[dict | None] = mapped_column(JSON)  # search-window metrics only
     status: Mapped[str] = mapped_column(String(16), index=True)
     validation: Mapped[dict | None] = mapped_column(JSON)
     final: Mapped[dict | None] = mapped_column(JSON)
+
+
+class IntradayPaperSession(Base):
+    """Day-by-day paper simulation of ONE frozen intraday rule, from the first session after it was started."""
+    __tablename__ = "intraday_paper_sessions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(8))
+    rule: Mapped[dict] = mapped_column(JSON)
+    candidate_id: Mapped[str | None] = mapped_column(String(32))
+    symbols: Mapped[list] = mapped_column(JSON)
+    start: Mapped[datetime] = mapped_column(Date)  # first session simulated
+    capital: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(8))
+    config: Mapped[dict] = mapped_column(JSON)  # PortfolioConfig (same costs and sizing as the lab)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", index=True)  # ACTIVE | STOPPED
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class IntradayPaperDay(Base):
+    """Append-only journal: what the rule did in each session (recorded once, never recomputed)."""
+    __tablename__ = "intraday_paper_days"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("intraday_paper_sessions.id"), index=True)
+    day: Mapped[datetime] = mapped_column(Date)
+    equity: Mapped[float] = mapped_column(Float)  # after the day, in the session currency
+    pnl: Mapped[float] = mapped_column(Float)
+    trades: Mapped[list] = mapped_column(JSON)
+    passive: Mapped[float | None] = mapped_column(Float)  # same day, holding the same stocks (return)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime)  # sent by Telegram
+    __table_args__ = (UniqueConstraint("session_id", "day", name="uq_intraday_paper_day"),)
 
 
 class PaperSession(Base):

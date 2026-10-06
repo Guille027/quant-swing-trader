@@ -33,13 +33,13 @@ import threading
 import warnings
 import zlib
 from collections import deque
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, ClassVar
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from qsts.core.hashing import hash_obj
@@ -68,12 +68,48 @@ FILTERS_OFF = {"min_range_atr": 0.0, "max_range_atr": 99.0, "min_rel_vol": 0.0, 
                "trend": "any"}
 
 
+# the other pattern families (each rule is a point of its family's grid)
+GAP_SPACE = {"mode": ["fade", "go"], "min_gap": [0.005, 0.01, 0.02, 0.03], "max_gap": [0.02, 0.04, 1.0],
+             "side": ["both", "up", "down"], "confirm": [False, True], "stop_atr": [0.25, 0.5, 1.0],
+             "target": ["close", "fill", "1R", "2R"], "trend": ["any", "with", "against"]}
+GAP_ENTRY = {"5m": [5, 15, 30, 60], "1h": [60, 120]}
+VWAP_SPACE = {"mode": ["cross", "revert"], "direction": ["long", "short", "both"], "stretch_atr": [0.25, 0.5, 0.75, 1.0],
+              "stop_atr": [0.25, 0.5, 1.0], "target": ["close", "vwap", "1R", "2R"], "trend": ["any", "with", "against"]}
+VWAP_TIME = {"5m": {"start_min": [15, 30, 60], "window_min": [60, 120, 240]},
+             "1h": {"start_min": [60, 120], "window_min": [60, 120, 240]}}
+FAMILY_NAMES = {"orb": "rango de apertura", "gap": "hueco de apertura", "vwap": "VWAP"}
+OPTIONAL = {"orb": FILTERS_OFF,  # settings a new random rule usually leaves off (simple first)
+            "gap": {"max_gap": 1.0, "side": "both", "confirm": False, "target": "close", "trend": "any"},
+            "vwap": {"target": "close", "trend": "any"}}
+
+
 def _py(v):
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
     return float(v) if isinstance(v, (float, np.floating)) else int(v) if isinstance(v, (int, np.integer)) else str(v)
+
+
+def _n(x: float) -> str:
+    return f"{x:g}".replace(".", ",")  # Spanish decimal comma
+
+
+def _pct(x: float) -> str:
+    return f"{100 * x:.1f}".replace(".", ",") + "%"
+
+
+def _trend_text(trend: str) -> str | None:
+    return {"with": "solo a favor de la tendencia diaria (media de 50 días)",
+            "against": "solo contra la tendencia diaria (media de 50 días)"}.get(trend)
+
+
+def _target_text(target: str) -> str:
+    return {"close": "sin objetivo (cierra al final del día)", "fill": "objetivo: que se cierre el hueco (cierre de ayer)",
+            "vwap": "objetivo: volver al VWAP"}.get(target, f"objetivo {target}")
 
 
 @dataclass(frozen=True)
 class ORBRule:
+    family: ClassVar[str] = "orb"
     range_min: int = 15
     direction: str = "both"
     confirm: str = "close"
@@ -101,32 +137,153 @@ class ORBRule:
     def valid(self) -> bool:
         return self.gap_min < self.gap_max and self.min_range_atr < self.max_range_atr
 
+    def canonical(self) -> "ORBRule":
+        return self
+
+    def shape(self) -> tuple:
+        return ("orb", self.range_min, self.direction, self.confirm, self.stop)
+
     def describe(self) -> str:
         side = {"long": "compra si rompe el máximo", "short": "vende en corto si rompe el mínimo",
                 "both": "compra si rompe el máximo / corto si rompe el mínimo"}[self.direction]
         how = "con una vela que cierra fuera del rango" if self.confirm == "close" else "en cuanto lo toca (orden stop)"
         parts = [f"Rango de los primeros {self.range_min} min; {side} {how}",
                  "stop en el otro extremo del rango" if self.stop == "range" else "stop en la mitad del rango",
-                 f"objetivo {self.target_r:g}R" if self.target_r else "sin objetivo (cierra al final del día)",
+                 f"objetivo {_n(self.target_r)}R" if self.target_r else "sin objetivo (cierra al final del día)",
                  f"entradas durante los {self.cutoff_min} min siguientes al rango"]
         if self.min_range_atr > 0 or self.max_range_atr < 99:
-            lo = f"≥ {self.min_range_atr:g}" if self.min_range_atr > 0 else ""
-            hi = f"≤ {self.max_range_atr:g}" if self.max_range_atr < 99 else ""
+            lo = f"≥ {_n(self.min_range_atr)}" if self.min_range_atr > 0 else ""
+            hi = f"≤ {_n(self.max_range_atr)}" if self.max_range_atr < 99 else ""
             parts.append(f"tamaño del rango {' y '.join(x for x in (lo, hi) if x)} × ATR diario")
         if self.min_rel_vol > 0:
-            parts.append(f"volumen del rango ≥ {self.min_rel_vol:g}× su media de 20 días")
+            parts.append(f"volumen del rango ≥ {_n(self.min_rel_vol)}× su media de 20 días")
         if self.gap_min > -1 or self.gap_max < 1:
             lo = f"{100 * self.gap_min:+.1f}%" if self.gap_min > -1 else "-∞"
             hi = f"{100 * self.gap_max:+.1f}%" if self.gap_max < 1 else "+∞"
             parts.append(f"hueco de apertura entre {lo} y {hi}")
-        if self.trend != "any":
-            parts.append("solo a favor de la tendencia diaria (media de 50 días)" if self.trend == "with"
-                         else "solo contra la tendencia diaria (media de 50 días)")
+        if _trend_text(self.trend):
+            parts.append(_trend_text(self.trend))
         return "; ".join(parts)
 
 
-def rule_from_dict(d: dict) -> ORBRule:
-    return ORBRule(**{k: _py(d[k]) for k in ORBRule.__dataclass_fields__ if k in d})
+@dataclass(frozen=True)
+class GapRule:
+    """Opening gap (today's open vs yesterday's close): bet that it closes (`fade`) or that it continues (`go`).
+    The gap is only known once the market has opened, so the entry is at a later bar's open (never the open itself)."""
+    family: ClassVar[str] = "gap"
+    mode: str = "fade"
+    min_gap: float = 0.01      # size of the gap, at least ...
+    max_gap: float = 1.0       # ... and at most (1 = no limit)
+    side: str = "both"         # which gaps: up | down | both
+    entry_min: int = 15        # minutes after the open
+    confirm: bool = False      # the price must already be moving the expected way at the entry
+    stop_atr: float = 0.5      # stop distance in daily ATRs
+    target: str = "close"      # close | fill (back to yesterday's close; fade only) | 1R | 2R
+    trend: str = "any"
+
+    def to_dict(self) -> dict:
+        return {"family": "gap", **asdict(self)}
+
+    @property
+    def version_id(self) -> str:
+        return hash_obj(self.to_dict(), 24)
+
+    def complexity(self) -> int:
+        return (self.max_gap < 1) + self.confirm + (self.target != "close") + (self.trend != "any") + (self.side != "both")
+
+    def valid(self) -> bool:
+        return self.min_gap < self.max_gap and not (self.target == "fill" and self.mode != "fade")
+
+    def canonical(self) -> "GapRule":
+        return self
+
+    def shape(self) -> tuple:
+        return ("gap", self.mode, self.side, self.entry_min)
+
+    def describe(self) -> str:
+        size = f"de al menos {_pct(self.min_gap)}" + (f" y como mucho {_pct(self.max_gap)}" if self.max_gap < 1 else "")
+        which = {"both": "", "up": " al alza", "down": " a la baja"}[self.side]
+        act = {("fade", "up"): "vende en corto", ("fade", "down"): "compra", ("go", "up"): "compra",
+               ("go", "down"): "vende en corto"}
+        if self.side == "both":
+            how = ("vende en corto si abre al alza, compra si abre a la baja" if self.mode == "fade"
+                   else "compra si abre al alza, vende en corto si abre a la baja")
+        else:
+            how = act[(self.mode, self.side)]
+        bet = f"apuesta a que {'se cierra' if self.mode == 'fade' else 'continúa'}: {how}"
+        parts = [f"Hueco de apertura{which} {size}: {bet}",
+                 f"entra a los {self.entry_min} min de la apertura"
+                 + (" si el precio ya va en esa dirección" if self.confirm else ""),
+                 f"stop a {_n(self.stop_atr)} ATR diarios", _target_text(self.target)]
+        if _trend_text(self.trend):
+            parts.append(_trend_text(self.trend))
+        return "; ".join(parts)
+
+
+@dataclass(frozen=True)
+class VWAPRule:
+    """VWAP = average price of the day weighted by volume, from the open up to each bar. `cross`: follow the price
+    when a bar closes on the other side of the VWAP; `revert`: when the price is stretched far from the VWAP, bet
+    that it comes back."""
+    family: ClassVar[str] = "vwap"
+    mode: str = "cross"
+    direction: str = "both"
+    start_min: int = 30        # no signals before this minute
+    window_min: int = 120      # signals only during this many minutes after `start_min`
+    stretch_atr: float = 0.5   # revert: distance from the VWAP in daily ATRs
+    stop_atr: float = 0.5
+    target: str = "close"      # close | vwap (revert only) | 1R | 2R
+    trend: str = "any"
+
+    def to_dict(self) -> dict:
+        return {"family": "vwap", **asdict(self)}
+
+    @property
+    def version_id(self) -> str:
+        return hash_obj(self.to_dict(), 24)
+
+    def complexity(self) -> int:
+        return (self.target != "close") + (self.trend != "any")
+
+    def valid(self) -> bool:
+        return not (self.target == "vwap" and self.mode != "revert")
+
+    def canonical(self) -> "VWAPRule":
+        return replace(self, stretch_atr=0.5) if self.mode == "cross" else self  # unused by `cross`
+
+    def shape(self) -> tuple:
+        return ("vwap", self.mode, self.direction, self.start_min)
+
+    def describe(self) -> str:
+        side = {"long": "solo largos", "short": "solo cortos", "both": "largos y cortos"}[self.direction]
+        if self.mode == "cross":
+            what = ("VWAP (precio medio del día ponderado por volumen): compra cuando una vela cierra por encima tras "
+                    "estar por debajo, corto al revés")
+        else:
+            what = (f"VWAP (precio medio del día ponderado por volumen): si el precio se aleja {_n(self.stretch_atr)} ATR "
+                    "diarios del VWAP, apuesta a que vuelve (compra por debajo, corto por encima)")
+        parts = [f"{what} ({side})", f"señales desde el minuto {self.start_min} y durante {self.window_min} min",
+                 f"entra en la vela siguiente; stop a {_n(self.stop_atr)} ATR diarios", _target_text(self.target)]
+        if _trend_text(self.trend):
+            parts.append(_trend_text(self.trend))
+        return "; ".join(parts)
+
+
+Rule = ORBRule | GapRule | VWAPRule
+FAMILIES = {"orb": ORBRule, "gap": GapRule, "vwap": VWAPRule}
+
+
+def rule_from_dict(d: dict) -> Rule:
+    cls = FAMILIES[d.get("family", "orb")]
+    return cls(**{f.name: _py(d[f.name]) for f in fields(cls) if f.name in d})
+
+
+def family_space(family: str, dataset: str) -> dict:
+    if family == "orb":
+        return {**COMMON, **SPACE[dataset]}
+    if family == "gap":
+        return {**GAP_SPACE, "entry_min": GAP_ENTRY[dataset]}
+    return {**VWAP_SPACE, **VWAP_TIME[dataset]}
 
 
 # ---------------------------------------------------------------------- data preparation
@@ -220,19 +377,42 @@ def _no_trades() -> pd.DataFrame:
                          "risk_frac": np.array([], float), "r": np.array([], float), "exit": np.array([], int)})
 
 
-def simulate_symbol(sd: SymbolDays, rule: ORBRule, bar_min: int, cost_bps: float) -> pd.DataFrame:
+@dataclass
+class Entries:
+    """Planned trades of one stock (one per session at most), before the exits are simulated."""
+    rows: np.ndarray       # session rows
+    dirn: np.ndarray       # +1 long / -1 short
+    e_bar: np.ndarray      # entry bar
+    entry: np.ndarray      # entry price
+    stop: np.ndarray
+    target: np.ndarray     # NaN = none (flat at the close)
+    scan_from: np.ndarray  # first bar where the stop / target can be hit
+    stop_order: bool = False  # entered by a stop order inside e_bar: if that bar also reached the stop, stopped
+
+
+def simulate_symbol(sd: SymbolDays, rule: Rule, bar_min: int, cost_bps: float) -> pd.DataFrame:
     """One row per trade: session, entry minute, direction (+1/-1), net return on the position (after costs on
     both sides), risk as a fraction of the entry price, result in R, exit kind (0 close, 1 stop, 2 target)."""
-    k = max(1, rule.range_min // bar_min)
-    if sd.c.shape[1] <= k + 1 or len(sd.sessions) == 0:
+    if len(sd.sessions) == 0 or sd.c.shape[1] < 3:
         return _no_trades()
     with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        return _simulate(sd, rule, bar_min, cost_bps, k)
+        en = {"orb": _orb_entries, "gap": _gap_entries, "vwap": _vwap_entries}[rule.family](sd, rule, bar_min)
+        return _no_trades() if en is None or len(en.rows) == 0 else _exits(sd, en, bar_min, cost_bps)
 
 
-def _simulate(sd: SymbolDays, rule: ORBRule, bar_min: int, cost_bps: float, k: int) -> pd.DataFrame:
+def _trend_ok(sd: SymbolDays, trend: str, dirn: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    if trend == "any":
+        return np.ones(len(rows), bool)
+    t = sd.trend[rows] * dirn
+    return t > 0 if trend == "with" else t < 0
+
+
+def _orb_entries(sd: SymbolDays, rule: ORBRule, bar_min: int) -> Entries | None:
     B = sd.c.shape[1]
+    k = max(1, rule.range_min // bar_min)
+    if B <= k + 1:
+        return None
     orh, orl = np.nanmax(sd.h[:, :k], axis=1), np.nanmin(sd.l[:, :k], axis=1)
     ok = np.all(~np.isnan(sd.c[:, :k]), axis=1) & (sd.last_col > k) & (orh > orl)
     if rule.min_range_atr > 0 or rule.max_range_atr < 99:
@@ -262,31 +442,114 @@ def _simulate(sd: SymbolDays, rule: ORBRule, bar_min: int, cost_bps: float, k: i
     ju, jd = _first(up), _first(dn)
     long_ = (ju >= 0) & ((jd < 0) | (ju < jd))  # both edges in the same bar: neither (order unknown)
     short = (jd >= 0) & ((ju < 0) | (jd < ju))
-    idx = np.flatnonzero(long_ | short)
-    if len(idx) == 0:
-        return _no_trades()
-    n = np.arange(len(idx))
-    dirn = np.where(long_[idx], 1.0, -1.0)
-    t = np.where(long_[idx], ju[idx], jd[idx])
-    hh, ll, oo, cc = sd.h[idx], sd.l[idx], sd.o[idx], sd.c[idx]
-    hi_r, lo_r, lastc = orh[idx], orl[idx], sd.last_col[idx]
+    rows = np.flatnonzero(long_ | short)
+    dirn = np.where(long_[rows], 1.0, -1.0)
+    t = np.where(long_[rows], ju[rows], jd[rows])
+    hi_r, lo_r = orh[rows], orl[rows]
     if rule.confirm == "close":
-        e_bar = t + 1
-        entry = oo[n, e_bar]
-        scan_from = e_bar  # the whole entry bar happens after the entry
-    else:
-        e_bar = t
-        bar_open = oo[n, t]
+        e_bar, scan_from = t + 1, t + 1  # the whole entry bar happens after the entry
+        entry = sd.o[rows, e_bar]
+    else:  # stop order at the edge: filled there, or at the bar's open if it gaps through
+        e_bar, scan_from = t, t + 1
+        bar_open = sd.o[rows, t]
         entry = np.where(dirn > 0, np.maximum(bar_open, hi_r), np.minimum(bar_open, lo_r))
-        scan_from = t + 1
     stop = np.where(dirn > 0, lo_r, hi_r) if rule.stop == "range" else (hi_r + lo_r) / 2
+    target = entry + dirn * rule.target_r * dirn * (entry - stop) if rule.target_r > 0 else np.full(len(rows), np.nan)
+    return Entries(rows, dirn, e_bar, entry, stop, target, scan_from, stop_order=rule.confirm == "touch")
+
+
+def _r_target(entry, dirn, stop, target: str) -> np.ndarray:
+    """Profit target `nR` = n times the risk (entry to stop) beyond the entry; NaN = none."""
+    r = {"1R": 1.0, "2R": 2.0}.get(target)
+    return entry + dirn * r * dirn * (entry - stop) if r else np.full(len(entry), np.nan)
+
+
+def _gap_entries(sd: SymbolDays, rule: GapRule, bar_min: int) -> Entries | None:
+    e = max(1, rule.entry_min // bar_min)  # the gap is known at the open: enter at a later bar's open
+    if sd.c.shape[1] <= e + 1:
+        return None
+    g = sd.gap
+    size = np.abs(g)
+    ok = np.isfinite(g) & (size >= rule.min_gap) & (size <= rule.max_gap) & (sd.last_col > e) & np.isfinite(sd.atr_pct)
+    ok &= {"both": g != 0, "up": g > 0, "down": g < 0}[rule.side]
+    up = np.sign(g)
+    dirn_all = -up if rule.mode == "fade" else up
+    if rule.confirm:  # by the entry the price already moves the way of the bet
+        ok &= dirn_all * (sd.c[:, e - 1] - sd.o[:, 0]) > 0
+    rows = np.flatnonzero(ok)
+    dirn = dirn_all[rows]
+    keep = _trend_ok(sd, rule.trend, dirn, rows)
+    rows, dirn = rows[keep], dirn[keep]
+    entry = sd.o[rows, e]
+    stop = entry - dirn * rule.stop_atr * sd.atr_pct[rows] * entry
+    if rule.target == "fill":
+        target = sd.o[rows, 0] / (1 + g[rows])  # yesterday's close
+        keep = dirn * (target - entry) > 0  # the gap already closed before the entry: no trade
+        rows, dirn, entry, stop, target = rows[keep], dirn[keep], entry[keep], stop[keep], target[keep]
+    else:
+        target = _r_target(entry, dirn, stop, rule.target)
+    eb = np.full(len(rows), e)
+    return Entries(rows, dirn, eb, entry, stop, target, eb.copy())
+
+
+def _vwap_entries(sd: SymbolDays, rule: VWAPRule, bar_min: int) -> Entries | None:
+    B = sd.c.shape[1]
+    s0 = max(1, rule.start_min // bar_min)
+    if B <= s0 + 1:
+        return None
+    tp = (sd.h + sd.l + sd.c) / 3
+    vol = np.nan_to_num(sd.v)
+    cum_v = np.cumsum(vol, axis=1)
+    vwap = np.cumsum(np.nan_to_num(tp) * vol, axis=1) / np.where(cum_v > 0, cum_v, np.nan)  # bars up to t only
+    cols = np.arange(B)[None, :]
+    last = sd.last_col[:, None]
+    window = (cols >= s0) & (cols < s0 + max(1, rule.window_min // bar_min)) & (cols < last)  # entry at t + 1
+    window &= np.isfinite(sd.atr_pct)[:, None]
+    if rule.mode == "cross":
+        prev_c = np.c_[np.full(len(sd.c), np.nan), sd.c[:, :-1]]
+        prev_v = np.c_[np.full(len(sd.c), np.nan), vwap[:, :-1]]
+        up = (sd.c > vwap) & (prev_c <= prev_v)
+        dn = (sd.c < vwap) & (prev_c >= prev_v)
+    else:
+        dist = (sd.c - vwap) / (sd.atr_pct[:, None] * sd.o[:, [0]])
+        up, dn = dist <= -rule.stretch_atr, dist >= rule.stretch_atr  # stretched below: buy; above: short
+    up = up & window & (rule.direction != "short")
+    dn = dn & window & (rule.direction != "long")
+    ju, jd = _first(up), _first(dn)
+    long_ = (ju >= 0) & ((jd < 0) | (ju < jd))
+    short = (jd >= 0) & ((ju < 0) | (jd < ju))
+    rows = np.flatnonzero(long_ | short)
+    dirn = np.where(long_[rows], 1.0, -1.0)
+    t = np.where(long_[rows], ju[rows], jd[rows])
+    keep = _trend_ok(sd, rule.trend, dirn, rows)
+    rows, dirn, t = rows[keep], dirn[keep], t[keep]
+    e_bar = t + 1
+    entry = sd.o[rows, e_bar]
+    stop = entry - dirn * rule.stop_atr * sd.atr_pct[rows] * entry
+    if rule.target == "vwap":
+        target = vwap[rows, t]  # the VWAP when the signal appeared
+        target = np.where(dirn * (target - entry) > 0, target, np.nan)
+        keep = np.isfinite(target)
+        rows, dirn, e_bar, entry, stop, target = rows[keep], dirn[keep], e_bar[keep], entry[keep], stop[keep], target[keep]
+    else:
+        target = _r_target(entry, dirn, stop, rule.target)
+    return Entries(rows, dirn, e_bar, entry, stop, target, e_bar.copy())
+
+
+def _exits(sd: SymbolDays, en: Entries, bar_min: int, cost_bps: float) -> pd.DataFrame:
+    """Stop, target or the session's last bar, whichever comes first (conservative fills)."""
+    B = sd.c.shape[1]
+    rows, dirn, e_bar, entry, stop, target = en.rows, en.dirn, en.e_bar, en.entry, en.stop, en.target
+    n = np.arange(len(rows))
+    hh, ll, oo, cc = sd.h[rows], sd.l[rows], sd.o[rows], sd.c[rows]
+    lastc = sd.last_col[rows]
+    cols = np.arange(B)[None, :]
     risk = dirn * (entry - stop)
-    target = entry + dirn * rule.target_r * risk if rule.target_r > 0 else np.full(len(idx), np.nan)
-    after = (cols >= scan_from[:, None]) & (cols <= lastc[:, None])
+    after = (cols >= en.scan_from[:, None]) & (cols <= lastc[:, None])
     longs = dirn[:, None] > 0
     stop_hit = after & np.where(longs, ll <= stop[:, None], hh >= stop[:, None])
-    tgt_hit = after & np.where(longs, hh >= target[:, None], ll <= target[:, None]) if rule.target_r > 0 \
-        else np.zeros_like(after)
+    has_t = np.isfinite(target)
+    tgt_hit = after & has_t[:, None] & np.where(longs, hh >= target[:, None], ll <= target[:, None])
     js, jt = _first(stop_hit), _first(tgt_hit)
     by_stop = (js >= 0) & ((jt < 0) | (js <= jt))  # same bar: the stop is assumed to come first
     by_tgt = (jt >= 0) & ~by_stop
@@ -295,12 +558,12 @@ def _simulate(sd: SymbolDays, rule: ORBRule, bar_min: int, cost_bps: float, k: i
     tgt_px = np.where(dirn > 0, np.maximum(o_t, target), np.minimum(o_t, target))
     exit_px = np.where(by_stop, stop_px, np.where(by_tgt, tgt_px, cc[n, lastc]))
     kind = np.where(by_stop, 1, np.where(by_tgt, 2, 0))
-    if rule.confirm == "touch":  # the entry bar itself also reached the stop: stopped (order inside the bar unknown)
+    if en.stop_order:  # the entry bar itself also reached the stop: stopped (order inside the bar unknown)
         same = np.where(dirn > 0, ll[n, e_bar] <= stop, hh[n, e_bar] >= stop)
         exit_px, kind = np.where(same, stop, exit_px), np.where(same, 1, kind)
     net = dirn * (exit_px - entry) / entry - 2 * cost_bps / 1e4
     good = np.isfinite(entry) & (risk > 0) & np.isfinite(net)
-    out = pd.DataFrame({"session": sd.sessions[idx], "entry_min": e_bar * bar_min, "direction": dirn, "net": net,
+    out = pd.DataFrame({"session": sd.sessions[rows], "entry_min": e_bar * bar_min, "direction": dirn, "net": net,
                         "risk_frac": risk / entry, "r": dirn * (exit_px - entry) / risk, "exit": kind})
     return out[good].reset_index(drop=True)
 
@@ -430,7 +693,8 @@ class StopRequested(Exception):
 class IntradayLab:
     def __init__(self, sf, dataset: str, bars: dict[str, pd.DataFrame], daily: dict[str, pd.DataFrame],
                  pc: PortfolioConfig | None = None, log: Callable[[str], None] | None = None,
-                 stop_event: threading.Event | None = None, seed: int | None = None, complexity_penalty: float = 0.05):
+                 stop_event: threading.Event | None = None, seed: int | None = None, complexity_penalty: float = 0.05,
+                 families: tuple[str, ...] = tuple(FAMILIES)):
         if dataset not in DATASETS:
             raise ValueError(f"tipo de velas desconocido: {dataset}")
         self.sf, self.dataset = sf, dataset
@@ -439,6 +703,7 @@ class IntradayLab:
         self.stop_event = stop_event or threading.Event()
         self.rng = np.random.default_rng(seed)
         self.penalty = complexity_penalty
+        self.families = tuple(f for f in families if f in FAMILIES) or tuple(FAMILIES)  # what the search tries
         prepared = {s: d for s, b in sorted(bars.items())
                     if (d := prepare_symbol(b, daily.get(s), self.bar_min)) is not None}
         if not prepared:
@@ -471,7 +736,7 @@ class IntradayLab:
         if self.stop_event.is_set():
             raise StopRequested()
 
-    def trades(self, rule: ORBRule, cost_bps: float | None = None, oos: bool = False) -> dict[str, pd.DataFrame]:
+    def trades(self, rule: Rule, cost_bps: float | None = None, oos: bool = False) -> dict[str, pd.DataFrame]:
         cb = self.pc.cost_bps if cost_bps is None else cost_bps
         key = f"{rule.version_id}|{cb}|{oos}"
         with self._cache_lock:
@@ -485,13 +750,13 @@ class IntradayLab:
                 self._cache[key] = hit
         return hit
 
-    def window(self, rule: ORBRule, sessions: pd.DatetimeIndex, symbols=None, cost_bps: float | None = None,
+    def window(self, rule: Rule, sessions: pd.DatetimeIndex, symbols=None, cost_bps: float | None = None,
                oos: bool = False):
         allt = self.trades(rule, cost_bps, oos)
         sel = {s: t[t["session"].isin(sessions)] for s, t in allt.items() if symbols is None or s in symbols}
         return portfolio_returns(sel, sessions, self.pc)
 
-    def score(self, rule: ORBRule) -> tuple[float | None, dict]:
+    def score(self, rule: Rule) -> tuple[float | None, dict]:
         """Worst block Sharpe of the search window, for all stocks and for each half, minus complexity."""
         daily, tr = self.window(rule, self.search_sessions)
         mt = summarize(daily, tr, self.pc)
@@ -513,10 +778,10 @@ class IntradayLab:
         mt["halves"] = halves
         return float(min(worst) - self.penalty * rule.complexity()), _clean(mt)
 
-    def _row_id(self, rule: ORBRule) -> str:
+    def _row_id(self, rule: Rule) -> str:
         return hash_obj({"rule": rule.version_id, "universe": self.universe_id}, 32)
 
-    def evaluate_and_store(self, rule: ORBRule, origin: str, cycle: int) -> float | None:
+    def evaluate_and_store(self, rule: Rule, origin: str, cycle: int) -> float | None:
         rid = self._row_id(rule)
         with self.sf() as s:
             row = s.get(m.IntradayCandidate, rid)
@@ -525,7 +790,7 @@ class IntradayLab:
         self.check_stop()
         fit, mt = self.score(rule)
         with self.sf() as s, s.begin():
-            s.add(m.IntradayCandidate(id=rid, dataset=self.dataset, universe_id=self.universe_id,
+            s.add(m.IntradayCandidate(id=rid, dataset=self.dataset, universe_id=self.universe_id, family=rule.family,
                                       version_id=rule.version_id, rule=rule.to_dict(), origin=origin, cycle=cycle,
                                       fitness=fit, sr=mt.get("sr"), metrics=mt,
                                       status="EVALUATED" if fit is not None else "INVALID"))
@@ -533,44 +798,48 @@ class IntradayLab:
         return fit
 
     # ------------------------------------------------------------------ search
-    def _space(self) -> dict:
-        return {**COMMON, **SPACE[self.dataset]}
-
-    def random_rule(self) -> ORBRule:
-        space = self._space()
+    def random_rule(self) -> Rule:
+        family = self.families[self.rng.integers(len(self.families))]
+        space, cls = family_space(family, self.dataset), FAMILIES[family]
         while True:
             d = {k: _py(v[self.rng.integers(len(v))]) for k, v in space.items()}
-            for k, off in FILTERS_OFF.items():  # filters are optional: new rules start with few of them
+            for k, off in OPTIONAL[family].items():  # extras are optional: new rules start with few of them
                 if self.rng.random() < 0.6:
                     d[k] = off
-            r = ORBRule(**d)
+            r = cls(**d).canonical()
             if r.valid():
                 return r
 
-    def mutate(self, rule: ORBRule) -> ORBRule:
-        space = self._space()
+    def mutate(self, rule: Rule) -> Rule:
+        space = family_space(rule.family, self.dataset)
         keys = list(space)
         for _ in range(30):
             k = keys[self.rng.integers(len(keys))]
-            r = replace(rule, **{k: _py(space[k][self.rng.integers(len(space[k]))])})
+            r = replace(rule, **{k: _py(space[k][self.rng.integers(len(space[k]))])}).canonical()
             if r.valid() and r != rule:
                 return r
         return self.random_rule()
 
-    def top_rows(self, n: int, positive: bool = False) -> list:
+    def top_rows(self, n: int, positive: bool = False, family: str | None = None) -> list:
         with self.sf() as s:
             q = select(m.IntradayCandidate).where(m.IntradayCandidate.universe_id == self.universe_id,
                                                   m.IntradayCandidate.fitness.is_not(None))
             if positive:
                 q = q.where(m.IntradayCandidate.fitness > 0)
+            if family == "orb":
+                q = q.where(or_(m.IntradayCandidate.family == "orb", m.IntradayCandidate.family.is_(None)))
+            elif family:
+                q = q.where(m.IntradayCandidate.family == family)
             return list(s.scalars(q.order_by(m.IntradayCandidate.fitness.desc()).limit(n)))
 
-    def elites(self, n: int = 8) -> list[ORBRule]:
-        """Best rules, at most two per basic shape (range, side, entry, stop), so the search does not get stuck."""
+    def elites(self, n: int = 8) -> list[Rule]:
+        """Best rules, at most two per basic shape (family and its main settings), so the search does not get stuck."""
         out, seen = [], {}
         for r in self.top_rows(60):
             rule = rule_from_dict(r.rule)
-            shape = (rule.range_min, rule.direction, rule.confirm, rule.stop)
+            if rule.family not in self.families:
+                continue
+            shape = rule.shape()
             if seen.get(shape, 0) < 2:
                 seen[shape] = seen.get(shape, 0) + 1
                 out.append(rule)
@@ -705,16 +974,17 @@ class IntradayLab:
         var = float((mean2 - mean ** 2) * k / (k - 1)) if k and k > 1 else 1.0 / max(len(self.search_sessions), 1)
         return int(n_i + n_d), max(var, 1e-12)
 
-    def leaderboard(self, limit: int = 25) -> dict:
+    def leaderboard(self, limit: int = 25, family: str | None = None) -> dict:
         n, var = self.trial_stats()
         passive = self.passive(self.search_sessions)
         sr0 = max(0.0, passive["sharpe"] / np.sqrt(self.pc.bars_per_year)) + expected_max_sharpe(max(n, 1), var)
         rows = []
-        for r in self.top_rows(limit):
+        for r in self.top_rows(limit, family=family if family in FAMILIES else None):
             mt = r.metrics or {}
             rule = rule_from_dict(r.rule)
             dsr = psr_from_stats(mt["sr"], mt["skew"], mt["kurt"], mt["T"], sr0) if mt.get("T") else None
             rows.append({"id": r.id, "rules": rule.describe(), "rule": rule.to_dict(), "origin": r.origin,
+                         "family": rule.family, "family_name": FAMILY_NAMES[rule.family],
                          "consistency": r.fitness, "sharpe": mt.get("sharpe"), "total_return": mt.get("total_return"),
                          "max_drawdown": mt.get("max_drawdown"), "n_trades": mt.get("n_trades"),
                          "win_rate": mt.get("win_rate"), "avg_trade": mt.get("avg_trade"),
@@ -722,9 +992,12 @@ class IntradayLab:
                          "blocks": mt.get("blocks"), "halves": mt.get("halves"), "complexity": mt.get("complexity"),
                          "dsr": dsr, "status": r.status, "validation": r.validation, "final": r.final})
         with self.sf() as s:
-            n_here = s.scalar(select(func.count()).select_from(m.IntradayCandidate).where(
-                m.IntradayCandidate.universe_id == self.universe_id)) or 0
+            per = dict(s.execute(select(m.IntradayCandidate.family, func.count()).where(
+                m.IntradayCandidate.universe_id == self.universe_id).group_by(m.IntradayCandidate.family)).all())
+        n_here = sum(per.values())
+        by_family = {f: per.get(f, 0) + (per.get(None, 0) if f == "orb" else 0) for f in FAMILIES}
         return _clean({"dataset": self.dataset, "rows": rows, "n_trials": n, "n_trials_here": n_here,
+                       "by_family": by_family, "family_names": FAMILY_NAMES,
                        "passive": passive, "symbols": len(self.days), "epoch": self.epoch,
                        "periods": {"search": [str(self.search_sessions[0].date()), str(self.search_sessions[-1].date())],
                                    "pre_exam": [str(self.pre_sessions[0].date()), str(self.pre_sessions[-1].date())],

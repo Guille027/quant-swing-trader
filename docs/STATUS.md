@@ -131,7 +131,11 @@ because concurrent positions are not independent.
       hand-made days, no change of earlier trades when later data is removed, no edge on random walks, OOS boundary
       fixed per dataset in the DB (new epoch only when history doubles), search never loads the vault, final test
       once per rule and epoch (tests)
-- [ ] Intraday: more pattern families (gap fade/continuation, VWAP); simulation of intraday rules day by day
+- [x] Intraday pattern families: opening gap (fade / follow) and VWAP (cross / return), with exact hand-made-day,
+      no-look-ahead and random-walk tests; ranking filter per family
+- [x] Intraday paper simulation of a frozen rule on new sessions: append-only journal (revisions never change a
+      recorded day), Telegram summary per session, intraday bars refreshed after each session while the app is open
+- [x] Launcher: a silent process on the port is cleared (python only), failed starts reported at once with the reason
 
 ### Data manager / speed (2026-10-04)
 - [x] Download jobs validate every symbol; failures reported per symbol, never filled

@@ -50,9 +50,11 @@ qsts evolve --symbols AAPL,MSFT --train 2012-01-01:2017-12-31 --validate 2018-01
 python scripts/run_baselines.py --oos-start 2023-01-01   # baselines through the full pipeline (one OOS read per version)
 qsts autoresearch --cycles 3   # automatic search for the most consistent strategy (also: UI tab "Investigación IA")
 ```
-UI tab **Intradía**: downloads 5-minute or 1-hour bars (Yahoo: 60 days / ~730 days; stored bars accumulate) for the
-most traded stocks you have and searches opening-range breakout rules (long/short, one trade per stock and day) with
-the same discipline as the daily search (vault fixed at first use, pre-exam, one-time final test).
+UI tab **Intradía**: downloads 5-minute or 1-hour bars (Yahoo: 60 days / ~730 days; stored bars accumulate and are
+refreshed after each session while the app is open) for the most traded stocks you have and searches day-trading
+rules (long/short, one trade per stock and day): opening-range breakout, opening gap (fade / follow) and VWAP
+(cross / return), with the same discipline as the daily search (vault fixed at first use, pre-exam, one-time final
+test). A chosen rule can be simulated day by day on new sessions (forward test, Telegram summary per session).
 Screenshots in `docs/screenshots/` were taken with SYNTHETIC random-walk data (symbols `SYN_*`) — they show the UI, not market results.
 
 ## Layout
