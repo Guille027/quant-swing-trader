@@ -111,6 +111,8 @@ because concurrent positions are not independent.
 - [x] DSR null = Sharpe of holding the same stocks (floored at 0), not zero: "Fiabilidad" means beating doing nothing (tested)
 - [x] Two computers via OneDrive: consistent compressed snapshot on close, load on the other one (backup first),
       incomplete uploads and overwrites of unloaded copies refused (tests); UNVERIFIED with real OneDrive
+- [x] Anti-overfitting search: score on two stock halves, 2-year pre-exam never seen by the search (bit-identical
+      score when those years change; tested), max 2 entry conditions, complexity penalty 0.05
 - [x] Search diversity: indicator share cap, random newcomers, diverse seeds, AI told crowded ideas, ranking grouped
       by idea (tests)
 - [x] Faster validation (indicators reused across walk-forward windows, bit-identical; tested), cached price frames,

@@ -269,7 +269,8 @@ const STATUS = { EVALUATED: "probada", INVALID: "no puntuable", VALIDATED_PASS: 
 const GATES = { min_trades: "suficientes operaciones", overfit_risk: "riesgo de sobreajuste aceptable", max_drawdown: "caída máxima aceptable",
   walk_forward: "funciona en ventanas móviles (walk-forward)", beats_baselines: "supera a las estrategias de referencia",
   robustness: "aguanta pequeños cambios de parámetros", costs_2x: "sigue ganando con el doble de costes",
-  beats_passive: "supera a mantener todas las acciones sin hacer nada (consistencia y Sharpe)" };
+  beats_passive: "supera a mantener todas las acciones sin hacer nada (consistencia y Sharpe)",
+  pre_exam: "aprueba el examen previo (años reservados que la búsqueda nunca vio): gana dinero, supera a no hacer nada y conserva al menos la mitad de su Sharpe" };
 let optsRestored = false;
 function openAuto() { loadAuto(true); autoTimer = setInterval(() => loadAuto(false), 3000); }
 async function loadAuto(full) {
@@ -294,7 +295,9 @@ async function loadAuto(full) {
 async function loadBoard() {
   let lb; finalsUsed = null;
   try { lb = await api(`/api/autoresearch/leaderboard?limit=25&group=${$("#ar-group").checked}`); } catch (e) { $("#ar-board-note").textContent = e.message; return; }
-  $("#ar-period").textContent = `${lb.research_period[0].slice(0, 4)}–${lb.research_period[1].slice(0, 4)}`;
+  const sp = lb.search_period || lb.research_period;
+  $("#ar-period").textContent = `${sp[0].slice(0, 4)}–${sp[1].slice(0, 4)}`;
+  if (lb.pre_exam_period) $("#ar-pre").textContent = `${lb.pre_exam_period[0].slice(0, 4)}–${lb.pre_exam_period[1].slice(0, 4)}`;
   $("#ar-board-note").innerHTML = previousNote(lb) + `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
     `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${(finalsUsed = lb.final_tests_used)}</b>. ` +
     `<b>Pulsa una fila para ver su backtest.</b> ` +
@@ -372,12 +375,20 @@ function showDetail(r) {
   const blocks = (r.blocks || []).map(b => `<tr><td>${b.start} → ${b.end}</td><td>${fmt(b.sharpe)}</td><td>${pct(b.return)}</td><td>${b.trades}</td></tr>`).join("");
   let h = `<p><span class="badge">${ORIGIN[r.origin] || r.origin}</span><b>${esc(r.rules)}</b></p>
     <p class="muted">Id ${r.id}${r.strategy_id ? " · en Estrategias como " + esc(r.strategy_id) : ""}</p>
-    <h4>Los 3 tramos del pasado</h4><table><tr><th>Periodo</th><th>Sharpe</th><th>Rentabilidad</th><th>Operaciones</th></tr>${blocks}</table>`;
+    <h4>Los 3 tramos del pasado</h4><table><tr><th>Periodo</th><th>Sharpe</th><th>Rentabilidad</th><th>Operaciones</th></tr>${blocks}</table>` +
+    (r.halves ? `<p class="muted">Con cada mitad de las acciones por separado (peor tramo): ` +
+      r.halves.map(x => `mitad ${x.name}: <b>${fmt(x.consistency, 3)}</b> (${x.n_trades} operaciones)`).join(" · ") + `. La consistencia es el peor de todos.</p>` : "");
   const v = r.validation;
   if (v) {
     h += `<h4>Validación: ${v.passed ? '<span class="good">PASA</span>' : '<span class="bad">NO PASA</span>'}</h4><ul>` +
       Object.entries(v.gates).map(([k, ok]) => `<li>${ok ? '<span class="good">✔</span>' : '<span class="bad">✘</span>'} ${GATES[k] || k}</li>`).join("") + "</ul>" +
       `<p class="muted">Estrategias de referencia (Sharpe): ${Object.entries(v.baselines || {}).map(([k, x]) => `${k} ${fmt(x)}`).join(" · ")} — esta: ${fmt(v.is_metrics?.sharpe)}</p>`;
+    const pe = v.pre_exam;
+    if (pe) h += `<h4>Examen previo (${pe.period.join(" → ")}): ${pe.passed ? '<span class="good">APRUEBA</span>' : '<span class="bad">SUSPENDE</span>'}</h4>
+      <table><tr><th></th><th>Rentabilidad</th><th>Sharpe</th><th>Caída máx.</th></tr>
+        <tr><td><b>Esta estrategia</b></td><td>${pct(pe.metrics.total_return)}</td><td>${fmt(pe.metrics.sharpe)}</td><td>${pct(pe.metrics.max_drawdown)}</td></tr>
+        <tr><td>Mismas acciones sin hacer nada</td><td>${pct(pe.passive.total_return)}</td><td>${fmt(pe.passive.sharpe)}</td><td>${pct(pe.passive.max_drawdown)}</td></tr></table>
+      <p class="muted small">Años que la búsqueda nunca usó para elegir. Se juzga con las mismas reglas que el test final; Sharpe en la búsqueda: ${fmt(pe.search_sharpe)}.</p>`;
   } else if (r.origin === "baseline") h += `<p class="muted">Estrategia de referencia (muy simple): no se valida ni se opera; sirve de listón. Una estrategia nueva tiene que superarla.</p>`;
   else h += `<p class="muted">Aún no validada (se validan automáticamente las mejores de cada ciclo).</p>`;
   if (r.final) {

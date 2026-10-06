@@ -53,7 +53,11 @@ class AutoResearchConfig:
     blocks: int = 3                 # consecutive sub-periods for the consistency score
     min_trades: int = 30
     min_block_trades: int = 5
-    complexity_penalty: float = 0.03
+    complexity_penalty: float = 0.05  # Sharpe points per complexity point (params + rules + indicators)
+    max_conditions: int = 2           # entry conditions per strategy (fewer = less room to memorise the past)
+    split_halves: bool = True         # the score must hold on two random halves of the stocks, separately
+    split_seed: int = 7
+    holdout_years: float = 2.0        # "examen previo": last years of the research period, never seen by the search
     max_holding_days: int = 20      # swing trading: every position is closed after at most this many sessions
     population: int = 20
     generations: int = 4
@@ -181,26 +185,47 @@ def describe(sd: StrategyDefinition) -> str:
 
 
 # ---------------------------------------------------------------------- consistency score
-class ConsistencyEvaluator:
-    """One backtest over the research window, then the equity curve is cut into consecutive blocks."""
+def split_universe(symbols, seed: int = 7) -> list[list[str]]:
+    """Two random halves of the stocks (fixed seed: same halves for every strategy of a ranking)."""
+    syms = sorted(symbols)
+    rng = np.random.default_rng(seed)
+    order = [syms[i] for i in rng.permutation(len(syms))]
+    return [sorted(order[: len(order) // 2]), sorted(order[len(order) // 2:])]
 
-    def __init__(self, research: dict[str, pd.DataFrame], start, end, bt_cfg: BacktestConfig, cfg: AutoResearchConfig):
+
+def _blocks(res, n_blocks: int, bars_per_year: int) -> list[dict]:
+    rets = res.equity["equity"].pct_change().dropna()
+    tr = res.trades
+    entries = pd.DatetimeIndex(tr["entry_ts"]) if len(tr) else pd.DatetimeIndex([], tz="UTC")
+    out = []
+    for b in np.array_split(np.arange(len(rets)), n_blocks):
+        r = rets.iloc[b]
+        sdev = r.std(ddof=1)
+        out.append({"start": str(r.index[0].date()), "end": str(r.index[-1].date()),
+                    "sharpe": float(r.mean() / sdev * np.sqrt(bars_per_year)) if sdev > 0 else 0.0,
+                    "return": float((1 + r).prod() - 1),
+                    "trades": int(((entries >= r.index[0]) & (entries <= r.index[-1])).sum())})
+    return out
+
+
+class ConsistencyEvaluator:
+    """One backtest over the SEARCH window cut into consecutive blocks; with `halves`, the same strategy is also
+    run on each half of the stocks separately and must hold in every block of both (a rule that only fits some
+    stocks fails here). The score is the worst block Sharpe of all of them minus the complexity penalty."""
+
+    def __init__(self, research: dict[str, pd.DataFrame], start, end, bt_cfg: BacktestConfig, cfg: AutoResearchConfig,
+                 halves: list[list[str]] | None = None):
         self.data, self.start, self.end, self.bt, self.cfg = research, start, end, bt_cfg, cfg
+        self.halves = [h for h in (halves or []) if h]
 
     def evaluate(self, sd: StrategyDefinition) -> tuple[float | None, dict]:
-        res, mt = run_window(sd, self.data, self.bt, self.start, self.end)
+        with signal_cache(max_items=2 * len(self.data) + 10):  # the halves reuse the signals of the full run
+            res, mt = run_window(sd, self.data, self.bt, self.start, self.end)
+            parts = [run_window(sd, {k: self.data[k] for k in h}, self.bt, self.start, self.end)
+                     for h in self.halves]
         eq = res.equity["equity"]
         rets = eq.pct_change().dropna()
-        tr = res.trades
-        entries = pd.DatetimeIndex(tr["entry_ts"]) if len(tr) else pd.DatetimeIndex([], tz="UTC")
-        blocks = []
-        for b in np.array_split(np.arange(len(rets)), self.cfg.blocks):
-            r = rets.iloc[b]
-            sdev = r.std(ddof=1)
-            blocks.append({"start": str(r.index[0].date()), "end": str(r.index[-1].date()),
-                           "sharpe": float(r.mean() / sdev * np.sqrt(self.bt.bars_per_year)) if sdev > 0 else 0.0,
-                           "return": float((1 + r).prod() - 1),
-                           "trades": int(((entries >= r.index[0]) & (entries <= r.index[-1])).sum())})
+        blocks = _blocks(res, self.cfg.blocks, self.bt.bars_per_year)
         yearly = periodic_returns(eq, "YE")
         st = return_stats(rets) or {}
         cx = sd.complexity()["score"]
@@ -218,7 +243,21 @@ class ConsistencyEvaluator:
         if thin:
             metrics["invalid_reason"] = f"casi sin operaciones en {thin[0]['start']}→{thin[0]['end']}"
             return None, _clean(metrics)
-        fit = min(b["sharpe"] for b in blocks) - self.cfg.complexity_penalty * cx
+        worst = [b["sharpe"] for b in blocks]
+        halves = []
+        for name, (pres, pmt) in zip("AB", parts):
+            pb = _blocks(pres, self.cfg.blocks, self.bt.bars_per_year)
+            halves.append({"name": name, "consistency": min(b["sharpe"] for b in pb), "sharpe": pmt.get("sharpe"),
+                           "n_trades": pmt.get("n_trades", 0), "blocks": pb})
+            low = [b for b in pb if b["trades"] < max(2, self.cfg.min_block_trades // 2)]
+            if low:
+                metrics["halves"] = halves
+                metrics["invalid_reason"] = f"casi sin operaciones con la mitad {name} de las acciones en {low[0]['start']}"
+                return None, _clean(metrics)
+            worst += [b["sharpe"] for b in pb]
+        if halves:
+            metrics["halves"] = halves
+        fit = min(worst) - self.cfg.complexity_penalty * cx
         return float(fit), _clean(metrics)
 
 
@@ -277,7 +316,16 @@ class AutoResearcher:
                              "(o carga la copia de otro ordenador en Inicio)")
         self.index = idx[cfg.warmup_bars:]
         self.start, self.end = self.index[0], self.index[-1]
-        self.evaluator = ConsistencyEvaluator(self.research, self.start, self.end, bt_cfg, cfg)
+        # the search only sees [start, search_end]; the last `holdout_years` are a pre-exam it never optimises on
+        self.search_end, self.holdout_start = self.end, None
+        if cfg.holdout_years > 0:
+            cut = self.end - pd.DateOffset(years=cfg.holdout_years)
+            before = self.index[self.index <= cut]
+            if len(before) >= 2 * 252:
+                self.search_end, self.holdout_start = before[-1], self.index[self.index > cut][0]
+        self.search_index = self.index[self.index <= self.search_end]
+        self.halves = split_universe(self.research, cfg.split_seed) if cfg.split_halves and len(self.research) >= 4 else []
+        self.evaluator = ConsistencyEvaluator(self.research, self.start, self.search_end, bt_cfg, cfg, self.halves)
         self.dataset_id = hash_obj(dataset_fingerprint(self.research), 32)
         self.benchmark = benchmark
         # a ranking only compares strategies scored on the same symbols, window and scoring rules
@@ -286,6 +334,10 @@ class AutoResearcher:
                "min_trades": cfg.min_trades, "min_block_trades": cfg.min_block_trades,
                "complexity_penalty": cfg.complexity_penalty, "engine": _engine_key(bt_cfg),
                "engine_version": ENGINE_VERSION}
+        if self.halves:
+            key["split_halves"] = cfg.split_seed
+        if self.holdout_start is not None:
+            key["holdout_start"] = str(self.holdout_start.date())
         if bt_cfg.earnings_blackout_days or bt_cfg.exit_before_earnings:
             # the earnings rules make scores depend on the earnings data; with the rules off, strategies that do not
             # use earnings features score identically, so earlier rankings stay valid
@@ -336,17 +388,22 @@ class AutoResearcher:
         """'Do nothing' benchmark on the SAME stocks: hold all of them, equal weight, rebalanced daily, no costs
         (favours the benchmark). Scored exactly like a candidate (worst of the same blocks)."""
         if getattr(self, "_passive", None) is None:
-            rets = pd.concat({k: v["close"].pct_change() for k, v in self.research.items()}, axis=1)
-            rets = rets[(rets.index >= self.start) & (rets.index <= self.end)].mean(axis=1, skipna=True).fillna(0.0)
+            allr = pd.concat({k: v["close"].pct_change() for k, v in self.research.items()}, axis=1)
+            allr = allr[(allr.index >= self.start) & (allr.index <= self.search_end)]
+            rets = allr.mean(axis=1, skipna=True).fillna(0.0)
             eq = (1 + rets).cumprod() * self.bt.initial_capital
             def sharpe(r):
                 sd = r.std(ddof=1)
                 return float(r.mean() / sd * np.sqrt(self.bt.bars_per_year)) if sd > 0 else 0.0
             blocks = [rets.iloc[b] for b in np.array_split(np.arange(len(rets)), self.cfg.blocks)]
+            half_blocks = []  # scored exactly like a strategy: worst block of the full set and of both halves
+            for h in self.halves:
+                hr = allr[[c for c in h if c in allr.columns]].mean(axis=1, skipna=True).fillna(0.0)
+                half_blocks += [hr.iloc[b] for b in np.array_split(np.arange(len(hr)), self.cfg.blocks)]
             yearly = periodic_returns(eq, "YE")
             self._passive = _clean({
                 "rules": f"Mantener las {len(self.research)} acciones a partes iguales, sin hacer nada",
-                "consistency": min(sharpe(b) for b in blocks), "sharpe": sharpe(rets),
+                "consistency": min(sharpe(b) for b in blocks + half_blocks), "sharpe": sharpe(rets),
                 "cagr": float((eq.iloc[-1] / eq.iloc[0]) ** (self.bt.bars_per_year / max(len(eq) - 1, 1)) - 1),
                 "max_drawdown": float((eq / eq.cummax() - 1).min()), "pct_positive_years": float((yearly > 0).mean()),
                 "worst_year": float(yearly.min()),
@@ -354,10 +411,22 @@ class AutoResearcher:
                             "return": float((1 + b).prod() - 1)} for b in blocks]})
         return self._passive
 
+    def pre_exam(self, sd: StrategyDefinition, search_sharpe: float | None) -> dict:
+        """'Examen previo' on the last research years the search never optimised on, judged with the SAME rules as
+        the final test: makes money, beats holding the same stocks (Sharpe), keeps half of its search Sharpe."""
+        _, mh = run_window(sd, self.research, self.bt, self.holdout_start, self.end)
+        rets = pd.concat({k: v["close"].pct_change() for k, v in self.research.items()}, axis=1)
+        rets = rets[(rets.index >= self.holdout_start) & (rets.index <= self.end)].mean(axis=1, skipna=True)
+        passive = window_stats(rets, self.bt.bars_per_year)
+        metrics = {k: mh.get(k) for k in ("total_return", "sharpe", "max_drawdown", "n_trades")}
+        verdict = final_verdict(metrics, search_sharpe, passive)
+        return _clean({"period": [str(self.holdout_start.date()), str(self.end.date())], "metrics": metrics,
+                       "passive": passive, "search_sharpe": search_sharpe, **verdict})
+
     def baseline_sharpes(self) -> dict:
         """Sharpe of the simple reference strategies on the research window (the same for every validation)."""
         if getattr(self, "_baselines", None) is None:
-            self._baselines = {b.name: run_window(b, self.research, self.bt, self.start, self.end)[1].get("sharpe")
+            self._baselines = {b.name: run_window(b, self.research, self.bt, self.start, self.search_end)[1].get("sharpe")
                                for b in (momentum_baseline(), trend_baseline())}
         return dict(self._baselines)
 
@@ -507,6 +576,8 @@ class AutoResearcher:
         out, per = [], {}
         for r in self._top_rows(self.cfg.elites_from_history * 40, "evolution"):
             sd = definition_from_dict(r.definition)
+            if not self.simple_enough(sd):
+                continue
             k = idea(sd)
             if per.get(k, 0) < self.cfg.elites_per_idea:
                 per[k] = per.get(k, 0) + 1
@@ -524,15 +595,19 @@ class AutoResearcher:
         if self._engine is None:
             self.phase = "preparando datos"
             self._engine = _ConsistencyEvolution(
-                self, self.research, (self.start, self.end), self.bt,
+                self, self.research, (self.start, self.search_end), self.bt,
                 EvolutionConfig(population=self.cfg.population, generations=self.cfg.generations, seed=self.cfg.seed,
                                 init_hold_choices=self._holds(), hold_choices=self._holds(),
                                 complexity_penalty=self.cfg.complexity_penalty, immigrants=self.cfg.immigrants,
+                                max_conditions=self.cfg.max_conditions,
                                 max_feature_share=self.cfg.max_feature_share))
         return self._engine
 
     def _holds(self) -> tuple:
         return tuple(h for h in (2, 3, 5, 7, 10, 15, 20) if h <= self.cfg.max_holding_days) or (self.cfg.max_holding_days,)
+
+    def simple_enough(self, sd: StrategyDefinition) -> bool:
+        return len(sd.entry_long) + len(sd.entry_short) <= self.cfg.max_conditions
 
     def holding_ok(self, sd: StrategyDefinition) -> bool:
         if sd.max_holding_bars is None:
@@ -569,7 +644,7 @@ class AutoResearcher:
                 picked.append(r)
             if len(picked) >= n:
                 break
-        picked = [r for r in picked if self.holding_ok(definition_from_dict(r.definition))]
+        picked = [r for r in picked if self.holding_ok(sd := definition_from_dict(r.definition)) and self.simple_enough(sd)]
         for r in picked:
             self.check_stop()
             self.evaluate_and_store(definition_from_dict(r.definition), r.origin, 0)
@@ -645,10 +720,14 @@ class AutoResearcher:
             key = (x or "error").split("(")[0].strip()[:60]
             failures[key] = failures.get(key, 0) + 1
         return {"goal": ("Find LONG-ONLY daily swing-trading rules for these US large caps that are CONSISTENT: the "
-                         "score is the WORST annualised Sharpe across 3 consecutive sub-periods of the research window, "
-                         "minus 0.03 per complexity point. Few rules, few parameters, at least 30 trades. Every trade "
-                         f"must close within {self.cfg.max_holding_days} trading days."),
-                "universe": sorted(self.research), "research_period": [str(self.start.date()), str(self.end.date())],
+                         f"score is the WORST annualised Sharpe across {self.cfg.blocks} consecutive sub-periods of the "
+                         "research window" + (", computed separately on two random halves of the stocks (the rule must "
+                                              "work on both)" if self.halves else "") +
+                         f", minus {self.cfg.complexity_penalty} per complexity point. At most "
+                         f"{self.cfg.max_conditions} entry conditions, few parameters, at least {self.cfg.min_trades} "
+                         f"trades. Every trade must close within {self.cfg.max_holding_days} trading days. Prefer simple, "
+                         "economically sensible ideas: complicated rules memorise the past and fail on new data."),
+                "universe": sorted(self.research), "research_period": [str(self.start.date()), str(self.search_end.date())],
                 "best_so_far": best, "recent_failure_reasons": failures, "trials_so_far": n,
                 "indicator_ideas_among_top_results": ideas,
                 "diversity_request": (f"Most of the top results are variants built on {', '.join(crowded)}. Do NOT propose "
@@ -686,6 +765,10 @@ class AutoResearcher:
                 self._last_ai_rejections.append(f"{sd.name}: max_holding_bars must be 1..{self.cfg.max_holding_days}")
                 self.log(f"IA: '{sd.name}' descartada (no cierra en {self.cfg.max_holding_days} días como máximo)")
                 continue
+            if not self.simple_enough(sd):
+                self._last_ai_rejections.append(f"{sd.name}: at most {self.cfg.max_conditions} entry conditions")
+                self.log(f"IA: '{sd.name}' descartada (más de {self.cfg.max_conditions} condiciones de compra)")
+                continue
             fit, met, new = self.evaluate_and_store(sd, "ai", cycle)
             self.log(f"IA: '{sd.name}' → " + (f"consistencia {fit:.3f}" if fit is not None else
                                               f"no puntuable ({met.get('invalid_reason', 'error')})"))
@@ -693,12 +776,17 @@ class AutoResearcher:
     # -------------------------------------------------------------- validation (research data only)
     def _validate_finalists(self) -> int:
         pool = self._top_rows(self.cfg.finalist_pool)
-        stale = [r for r in pool if r.status == "VALIDATED_PASS" and "beats_passive" not in ((r.validation or {}).get("gates") or {})]
+        stale = [r for r in pool if r.status == "VALIDATED_PASS" and self._stale_validation(r)]
         todo = (stale + [r for r in pool if r.status == "EVALUATED" and r.origin != "baseline"])[: self.cfg.finalists_per_cycle]
         for r in todo:
             self.check_stop()
             self.validate(r.id)
         return len(todo)
+
+    def _stale_validation(self, row) -> bool:
+        """Validated under older rules (no passive gate / no pre-exam): re-check before trusting it."""
+        gates = (row.validation or {}).get("gates") or {}
+        return "beats_passive" not in gates or (self.holdout_start is not None and "pre_exam" not in gates)
 
     def validate(self, vid: str) -> dict:
         row = self.get_row(vid)
@@ -711,17 +799,20 @@ class AutoResearcher:
                 self.phase = f"validando {vid[:8]}: {txt} {done + 1}/{total}"
             return cb
         n_trials, var_sr = self.trial_stats()
-        res, mt = run_window(sd, self.research, self.bt, self.start, self.end)
-        folds = make_folds(self.index, self.cfg.wf_train, self.cfg.wf_validate, self.cfg.wf_test, self.cfg.embargo)
+        # every check below uses the SEARCH window only; the pre-exam period is used once, at the end
+        res, mt = run_window(sd, self.research, self.bt, self.start, self.search_end)
+        folds = make_folds(self.search_index, self.cfg.wf_train, self.cfg.wf_validate, self.cfg.wf_test,
+                           self.cfg.embargo)
         with signal_cache(max_items=2 * len(self.research) + 10):  # one strategy, many windows: signals once
             wf = walk_forward(sd, self.research, {k: [v] for k, v in sd.params.items()}, folds, self.bt,
                               progress=step("ventanas móviles")) if folds else None
-        rob = parameter_robustness(sd, self.research, self.bt, self.start, self.end,
+        rob = parameter_robustness(sd, self.research, self.bt, self.start, self.search_end,
                                    progress=step("cambios de parámetros")) if sd.params else None
         step("costes dobles y referencias")(0, 1)
         mc = monte_carlo_trades(res.trades, self.bt.initial_capital, self.cfg.mc_sims, self.cfg.seed)
-        costs = cost_sensitivity(sd, self.research, self.bt, self.start, self.end, multipliers=(1.0, 2.0))
+        costs = cost_sensitivity(sd, self.research, self.bt, self.start, self.search_end, multipliers=(1.0, 2.0))
         base = self.baseline_sharpes()
+        pre = self.pre_exam(sd, mt.get("sharpe")) if self.holdout_start is not None else None
         self.phase = phase0
         ovf = overfitting_risk(metrics=mt, complexity=sd.complexity(), trades=res.trades, returns=res.returns,
                                n_trials=max(n_trials, 1), var_trial_sr=var_sr,
@@ -739,6 +830,8 @@ class AutoResearcher:
         pas = self.passive_reference()
         gates["beats_passive"] = (row.fitness is not None and row.fitness > pas["consistency"]
                                   and (mt.get("sharpe") or -np.inf) > pas["sharpe"])
+        if pre is not None:
+            gates["pre_exam"] = pre["passed"]
         gates = {k: bool(v) for k, v in gates.items()}
         passed = all(gates.values())
         sid = f"auto-{row.origin}-{(row.version_id or vid)[:8]}-{self.universe_id[:4]}"
@@ -765,6 +858,7 @@ class AutoResearcher:
                       "robustness": None if rob is None else {"stability": rob.stability, "passed": rob.passed,
                                                               "peak_sharpness": rob.peak_sharpness},
                       "monte_carlo": {k: v for k, v in mc.items() if k != "paths"}, "costs": costs, "baselines": base,
+                      "pre_exam": pre,
                       "overfitting": ovf, "score": sc["score"], "is_metrics": {k: mt.get(k) for k in
                                                                               ("sharpe", "cagr", "max_drawdown", "n_trades")}})
         with self.sf() as s, s.begin():
@@ -777,7 +871,7 @@ class AutoResearcher:
     def final_test(self, vid: str) -> dict:
         """Opens the OOS vault for this version (once, logged). Only for candidates that passed validation."""
         row = self.get_row(vid)
-        if row.status == "VALIDATED_PASS" and "beats_passive" not in ((row.validation or {}).get("gates") or {}):
+        if row.status == "VALIDATED_PASS" and self._stale_validation(row):
             self.validate(vid)  # validated under older rules: re-check before spending the one-time test
             row = self.get_row(vid)
         if row.status != "VALIDATED_PASS":
@@ -886,7 +980,8 @@ class AutoResearcher:
                          "max_drawdown": mt.get("max_drawdown"), "n_trades": mt.get("n_trades"),
                          "pct_positive_years": mt.get("pct_positive_years"), "worst_year": mt.get("worst_year"),
                          "avg_days": mt.get("avg_trade_bars"),
-                         "blocks": mt.get("blocks"), "dsr": dsr, "status": r.status, "strategy_id": r.strategy_id,
+                         "blocks": mt.get("blocks"), "halves": mt.get("halves"), "dsr": dsr, "status": r.status,
+                         "strategy_id": r.strategy_id,
                          "validation": r.validation, "final": r.final})
             by_idea.setdefault(k, rows[-1])
         R = m.ResearchCandidate
@@ -901,6 +996,10 @@ class AutoResearcher:
                        "passive": passive, "previous": self.previous_ranking(),
                        "by_status": by_status, "equivalents_hidden": hidden, "grouped": group,
                        "research_period": [str(self.start.date()), str(self.end.date())], "oos_start": self.cfg.oos_start,
+                       "search_period": [str(self.start.date()), str(self.search_end.date())],
+                       "pre_exam_period": [str(self.holdout_start.date()), str(self.end.date())] if self.holdout_start is not None else None,
+                       "rules": {"halves": bool(self.halves), "max_conditions": self.cfg.max_conditions,
+                                 "complexity_penalty": self.cfg.complexity_penalty},
                        "rows": rows})
 
 

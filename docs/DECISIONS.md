@@ -113,3 +113,12 @@
     computer loads it at its next start after backing up its own data. Overwriting a copy that was not loaded, and
     researching or sending Telegram messages while a newer copy waits, are refused or warned about. Secrets stay in
     each computer's `.env`.
+32. **A harder search instead of more final tests.** Many cycles produced research results far above buy & hold that
+    failed the final test: the search was fitting noise. Three rules make it harder to fool, without touching the
+    OOS vault: (1) the consistency score is the worst block Sharpe of the whole universe AND of two random halves of
+    the stocks run separately (a rule that only fits some stocks fails); (2) the last 2 research years are a
+    "pre-exam" the search never optimises on (fitness, walk-forward, robustness, costs, baselines, passive bar and
+    the AI context all stop before it; feature thresholds come from the search window); finalists must pass it with
+    the final-test rules before being offered the final test; (3) at most 2 entry conditions (evolution, AI,
+    seeds, imports) and a complexity penalty of 0.05 instead of 0.03. This is a new ranking; the best simple-enough
+    strategies of the previous one are re-scored first. Evaluation costs ~40% more (the halves reuse the signals).

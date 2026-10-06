@@ -122,6 +122,7 @@ def test_final_test_only_after_validation_and_only_once(sf, data, monkeypatch):
     monkeypatch.setattr(ar, "parameter_robustness",
                         lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
     monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": -99.0, "sharpe": -99.0})
+    monkeypatch.setattr(r, "pre_exam", lambda sd, sh: {"passed": True})
     val = r.validate(vid)
     assert val["passed"] is True
     final = r.final_test(vid)
@@ -156,6 +157,7 @@ def test_old_lenient_final_pass_is_rejudged_without_reopening_the_vault(sf, data
     monkeypatch.setattr(ar, "parameter_robustness",
                         lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
     monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": -99.0, "sharpe": -99.0})
+    monkeypatch.setattr(r, "pre_exam", lambda sd, sh: {"passed": True})
     assert r.validate(vid)["passed"] is True
     with monkeypatch.context() as mp:  # pass it the way the old rule could
         mp.setattr(ar, "final_verdict", lambda *a, **k: {"checks": {"positive": True}, "passed": True})
@@ -268,6 +270,64 @@ def test_diverse_seeds_grouped_ranking_and_ai_told_to_explore(sf, data):
     assert set(ctx["indicator_ideas_among_top_results"]) >= {"rsi", "roc"} and "Do NOT propose" in ctx["diversity_request"]
 
 
+def test_search_never_sees_the_pre_exam_years(sf, data):
+    cfg = AutoResearchConfig(**{**CFG.__dict__, "use_ai": False})
+    r = researcher(sf, data, cfg=cfg)
+    assert r.holdout_start is not None and r.search_end < r.holdout_start <= r.end
+    sd = _variant("rsi", 45.0)
+    fit, mt = r.evaluator.evaluate(sd)
+    # rewrite every price after the search window (the pre-exam years): the score must not change at all
+    rng = np.random.default_rng(1)
+    changed = {}
+    for k, v in data.items():
+        df = v.copy()
+        late = df.index > r.search_end
+        df.loc[late, ["open", "high", "low", "close"]] *= rng.uniform(0.5, 1.5, size=(int(late.sum()), 1))
+        changed[k] = df
+    r2 = AutoResearcher(sf, changed, cfg, BacktestConfig())
+    fit2, mt2 = r2.evaluator.evaluate(sd)
+    assert fit == fit2 and mt["blocks"] == mt2["blocks"] and mt["period"][1] == str(r.search_end.date())
+    assert r2.pre_exam(sd, 1.0)["metrics"] != r.pre_exam(sd, 1.0)["metrics"]  # ... while the pre-exam does see them
+
+
+def test_score_must_hold_on_both_halves_of_the_stocks(sf, data):
+    from qsts.research.autoresearch import split_universe
+    four = {**data, "DDD": data["AAA"].copy()}
+    a, b = split_universe(four, 7)
+    assert sorted(a + b) == sorted(four) and not set(a) & set(b) and split_universe(four, 7) == [a, b]
+    cfg = AutoResearchConfig(**{**CFG.__dict__, "use_ai": False, "min_trades": 5, "min_block_trades": 1})
+    r = researcher(sf, four, cfg=cfg)
+    sd = _variant("rsi", 50.0)
+    fit, mt = r.evaluator.evaluate(sd)
+    assert fit is not None and len(mt["halves"]) == 2
+    worst = min([x["sharpe"] for x in mt["blocks"]] + [x["sharpe"] for h in mt["halves"] for x in h["blocks"]])
+    assert fit == pytest.approx(worst - cfg.complexity_penalty * sd.complexity()["score"])
+    plain = researcher(sf, four, cfg=AutoResearchConfig(**{**cfg.__dict__, "split_halves": False}))
+    fit_all, mt_all = plain.evaluator.evaluate(sd)
+    assert "halves" not in mt_all and fit <= fit_all + 1e-12  # the halves can only make the score stricter
+
+
+def test_validation_includes_the_pre_exam_and_complex_ideas_are_refused(sf, data, monkeypatch):
+    r = researcher(sf, data, cfg=AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}))
+    r.seed_baselines()
+    r.engine().run()
+    vid = r.leaderboard(1)["rows"][0]["id"]
+    val = r.validate(vid)
+    assert "pre_exam" in val["gates"] and val["pre_exam"]["period"][0] == str(r.holdout_start.date())
+    assert set(val["pre_exam"]["checks"]) == {"positive", "beats_passive", "limited_decay"}
+    three = StrategyDefinition(name="three", family="t", hypothesis="h",
+                               entry_long=(Condition(F("rsi", n=14), "<", V(40.0)), Condition(F("roc", n=10), "<", V(0.0)),
+                                           Condition(F("close"), ">", F("sma", n=200))),
+                               stop=StopRule("atr", 14, 2.0), take_profit=TakeProfitRule("none"), max_holding_bars=10)
+    assert r.simple_enough(three) is False and r.simple_enough(_variant("rsi", 40.0)) is True
+    r.evaluate_and_store(three, "evolution", 1)  # e.g. found under the old rules
+    assert all(r.simple_enough(sd) for sd in r.diverse_elites())
+    ctx = r.ai_context()
+    assert "At most 2 entry conditions" in ctx["goal"]
+    assert ("two random halves" in ctx["goal"]) == bool(r.halves)  # (3 stocks: too few to split)
+    assert ctx["research_period"][1] == str(r.search_end.date())  # the AI is never told about the pre-exam years
+
+
 def _definition(sf, vid):
     with sf() as s:
         return s.get(m.ResearchCandidate, vid).definition
@@ -313,6 +373,7 @@ def test_passive_benchmark_is_a_validation_gate(sf, data, monkeypatch):
     monkeypatch.setattr(ar, "parameter_robustness",
                         lambda *a, **k: SimpleNamespace(passed=True, stability=1.0, peak_sharpness=0.0))
     monkeypatch.setattr(r, "passive_reference", lambda: {"consistency": 99.0, "sharpe": 99.0})
+    monkeypatch.setattr(r, "pre_exam", lambda sd, sh: {"passed": True})
     val = r.validate(vid)
     assert val["passed"] is False and val["failed"] == ["beats_passive"]
     # a pass recorded under older rules (no passive gate) is re-checked before the one-time final test
@@ -342,7 +403,8 @@ def test_swing_horizon_enforced(sf, data):
 def test_rules_off_keep_ranking_and_new_rankings_reuse_previous_work(sf, data):
     from qsts.backtest.engine import ENGINE_VERSION
     from qsts.core.hashing import hash_obj
-    off = AutoResearcher(sf, data, AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}), BacktestConfig())
+    plain = {**CFG.__dict__, "use_ai": False, "split_halves": False, "holdout_years": 0}  # newer scoring rules off
+    off = AutoResearcher(sf, data, AutoResearchConfig(**plain), BacktestConfig())
     legacy_key = {"symbols": {k: str(v.index[0].date()) for k, v in sorted(off.research.items())},
                   "oos_start": CFG.oos_start, "warmup": CFG.warmup_bars, "blocks": CFG.blocks,
                   "min_trades": CFG.min_trades, "min_block_trades": CFG.min_block_trades,
@@ -354,7 +416,7 @@ def test_rules_off_keep_ranking_and_new_rankings_reuse_previous_work(sf, data):
     off.seed_baselines()
     off.engine().run()
     best_before = {r["id"] for r in off.leaderboard(5)["rows"]}
-    on = AutoResearcher(sf, data, AutoResearchConfig(**{**CFG.__dict__, "use_ai": False}),
+    on = AutoResearcher(sf, data, AutoResearchConfig(**plain),
                         BacktestConfig(earnings_blackout_days=3, exit_before_earnings=True))
     assert on.universe_id != off.universe_id
     n = on.import_previous(n=5)
