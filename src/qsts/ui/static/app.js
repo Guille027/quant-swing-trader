@@ -282,6 +282,9 @@ async function loadAuto(full) {
     optsRestored = true;
     if (st.last_options.avoid_earnings != null) $("#ar-earn").checked = !!st.last_options.avoid_earnings;
     if (st.last_options.use_ai != null) $("#ar-ai").checked = !!st.last_options.use_ai;
+    if (st.last_options.max_holding_days) $("#ar-hold").value = String(st.last_options.max_holding_days);
+    if (st.last_options.max_conditions) $("#ar-conds").value = String(st.last_options.max_conditions);
+    $("#ar-fresh").checked = !!st.last_options.fresh_start;
   }
   $("#ai-key-box").style.display = st.ai_available ? "none" : "flex";
   if (!st.ai_available) { $("#ar-ai").checked = false; $("#ar-ai").disabled = true; $("#ar-ai").parentElement.title = "Pon QSTS_GEMINI_API_KEY en .env"; }
@@ -298,7 +301,8 @@ async function loadBoard() {
   const sp = lb.search_period || lb.research_period;
   $("#ar-period").textContent = `${sp[0].slice(0, 4)}–${sp[1].slice(0, 4)}`;
   if (lb.pre_exam_period) $("#ar-pre").textContent = `${lb.pre_exam_period[0].slice(0, 4)}–${lb.pre_exam_period[1].slice(0, 4)}`;
-  $("#ar-board-note").innerHTML = previousNote(lb) + `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
+  const ru = lb.rules || {};
+  $("#ar-board-note").innerHTML = previousNote(lb) + (ru.max_holding_days ? `<b>Ranking de operaciones de hasta ${ru.max_holding_days} días y reglas de hasta ${ru.max_conditions} condiciones.</b> ` : "") + `Con tus <b>${lb.universe.n_symbols}</b> acciones se han probado <b>${lb.n_trials_universe}</b> estrategias ` +
     `(${lb.n_trials} en total contando otros conjuntos de datos; todas cuentan para la Fiabilidad) · veces que se ha abierto el periodo guardado: <b>${(finalsUsed = lb.final_tests_used)}</b>. ` +
     `<b>Pulsa una fila para ver su backtest.</b> ` +
     (lb.equivalents_hidden ? `Ocultadas ${lb.equivalents_hidden} variantes equivalentes (mismas operaciones). ` : "") +
@@ -421,7 +425,8 @@ $("#ai-key-save").onclick = async () => {
   loadAuto(false);
 };
 $("#ar-start").onclick = async () => {
-  const body = { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value };
+  const body = { use_ai: $("#ar-ai").checked, avoid_earnings: $("#ar-earn").checked, max_cycles: +$("#ar-cycles").value,
+    max_holding_days: +$("#ar-hold").value, max_conditions: +$("#ar-conds").value, fresh_start: $("#ar-fresh").checked };
   try { const r = await post("/api/autoresearch/start", body).catch(async (e) => {
       if (!/más recientes/.test(e.message) || !confirm(e.message + "\n\n¿Investigar igualmente?")) throw e;
       return post("/api/autoresearch/start", { ...body, ignore_sync: true });

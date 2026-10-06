@@ -223,6 +223,57 @@ register("inside_bar", "price_action")(lambda df: _b(st.inside_bar(df)))
 register("engulfing", "price_action")(lambda df: _b(st.engulfing(df)))
 
 
+# ------------------------------------------------------------------ candle shape / patterns (single + multi-bar)
+def _range(df):
+    return (df["high"] - df["low"]).replace(0, np.nan)
+
+
+register("clv", "price_action")(  # where the close sits in the day's range: 0 = at the low, 1 = at the high
+    lambda df: ((df["close"] - df["low"]) / _range(df)).fillna(0.5))
+register("body_pct", "price_action")(  # signed candle body as a share of the range (-1..1)
+    lambda df: ((df["close"] - df["open"]) / _range(df)).fillna(0.0))
+register("upper_wick", "price_action")(
+    lambda df: ((df["high"] - df[["open", "close"]].max(axis=1)) / _range(df)).fillna(0.0))
+register("lower_wick", "price_action")(
+    lambda df: ((df[["open", "close"]].min(axis=1) - df["low"]) / _range(df)).fillna(0.0))
+register("range_rank", "price_action", n=7)(  # 0 = narrowest range of the last n days (NR7-type squeeze)
+    lambda df, n: (df["high"] - df["low"]).rolling(n, min_periods=n).rank(pct=True))
+register("range_ratio", "price_action", n=20)(  # today's range vs its n-day average (expansion > 1)
+    lambda df, n: (df["high"] - df["low"]) / (df["high"] - df["low"]).rolling(n, min_periods=n).mean())
+
+
+@register("streak", "price_action")
+def _streak(df):
+    """Consecutive up closes (+k) or down closes (-k) up to today."""
+    d = np.sign(df["close"].diff()).fillna(0.0)
+    grp = (d != d.shift()).cumsum()
+    return d * d.groupby(grp).cumcount().add(1).where(d != 0, 0)
+
+
+# ------------------------------------------------------------------ calendar (known in advance: no look-ahead)
+register("day_of_week", "calendar")(lambda df: pd.Series(df.index.dayofweek, index=df.index, dtype="float64"))
+
+
+@register("month_day", "calendar")
+def _month_day(df):
+    """Trading session number within the month (1 = first session)."""
+    key = df.index.year * 100 + df.index.month
+    return pd.Series(pd.Series(1, index=df.index).groupby(key).cumsum().to_numpy(dtype="float64"), index=df.index)
+
+
+@register("month_end_in", "calendar")
+def _month_end_in(df):
+    """Sessions left until the month's last session (0 = last session), from the NYSE calendar."""
+    from qsts.data.bars import nyse_schedule
+    if len(df) == 0:
+        return pd.Series(dtype="float64")
+    sess = nyse_schedule(df.index.min() - pd.Timedelta(days=1), df.index.max() + pd.Timedelta(days=40)).index
+    key = sess.year * 100 + sess.month
+    left = pd.Series(1, index=sess).groupby(key).cumcount(ascending=False)
+    day = df.index.tz_convert("UTC").normalize() if df.index.tz is not None else df.index.normalize()
+    return pd.Series(left.reindex(day).to_numpy(dtype="float64"), index=df.index)
+
+
 # ------------------------------------------------------------------ events (quarterly results)
 # Read the point-in-time columns built by qsts.data.earnings (attached by AppContext.research_frame);
 # NaN when the symbol has no earnings data. Causality is guaranteed by the column builder (tested there).

@@ -91,6 +91,9 @@ class AutoResearchBody(BaseModel):
     max_cycles: int = 0  # 0 = until stopped
     population: int = 20
     generations: int = 4
+    max_holding_days: int = 20   # swing horizon: 5, 10 or 20 sessions (each one is its own ranking)
+    max_conditions: int = 2      # 2 (simpler, less overfitting) or 3 (hybrid rules)
+    fresh_start: bool = False    # explore from zero, without seeds from earlier work
 
 
 class IngestBody(BaseModel):
@@ -702,9 +705,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         if r is None:  # read-only view for the leaderboard / final test when no loop has run yet
             r = ctx.extra.get("autoresearch_view")
             if r is None:
+                lo = _last_options()
                 r = ctx.extra["autoresearch_view"] = ctx.autoresearcher(AutoResearchConfig(
-                    oos_start=ctx.settings.oos_start, use_ai=False,
-                    avoid_earnings=bool(_last_options().get("avoid_earnings", True))))
+                    oos_start=ctx.settings.oos_start, use_ai=False, avoid_earnings=bool(lo.get("avoid_earnings", True)),
+                    max_holding_days=int(lo.get("max_holding_days", 20)), max_conditions=int(lo.get("max_conditions", 2))))
         return r
 
     @app.get("/api/autoresearch/status")
@@ -721,14 +725,18 @@ def create_app(ctx: AppContext) -> FastAPI:
         if newer and not body.ignore_sync:
             raise HTTPException(409, f"Hay datos más recientes de {newer} en la carpeta compartida: cárgalos antes en "
                                      "Inicio. Si investigas ahora y luego los cargas, perderás lo que hagas aquí.")
+        hold = body.max_holding_days if body.max_holding_days in (5, 10, 20) else 20
+        conds = body.max_conditions if body.max_conditions in (2, 3) else 2
         cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai, avoid_earnings=body.avoid_earnings,
-                                 population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)))
+                                 population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)),
+                                 max_holding_days=hold, max_conditions=conds, fresh_start=body.fresh_start)
         started = _runner().start(cfg, max(0, body.max_cycles))
         if started:
             try:
                 options_file.parent.mkdir(parents=True, exist_ok=True)
-                options_file.write_text(json.dumps({"use_ai": body.use_ai, "avoid_earnings": body.avoid_earnings}),
-                                        encoding="utf-8")
+                options_file.write_text(json.dumps({"use_ai": body.use_ai, "avoid_earnings": body.avoid_earnings,
+                                                    "max_holding_days": hold, "max_conditions": conds,
+                                                    "fresh_start": body.fresh_start}), encoding="utf-8")
             except OSError:
                 pass
             ctx.extra.pop("autoresearch_view", None)

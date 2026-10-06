@@ -122,3 +122,9 @@
     the final-test rules before being offered the final test; (3) at most 2 entry conditions (evolution, AI,
     seeds, imports) and a complexity penalty of 0.05 instead of 0.03. This is a new ranking; the best simple-enough
     strategies of the previous one are re-scored first. Evaluation costs ~40% more (the halves reuse the signals).
+33. **More ways to search, same guardrails.** The user asked to keep exploring: horizon 5/10/20 days and rules of up
+    to 2 or 3 conditions are research options (each its own ranking, defaults keep the current one); "partir de
+    cero" seeds only from what the current run finds (escaping one dominant idea) while results still join the same
+    ranking. New causal features describe candles and calendar instead of indicators: close location in the range,
+    body, wicks, NR-type range rank, range expansion, up/down streak, day of week, session of the month and sessions
+    to month end (from the NYSE calendar, so no look-ahead). Every feature passes the automatic causality test.

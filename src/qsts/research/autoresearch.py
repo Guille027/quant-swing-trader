@@ -58,6 +58,7 @@ class AutoResearchConfig:
     split_halves: bool = True         # the score must hold on two random halves of the stocks, separately
     split_seed: int = 7
     holdout_years: float = 2.0        # "examen previo": last years of the research period, never seen by the search
+    fresh_start: bool = False         # explore from zero: no seeds / imports from earlier work (rejoin them later)
     max_holding_days: int = 20      # swing trading: every position is closed after at most this many sessions
     population: int = 20
     generations: int = 4
@@ -336,6 +337,10 @@ class AutoResearcher:
                "engine_version": ENGINE_VERSION}
         if self.halves:
             key["split_halves"] = cfg.split_seed
+        if cfg.max_holding_days != 20:  # another horizon / complexity = another ranking (defaults keep the old one)
+            key["max_holding_days"] = cfg.max_holding_days
+        if cfg.max_conditions != 2:
+            key["max_conditions"] = cfg.max_conditions
         if self.holdout_start is not None:
             key["holdout_start"] = str(self.holdout_start.date())
         if bt_cfg.earnings_blackout_days or bt_cfg.exit_before_earnings:
@@ -351,6 +356,7 @@ class AutoResearcher:
         self._engine: _ConsistencyEvolution | None = None
         self._last_ai_rejections: list[str] = []
         self._imported = False
+        self._run_started = datetime.now(timezone.utc).replace(tzinfo=None)
         self._adopt_legacy_rows()
         self._record_universe()
         self.rejudge_finals()
@@ -560,10 +566,13 @@ class AutoResearcher:
         var = float((mean2 - mean ** 2) * k / (k - 1)) if k and k > 1 else 1.0 / max(len(self.index), 1)
         return int(n), max(var, 1e-12)
 
-    def _top_rows(self, n: int, origin: str | None = None, statuses: tuple[str, ...] | None = None) -> list:
+    def _top_rows(self, n: int, origin: str | None = None, statuses: tuple[str, ...] | None = None,
+                  since=None) -> list:
         with self.sf() as s:
             q = select(m.ResearchCandidate).where(m.ResearchCandidate.fitness.is_not(None),
                                                   m.ResearchCandidate.universe_id == self.universe_id)
+            if since is not None:
+                q = q.where(m.ResearchCandidate.created_at >= since)
             if origin:
                 q = q.where(m.ResearchCandidate.origin == origin)
             if statuses:
@@ -574,9 +583,10 @@ class AutoResearcher:
         """Best earlier strategies to seed a cycle, at most `elites_per_idea` built on the same indicators, so one
         good idea cannot fill every seed with variants of itself."""
         out, per = [], {}
-        for r in self._top_rows(self.cfg.elites_from_history * 40, "evolution"):
+        since = self._run_started if self.cfg.fresh_start else None  # fresh: only what THIS run has found
+        for r in self._top_rows(self.cfg.elites_from_history * 40, "evolution", since=since):
             sd = definition_from_dict(r.definition)
-            if not self.simple_enough(sd):
+            if not self.simple_enough(sd) or not self.holding_ok(sd):
                 continue
             k = idea(sd)
             if per.get(k, 0) < self.cfg.elites_per_idea:
@@ -656,8 +666,9 @@ class AutoResearcher:
     def run_cycle(self, cycle: int) -> dict:
         before = self.session_trials
         self.seed_baselines()
-        self.phase = "reaprovechando investigación anterior"
-        self.import_previous()
+        if not self.cfg.fresh_start:
+            self.phase = "reaprovechando investigación anterior"
+            self.import_previous()
         self.phase = "búsqueda evolutiva"
         eng = self.engine()
         eng.cycle = cycle
@@ -681,6 +692,9 @@ class AutoResearcher:
 
     def run(self, max_cycles: int = 0, on_cycle: Callable[[dict], None] | None = None) -> int:
         done, cycle = 0, self.next_cycle()
+        self._run_started = datetime.now(timezone.utc).replace(tzinfo=None)
+        if self.cfg.fresh_start:
+            self.log("Modo 'partir de cero': no se usan las mejores estrategias anteriores como punto de partida")
         # indicators repeat across candidates: cache them (exact-content keys, bit-identical results)
         with feature_cache(max_items=min(12000, 60 * max(len(self.research), 1))):
             while not self.stop_event.is_set() and (max_cycles <= 0 or done < max_cycles):
@@ -999,6 +1013,7 @@ class AutoResearcher:
                        "search_period": [str(self.start.date()), str(self.search_end.date())],
                        "pre_exam_period": [str(self.holdout_start.date()), str(self.end.date())] if self.holdout_start is not None else None,
                        "rules": {"halves": bool(self.halves), "max_conditions": self.cfg.max_conditions,
+                                 "max_holding_days": self.cfg.max_holding_days,
                                  "complexity_penalty": self.cfg.complexity_penalty},
                        "rows": rows})
 

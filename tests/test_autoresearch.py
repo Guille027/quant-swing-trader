@@ -425,3 +425,17 @@ def test_rules_off_keep_ranking_and_new_rankings_reuse_previous_work(sf, data):
         imported = s.scalars(select(m.ResearchCandidate.version_id).where(m.ResearchCandidate.universe_id == on.universe_id)).all()
         old = s.scalars(select(m.ResearchCandidate.version_id).where(m.ResearchCandidate.id.in_(best_before))).all()
     assert set(imported) & set(old)
+
+
+def test_horizon_complexity_and_fresh_start_options(sf, data):
+    base = AutoResearchConfig(**{**CFG.__dict__, "use_ai": False})
+    r20 = researcher(sf, data, cfg=base)
+    r5 = researcher(sf, data, cfg=AutoResearchConfig(**{**base.__dict__, "max_holding_days": 5}))
+    r3 = researcher(sf, data, cfg=AutoResearchConfig(**{**base.__dict__, "max_conditions": 3}))
+    assert len({r20.universe_id, r5.universe_id, r3.universe_id}) == 3  # each option is its own ranking
+    assert r5._holds() == (2, 3, 5) and r5.holding_ok(_variant("rsi", 40.0, hold=10)) is False
+    r20.engine().run()  # earlier work in this ranking
+    fresh = researcher(sf, data, cfg=AutoResearchConfig(**{**base.__dict__, "fresh_start": True}))
+    assert fresh.universe_id == r20.universe_id and fresh.diverse_elites() == []  # nothing from before this run
+    r20.engine()._cache.clear()
+    assert r20.diverse_elites()  # the normal mode does start from earlier work

@@ -211,6 +211,11 @@
       <button id="ar-stop">■ Detener</button>
       <label><input type="checkbox" id="ar-ai" checked> usar IA (Gemini)</label>
       <label title="No compra si hay resultados en los próximos días y vende la sesión antes de los resultados (evita los saltos de precio). Requiere descargar los resultados en Datos."><input type="checkbox" id="ar-earn" checked> evitar resultados trimestrales</label>
+      <label title="Cuánto puede durar como máximo cada operación. Cada duración tiene su propio ranking.">Operaciones de
+        <select id="ar-hold"><option value="20">hasta 20 días</option><option value="10">hasta 10 días</option><option value="5">hasta 5 días</option></select></label>
+      <label title="Más condiciones permiten reglas híbridas, pero también memorizar el pasado. Cada opción tiene su propio ranking.">Reglas de
+        <select id="ar-conds"><option value="2">hasta 2 condiciones</option><option value="3">hasta 3 condiciones (híbridas)</option></select></label>
+      <label title="No parte de las mejores estrategias anteriores: explora desde cero para no quedarse atascada en las mismas ideas. Lo que encuentre se suma al mismo ranking."><input type="checkbox" id="ar-fresh"> partir de cero</label>
       <label>Ciclos <select id="ar-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
       <span id="ar-msg" class="muted"></span>
     </div>
