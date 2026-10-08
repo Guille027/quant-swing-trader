@@ -4,9 +4,6 @@ import pytest
 
 from conftest import synthetic_daily
 from qsts.data.bars import Timeframe, to_canonical
-from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
-from qsts.features.selection import (forward_returns, permutation_and_ablation, redundancy,
-                                     select_features)
 from qsts.indicators import core as ind
 from qsts.indicators import structure as st
 
@@ -21,14 +18,27 @@ def bench():
     return to_canonical(synthetic_daily(seed=99), Timeframe.D1)["close"]
 
 
-@pytest.mark.parametrize("name", sorted(REGISTRY))
-def test_every_feature_is_causal(name, df, bench):
+INDICATORS = {
+    "sma": lambda d: ind.sma(d["close"], 20), "ema": lambda d: ind.ema(d["close"], 20), "wma": lambda d: ind.wma(d["close"], 10),
+    "hma": lambda d: ind.hma(d["close"], 16), "rsi": lambda d: ind.rsi(d["close"], 14), "atr": lambda d: ind.atr(d, 14),
+    "macd": lambda d: ind.macd(d["close"]), "adx": lambda d: ind.adx(d), "supertrend": lambda d: ind.supertrend(d),
+    "bollinger": lambda d: ind.bollinger(d["close"]), "keltner": lambda d: ind.keltner(d), "stoch": lambda d: ind.stochastic(d),
+    "cci": lambda d: ind.cci(d), "williams": lambda d: ind.williams_r(d), "roc": lambda d: ind.roc(d["close"]),
+    "obv": lambda d: ind.obv(d), "relvol": lambda d: ind.relative_volume(d), "ichimoku": lambda d: ind.ichimoku(d),
+    "swings": lambda d: st.swing_points(d), "breakout": lambda d: st.breakout(d),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INDICATORS))
+def test_every_indicator_is_causal(name, df):
     """Truncating the future must not change any past value (look-ahead detector)."""
-    fs = FeatureSet([FeatureSpec(name)])
-    full = fs.compute(df, bench)
+    full = INDICATORS[name](df)
     for cut in (300, 520):
-        part = fs.compute(df.iloc[:cut], bench.iloc[:cut])
-        pd.testing.assert_frame_equal(part, full.iloc[:cut], check_exact=False, rtol=1e-9, atol=1e-12)
+        part = INDICATORS[name](df.iloc[:cut])
+        if isinstance(full, pd.Series):
+            pd.testing.assert_series_equal(part, full.iloc[:cut], check_exact=False, rtol=1e-9, atol=1e-12)
+        else:
+            pd.testing.assert_frame_equal(part, full.iloc[:cut], check_exact=False, rtol=1e-9, atol=1e-12)
 
 
 def test_known_values():
@@ -68,32 +78,3 @@ def test_swings_confirmed_late():
     assert not sp["swing_high_confirmed"].iloc[:6].any()
     assert sp["swing_high_confirmed"].iloc[6]
     assert np.isnan(sp["resistance"].iloc[5]) and sp["resistance"].iloc[6] == 10
-
-
-def test_feature_set_versioning():
-    a = FeatureSet([FeatureSpec("rsi"), FeatureSpec("atr")])
-    b = FeatureSet([FeatureSpec("atr"), FeatureSpec("rsi", {"n": 14})])
-    c = FeatureSet([FeatureSpec("rsi", {"n": 10}), FeatureSpec("atr")])
-    assert a.version == b.version != c.version
-    with pytest.raises(KeyError):
-        FeatureSet([FeatureSpec("nope")])
-
-
-def test_selection_finds_planted_signal_and_redundancy():
-    rng = np.random.default_rng(0)
-    n = 3000
-    signal = rng.normal(size=n)
-    y = pd.Series(0.1 * signal + rng.normal(size=n))
-    X = pd.DataFrame({"signal": signal, "noise": rng.normal(size=n),
-                      "signal_copy": signal + rng.normal(scale=0.05, size=n)})
-    res = select_features(X, y)
-    assert "noise" in res["dropped"]
-    assert ("signal" in res["kept"]) ^ ("signal_copy" in res["kept"])
-    assert redundancy(X, 0.9)[0][:2] == ("signal", "signal_copy")
-    imp = permutation_and_ablation(X.iloc[:2000], y.iloc[:2000], X.iloc[2000:], y.iloc[2000:], seed=1)
-    assert imp.permutation["signal"] > imp.permutation["noise"]
-
-
-def test_forward_returns_is_label_only():
-    c = pd.Series([1.0, 2.0, 4.0])
-    assert forward_returns(c, 1).tolist()[:2] == [1.0, 1.0] and np.isnan(forward_returns(c, 1).iloc[-1])

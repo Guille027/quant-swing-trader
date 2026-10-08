@@ -113,16 +113,12 @@ def save_state(state_dir, **updates) -> dict:
 
 
 SIGNATURE_QUERIES = (
-    "SELECT count(*), max(created_at) FROM research_candidates",
-    "SELECT count(*) FROM strategy_status_history",
-    "SELECT count(*) FROM oos_access_log",
-    "SELECT count(*), max(recorded_at) FROM paper_days",
-    "SELECT count(*), max(sent_at) FROM paper_notifications",
-    "SELECT count(*), max(stopped_at) FROM paper_sessions",
+    "SELECT count(*), max(created_at), group_concat(paper_status || favorite || hidden || ifnull(last_signal_day, '')"
+    " || ifnull(size_pct, '')) FROM lab_bots",
+    "SELECT count(*), max(submitted_at), max(filled_at), group_concat(status) FROM lab_orders",
+    "SELECT count(*), max(at) FROM lab_events",
     "SELECT count(*), max(ts), max(ingested_at) FROM prices",
-    "SELECT count(*), max(fetched_at) FROM earnings_events",
     "SELECT count(*) FROM corporate_actions",
-    "SELECT count(*) FROM experiments",
 )
 
 
@@ -152,17 +148,18 @@ def summary(db: Path) -> dict:
         except sqlite3.Error:
             return None
     try:
-        return {"strategies_tested": one("SELECT count(*) FROM research_candidates"),
+        return {"bots": one("SELECT count(*) FROM lab_bots WHERE hidden = 0"),
+                "paper_orders": one("SELECT count(*) FROM lab_orders"),
                 "stocks": one("SELECT count(DISTINCT asset_id) FROM prices"),
                 "last_price": one("SELECT max(ts) FROM prices"),
-                "simulation_active": bool(one("SELECT count(*) FROM paper_sessions WHERE status = 'ACTIVE'"))}
+                "paper_active": one("SELECT count(*) FROM lab_bots WHERE paper_status = 'active'") or 0}
     finally:
         con.close()
 
 
 def _has_work(db: Path) -> bool:
     s = summary(db) if db.exists() else {}
-    return bool(s.get("strategies_tested") or s.get("stocks"))
+    return bool(s.get("bots") or s.get("stocks"))
 
 
 # ---------------------------------------------------------------------- status
@@ -178,8 +175,8 @@ def status(db: Path, state_dir) -> dict:
     local = summary(db) if db.exists() else {}
     rs = (remote or {}).get("summary") or {}
     # loading a copy with clearly less work than this computer has is almost always a mistake (e.g. an empty copy)
-    remote_smaller = bool(remote) and ((rs.get("strategies_tested") or 0) < (local.get("strategies_tested") or 0)
-                                       or (rs.get("stocks") or 0) < (local.get("stocks") or 0))
+    remote_smaller = bool(remote) and any((rs.get(k) or 0) < (local.get(k) or 0)
+                                          for k in ("bots", "paper_orders", "stocks"))
     # cloud tools keep both versions when two computers write the same file: "qsts-datos-PC.db.gz", "(1)"...
     extra = sorted(p.name for p in Path(folder).glob("qsts-datos*") if p.name not in (SNAPSHOT, META)
                    and not p.name.endswith(".part")) if folder and Path(folder).is_dir() else []
@@ -305,7 +302,7 @@ def _stage(gz: Path, state_dir, meta: dict) -> None:
         ok, tables = False, set()
     finally:
         con.close()
-    if not ok or "research_candidates" not in tables:
+    if not ok or "prices" not in tables:
         part.unlink(missing_ok=True)
         raise SyncError("la copia está dañada; vuelve a guardarla desde el otro ordenador")
     if meta.get("summary") is None:
@@ -321,8 +318,7 @@ def discard_pending(state_dir) -> None:
 
 def smaller_than_local(remote_summary: dict | None, db: Path) -> bool:
     rs, local = remote_summary or {}, summary(db) if db.exists() else {}
-    return ((rs.get("strategies_tested") or 0) < (local.get("strategies_tested") or 0)
-            or (rs.get("stocks") or 0) < (local.get("stocks") or 0))
+    return any((rs.get(k) or 0) < (local.get(k) or 0) for k in ("bots", "paper_orders", "stocks"))
 
 
 def _retry(fn, wait_s: float = 30.0, step: float = 0.5):

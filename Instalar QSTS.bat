@@ -3,7 +3,7 @@ rem Instala QSTS en este ordenador (una vez): componentes de Python, ventana pro
 cd /d "%~dp0"
 echo Instalando QSTS en: %cd%
 echo.
-python -m pip install -e ".[dev,desktop,yahoo]"
+python -m pip install -e ".[dev,desktop,yahoo,alpaca]"
 if errorlevel 1 (
   echo.
   echo *** NO SE PUDO INSTALAR. Comprueba que Python esta instalado con "Add python.exe to PATH". ***

@@ -50,7 +50,7 @@ class QualityReport:
         return "; ".join(f"{i.severity.value} {i.code}: {i.message}" for i in self.issues) or "OK"
 
 
-class DataQualityError(Exception):
+class DataQualityError(ValueError):
     def __init__(self, report: QualityReport):
         self.report = report
         errs = [f"{i.code}: {i.message}" for i in report.issues if i.severity is Severity.ERROR]

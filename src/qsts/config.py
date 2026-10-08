@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,25 +36,15 @@ class Settings(BaseSettings):
 
     paper_broker_api_key: SecretStr | None = None
     live_broker_api_key: SecretStr | None = None
-    gemini_api_key: SecretStr | None = None
 
-    # Default random seed for reproducible experiments.
-    default_seed: int = Field(default=42)
-
-    # Research: data from oos_start onwards is the out-of-sample vault (used once per strategy version).
-    oos_start: str = "2023-01-01"
     benchmark: str = "SPY"
-    # Research ignores a stock's history before it joined the S&P 500 (when the join date is known).
-    pit_membership: bool = True
-    # Quarterly results in research: no new entries within N sessions of results, exit before the results gap.
-    earnings_blackout_days: int = 3
-    exit_before_earnings: bool = True
-    gemini_model: str = "gemini-2.5-flash"
-    ai_max_calls_per_day: int = 50
     # Telegram (paper-trading messages). The token comes from @BotFather; never commit it (.env only).
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
-    # daily message: minutes after the NYSE close (the vendor needs a little time to publish the day's bar)
+    # Alpaca PAPER account (simulated money). Keys from the Alpaca dashboard; saved only in this computer's .env.
+    alpaca_api_key: SecretStr | None = None
+    alpaca_secret_key: SecretStr | None = None
+    # paper trading: minutes after the NYSE close before the day's signals (the vendor publishes the bar)
     daily_report_delay_min: int = 45
 
     @model_validator(mode="after")

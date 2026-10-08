@@ -3,384 +3,210 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%234c8dff%22/%3E%3C/svg%3E">
-<title>QSTS — Quant Swing Trading System</title>
+<link rel="icon" href="/static/qsts.png">
+<title>QSTS — Backtest de estrategias</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-<header>
-  <div class="brand">QSTS <span id="env" class="pill"></span> <span id="mode" class="pill"></span></div>
-  <nav>
-    <button data-tab="home" class="active">🏠 Inicio</button>
-    <button data-tab="data">1 · Datos</button>
-    <button data-tab="auto">2 · Investigación IA</button>
-    <button data-tab="intra">Intradía</button>
-    <button data-tab="paper">3 · Simulación</button>
-    <button data-tab="charts">Gráficos</button>
-    <button id="adv-toggle" class="ghost" title="Herramientas para usuarios avanzados">Avanzado ▾</button>
-    <span id="adv" class="adv">
-      <button data-tab="dashboard">Panel de trading</button>
-      <button data-tab="signals">Señales</button>
-      <button data-tab="strategies">Estrategias</button>
-      <button data-tab="lab">Strategy Lab</button>
-      <button data-tab="research">Experimentos</button>
-      <button data-tab="logs">Registro</button>
-    </span>
-  </nav>
-  <button id="kill" class="danger">STOP ALL TRADING</button>
-</header>
+<aside class="side">
+  <div class="logo" title="QSTS">Q</div>
+  <a href="#/" data-page="library" title="Biblioteca de estrategias"><svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg></a>
+  <a href="#/paper" data-page="paper" title="Paper trading (Alpaca)"><svg viewBox="0 0 24 24"><path d="M9 3h6M12 3v3M6 8h12a2 2 0 0 1 2 2v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-7a2 2 0 0 1 2-2zM9 13h.01M15 13h.01M9 17h6"/></svg></a>
+  <a href="#/data" data-page="data" title="Datos de mercado"><svg viewBox="0 0 24 24"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></a>
+  <a href="#/settings" data-page="settings" title="Ajustes: Alpaca, Telegram, varios ordenadores"><svg viewBox="0 0 24 24"><path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></a>
+  <div class="grow"></div>
+  <button id="stop-all" class="stopall" title="Parar todo el paper trading">STOP</button>
+</aside>
 
 <main>
-<section id="tab-home" class="tab active">
-  <div class="card hero">
-    <h2>Encuentra una estrategia de inversión que funcione de forma consistente</h2>
-    <p>La app prueba miles de reglas de compra sobre el pasado (sin dinero real) y te enseña las que funcionaron
-      en <b>todas</b> las épocas, no solo de media. Sigue estos pasos:</p>
+<!-- ============================================================ library -->
+<section id="page-library" class="page">
+  <div class="head">
+    <div><h1>Biblioteca de estrategias</h1>
+      <p class="sub">Cada fila es un <b>bot</b>: una estrategia aplicada a una acción. Backtest con velas diarias, sin apalancamiento,
+        entrando en la apertura siguiente a la señal (como TradingView). Pulsa una fila para ver todo.</p></div>
+    <button id="add-bot-open" class="btn primary">+ Probar en otra acción</button>
   </div>
-  <div class="grid steps-grid">
-    <div class="card step" id="step-data"><div class="num">1</div><h3>Datos</h3><div class="body">Cargando…</div>
-      <button data-goto="data" class="primary">Gestionar datos →</button></div>
-    <div class="card step" id="step-search"><div class="num">2</div><h3>Buscar estrategias</h3><div class="body">Cargando…</div>
-      <button data-goto="auto" class="primary">Ir a Investigación IA →</button></div>
-    <div class="card step" id="step-best"><div class="num">3</div><h3>Revisar la mejor</h3><div class="body">Cargando…</div>
-      <button data-goto="auto" data-open="best">Ver su backtest →</button></div>
-    <div class="card step"><div class="num">4</div><h3>Test final</h3><div class="body">
-      Cuando una estrategia esté <span class="good">✔ validada</span>, pulsa <b>Test final</b> en el ranking: se prueba
-      con los años más recientes, que la búsqueda nunca ha visto. Aprueba solo si gana dinero, supera a mantener las
-      mismas acciones sin hacer nada y conserva al menos la mitad de su Sharpe. Solo se puede hacer una vez por estrategia.</div></div>
-    <div class="card step" id="step-paper"><div class="num">5</div><h3>Simulación (paper trading)</h3><div class="body">Cargando…</div>
-      <button data-goto="paper" class="primary">Ir a Simulación →</button></div>
+  <div id="missing" class="notice" style="display:none"></div>
+  <div class="toolbar">
+    <input id="q" class="search" placeholder="Búsqueda avanzada: spy pf>1.5 win>55 dd<20 p30>2 p90>5 sharpe>0.8 paper" autocomplete="off">
+    <div class="chips"><button data-filter="all" class="chip on">Todos</button><button data-filter="fav" class="chip">★ Favoritos</button>
+      <button data-filter="paper" class="chip">En paper</button></div>
   </div>
-  <div class="card" id="sync-card"><h3>Usar QSTS en varios ordenadores (OneDrive)</h3>
-    <div id="sync-body" class="muted">Cargando…</div>
-    <div id="sync-setup" style="display:none">
-      <p>Tus datos (precios, estrategias probadas, simulación) se guardan como una copia en una carpeta de OneDrive.
-        Al <b>cerrar</b> la app se guarda la copia; al abrirla en el <b>otro</b> ordenador te ofrece cargarla.
-        Usa <b>un ordenador cada vez</b>: si investigas en los dos a la vez, una de las dos versiones se perdería.</p>
-      <div class="row"><label>Carpeta <input id="sync-dir" size="60" placeholder="C:\Users\tú\OneDrive\QSTS"></label>
-        <button id="sync-enable" class="primary">Activar</button></div>
-      <p class="muted small">Usa la misma carpeta de OneDrive en los dos ordenadores, pero cada uno con SU ruta (el nombre de usuario de Windows suele ser distinto):
-        la app propone la de este ordenador. Las claves (Gemini, Telegram) no se copian: configúralas en cada uno.</p>
-    </div>
-    <div class="row" id="sync-actions" style="display:none"><button id="sync-save">Guardar copia ahora</button>
-      <button id="sync-load" class="primary" style="display:none">Cargar la copia</button>
-      <button id="sync-off">Desactivar</button></div>
-    <div id="sync-file" class="small" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
-      <p><b>¿El otro ordenador no recibe la copia por OneDrive?</b> Llévala como archivo (sirve la web de OneDrive, el correo o un pendrive):</p>
-      <ol>
-        <li>En el ordenador que tiene los datos: <button id="sync-save-file">Guardar copia en Descargas</button>
-          (crea <code>qsts-datos.db.gz</code>; en onedrive.live.com basta con descargar ese archivo de la carpeta QSTS).</li>
-        <li>Deja ese archivo en la carpeta <b>Descargas</b> del otro ordenador y allí pulsa
-          <button id="sync-load-file" class="primary">Cargar la copia descargada</button></li>
-      </ol>
-      <p id="sync-file-info" class="muted"></p>
-    </div>
-    <p id="sync-msg"></p>
+  <div id="add-bot" class="panel" style="display:none">
+    <label>Estrategia <select id="ab-strategy"></select></label>
+    <label>Acción <input id="ab-symbol" size="8" placeholder="AAPL"></label>
+    <button id="ab-go" class="btn primary">Crear bot</button>
+    <span id="ab-msg" class="muted"></span>
+    <p class="muted small" id="ab-info"></p>
   </div>
-  <div class="card"><h3>Palabras clave</h3>
-    <dl class="glossary">
-      <dt>Backtest</dt><dd>Simular cómo habría funcionado una estrategia en el pasado, operación a operación.</dd>
-      <dt>Consistencia</dt><dd>Resultado de la estrategia en su <i>peor</i> época (el pasado se divide en 3 tramos). Más alto = mejor; por encima de 0,5 es bueno.</dd>
-      <dt>Sharpe</dt><dd>Ganancia ajustada al riesgo. 0 = nada; 0,5 = aceptable; 1 = muy bueno; más de 2 en acciones suele ser sospechoso.</dd>
-      <dt>Caída máx.</dt><dd>La peor bajada desde un máximo hasta un mínimo. -30% significa que en algún momento habrías perdido un 30% desde tu mejor punto.</dd>
-      <dt>Fiabilidad</dt><dd>Probabilidad de que la estrategia supere de verdad a mantener las mismas acciones sin hacer nada, y no sea suerte, teniendo en cuenta cuántas estrategias se han probado.</dd>
-      <dt>Referencia</dt><dd>Estrategias muy simples (p. ej. "comprar si sube en 6 meses"). Una estrategia nueva solo sirve si las supera.</dd>
-    </dl>
+  <div class="tablecard">
+    <div class="tablemeta"><span id="lib-count" class="muted">Cargando…</span>
+      <span class="pager"><button id="prev" class="link">Anterior</button> <span id="page-n" class="muted"></span> <button id="next" class="link">Siguiente</button></span></div>
+    <table id="lib" class="lib"></table>
   </div>
+  <p class="foot muted small">Probadas: <span id="n-tested">—</span> combinaciones. Cuantas más pruebes, más fácil es que alguna parezca buena por suerte:
+    mira siempre su <b>Auditoría</b> y, sobre todo, sus resultados en <b>paper trading</b> con días nuevos.</p>
 </section>
 
-<section id="tab-data" class="tab">
-  <div class="card"><h3>Tus datos</h3><p id="data-summary" class="big">Cargando…</p>
-    <p class="muted">Los precios vienen de Yahoo Finance (gratis, sin garantías). Se guardan en tu ordenador y cada acción pasa un control de calidad antes de guardarse.</p></div>
-  <div class="grid two">
-    <div class="card"><h3>Añadir acciones del S&amp;P 500</h3>
-      <p>Más acciones = más operaciones = resultados más fiables. El S&amp;P 500 son las ~500 mayores empresas de EE. UU.</p>
-      <p id="sp500-info" class="muted">Consultando la lista…</p>
-      <label class="opt"><input type="radio" name="sp-size" value="100" checked> <b>Muestra aleatoria de 100</b> — descarga ≈ 4 min, cada ciclo de investigación ≈ 5 min</label>
-      <label class="opt"><input type="radio" name="sp-size" value="250"> Muestra aleatoria de 250 — descarga ≈ 8 min, ciclo ≈ 12 min</label>
-      <label class="opt"><input type="radio" name="sp-size" value="0"> Todas (≈500) — descarga ≈ 15 min, ciclo ≈ 25 min</label>
-      <p class="muted">La muestra es aleatoria a propósito: elegir a mano las empresas que hoy son famosas haría trampa (ya sabemos que les fue bien).</p>
-      <button id="sp-download" class="primary">⬇ Descargar</button>
-      <p class="warn small">Ojo: la lista es la de <b>hoy</b>. Las empresas que salieron del índice (quiebras, compras) no aparecen, y eso hace que el pasado parezca algo mejor de lo que fue. Para reducirlo, la investigación ignora la historia de cada acción anterior a su entrada en el índice.</p>
+<!-- ============================================================ bot detail -->
+<section id="page-bot" class="page">
+  <a href="#/" class="back">← Biblioteca</a>
+  <div class="bothead">
+    <div class="tick" id="b-icon">S</div>
+    <div class="grow"><h1 id="b-name">—</h1><div class="sub" id="b-sub"></div></div>
+    <div id="b-status" class="status"></div>
+  </div>
+  <div class="actions">
+    <button id="b-fav" class="btn ghost">☆ Favorito</button>
+    <button id="b-paper" class="btn pink">Activar en paper</button>
+    <button id="b-other" class="btn ghost">Probar en otra acción</button>
+    <button id="b-hide" class="btn ghost">Quitar de la biblioteca</button>
+  </div>
+  <div id="b-activate" class="panel" style="display:none">
+    <p><b>Paper trading automático en tu cuenta de Alpaca</b> (dinero ficticio). Cada noche, después del cierre, la app mira la señal
+      y deja la orden para la apertura; los stops y objetivos quedan puestos en Alpaca. Te avisa por Telegram de cada operación.</p>
+    <label>Parte de la cuenta para este bot <input id="act-pct" type="number" min="1" max="100" value="20" style="width:70px">%</label>
+    <label><input type="checkbox" id="act-follow" checked> si el backtest está dentro de una operación ahora, entrar también en la próxima apertura</label>
+    <button id="act-go" class="btn pink">Activar</button> <button id="act-cancel" class="btn ghost">Cancelar</button>
+    <span id="act-msg" class="muted"></span>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <div class="cardhead"><div><h3>Métricas</h3><p class="muted small">Cambia entre el backtest y los resultados reales en paper.</p></div>
+        <div class="toggle"><button data-mode="bt" class="on">Backtest</button><button data-mode="live">Paper</button></div></div>
+      <div id="b-metrics" class="metrics"></div>
+      <h4>Rendimiento reciente</h4><div id="b-windows" class="windows"></div>
     </div>
-    <div class="card"><h3>Añadir acciones concretas</h3>
-      <p>Escribe los símbolos de Yahoo separados por comas (p. ej. <code>NVDA, AMD, ASML</code>).</p>
-      <input id="sym-input" placeholder="NVDA, AMD, ASML" style="width:100%">
-      <div class="row"><label>Desde <input id="sym-start" value="2010-01-01" size="10"></label>
-        <button id="sym-download">⬇ Descargar</button></div>
-      <h3 style="margin-top:18px">Actualizar precios</h3>
-      <p>Descarga los días nuevos de todas tus acciones (solo lo que falta) y las próximas fechas de resultados.</p>
-      <button id="data-update">⟳ Actualizar ahora</button>
-      <h3 style="margin-top:18px">Resultados trimestrales (earnings)</h3>
-      <p id="earn-info" class="muted">—</p>
-      <p class="muted small">Fechas de presentación de resultados (pasadas y próximas), beneficio esperado y real, y la sorpresa en %. Sirven para no comprar justo antes de los resultados y para que la investigación pruebe reglas con ellos. Fuente: Yahoo (calendario de resultados).</p>
-      <button id="earn-download">⬇ Descargar resultados de todas mis acciones</button>
+    <div class="card">
+      <h3>La estrategia</h3>
+      <p id="b-summary"></p>
+      <p class="muted small" id="b-source"></p>
+      <div id="b-params" class="small"></div>
+      <p id="b-next" class="small"></p>
     </div>
   </div>
-  <div class="card" id="job-card"><h3>Descarga <button id="job-stop" class="small-btn">■ Detener</button></h3>
-    <div class="progress"><div id="job-bar"></div></div>
-    <p id="job-text" class="muted">Sin descargas en curso.</p>
-    <pre id="job-log" class="muted"></pre></div>
-  <div class="card"><h3>Acciones cargadas</h3><input id="data-filter" placeholder="Buscar…"><table id="data-table"></table></div>
-</section>
-
-<section id="tab-paper" class="tab">
   <div class="card">
-    <h3>Simulación con dinero ficticio: ¿cómo funciona?</h3>
-    <ul class="steps">
-      <li>La app opera <b>sola y de mentira</b> con la estrategia elegida, desde hoy en adelante, con las mismas reglas y costes que el backtest. No toca tu bróker.</li>
-      <li><b>Cuándo decide:</b> con el <b>cierre</b> de la bolsa de Nueva York (normalmente 22:00 hora de España). <b>Cuándo ejecuta:</b> en la <b>apertura</b> siguiente (normalmente 15:30).
-        Por eso funciona <b>con el mercado cerrado</b>: no usa precios de premercado. Si la abres durante la sesión, verás lo que decidió con el cierre de ayer.</li>
-      <li><b>Rutina diaria:</b> abre la app después de las 22:00 o por la mañana, pulsa <b>⟳ Actualizar</b> y mira <b>"Qué hará en la próxima apertura"</b>. Si un día no la abres, al actualizar se pone al día sola.</li>
-      <li><b>Con tu dinero:</b> al empezar, pon tu capital en <b>euros</b>: te dirá cuántos euros meter en cada acción (Trading 212 permite comprar fracciones de acción por importe).</li>
-      <li><b>Telegram:</b> conecta tu bot abajo y cada tarde (o al abrir la app, si estaba cerrada) recibirás qué comprar o vender en la próxima apertura.</li>
-      <li>Déjala varias semanas o meses y compara con el backtest. La app nunca opera por ti: tú decides si copias las órdenes.</li>
-    </ul>
+    <div class="cardhead"><div><h3>Curva de capital</h3><p class="muted small" id="b-chart-note">Pasa el ratón por la curva para ver cada punto.</p></div>
+      <div><label class="small"><input type="checkbox" id="b-hold" checked> comprar y mantener</label>
+        <label class="small"><input type="checkbox" id="b-dd"> caídas</label></div></div>
+    <div id="b-chart" class="chart"></div>
+    <p class="legend small"><span class="sw g"></span> backtest <span class="sw p"></span> paper trading (dinero ficticio, días nuevos)
+      <span class="sw s"></span> comprar y mantener la acción</p>
   </div>
-  <div id="paper-none" style="display:none">
-    <div class="card"><h3>Empezar una simulación</h3><div id="paper-cands"></div></div>
+  <div class="tabs" id="b-tabs">
+    <button data-tab="perf" class="on">Rendimiento</button><button data-tab="trades">Operaciones</button>
+    <button data-tab="monthly">P&amp;L mensual</button><button data-tab="mc">Monte Carlo</button>
+    <button data-tab="audit">Auditoría</button><button data-tab="paperlog">Paper trading</button>
   </div>
-  <div id="paper-on" style="display:none">
-    <div class="card"><h3>Estrategia en simulación</h3><p id="paper-rules" class="big"></p>
-      <div class="row"><button id="paper-update" class="primary">⟳ Actualizar precios y simulación</button>
-        <button id="paper-stop">■ Detener simulación</button><span id="paper-msg" class="muted"></span></div>
-      <p id="paper-stale"></p>
-      <div id="paper-kpis" class="kpis"></div></div>
-    <div class="card"><h3>Qué hará en la próxima apertura <span id="paper-next" class="muted"></span></h3>
-      <p class="muted">Decidido con el cierre del <b id="paper-asof"></b>. Cantidades aproximadas: se ajustan al precio real de apertura. Precios ajustados por dividendos y splits.</p>
-      <table id="paper-orders"></table></div>
-    <div class="card"><h3>Posiciones abiertas</h3><table id="paper-positions"></table></div>
-    <div class="card"><h3>Evolución</h3><div id="paper-chart" class="chart small"></div>
-      <p class="muted"><span class="sw" style="background:#4c8dff"></span> simulación &nbsp; <span class="sw" style="background:#8b93a1"></span> comprar y mantener SPY desde el mismo día</p></div>
-    <div class="card"><h3>Operaciones cerradas</h3><div class="scroll"><table id="paper-closed"></table></div></div>
-    <div class="card"><h3>Diario (lo que dijo cada tarde)</h3><div class="scroll"><table id="paper-journal"></table></div></div>
+  <div class="card tabbody" id="tab-perf">
+    <div class="grid2">
+      <div><h4>Posiciones abiertas por día de la semana</h4><div id="b-weekday" class="bars"></div>
+        <p class="muted small" id="b-exposure"></p></div>
+      <div><h4>Métricas clave</h4><div id="b-key" class="keylist"></div></div>
+    </div>
+  </div>
+  <div class="card tabbody" id="tab-trades" style="display:none"><div class="scroll"><table id="b-trades"></table></div></div>
+  <div class="card tabbody" id="tab-monthly" style="display:none"><div class="scroll"><table id="b-monthly" class="heat"></table></div></div>
+  <div class="card tabbody" id="tab-mc" style="display:none">
+    <p class="muted small">Repite sus operaciones 1.000 veces en otro orden y con otra suerte (sorteando con reemplazo). Muestra lo que podría haber pasado con la misma ventaja.</p>
+    <div id="b-mc-kpis" class="metrics"></div><div id="b-mc-chart" class="chart small"></div></div>
+  <div class="card tabbody" id="tab-audit" style="display:none"><div id="b-audit">Calculando…</div></div>
+  <div class="card tabbody" id="tab-paperlog" style="display:none"><div id="b-paperlog" class="muted">Este bot no está en paper trading.</div></div>
+  <div class="card">
+    <h3>Comparación</h3>
+    <div class="bench" id="b-bench"></div>
+  </div>
+  <div class="card">
+    <h3>Informe del backtest</h3><p class="muted small">Todas las operaciones, solo largos y solo cortos (como el informe de TradingView).</p>
+    <div class="scroll"><table id="b-report"></table></div>
+  </div>
+</section>
+
+<!-- ============================================================ paper trading -->
+<section id="page-paper" class="page">
+  <div class="head"><div><h1>Paper trading</h1>
+    <p class="sub">Tus bots operando solos en tu cuenta <b>paper</b> de Alpaca (dinero ficticio). La app trabaja mientras está abierta:
+      después de cada cierre de Wall Street (22:00 en España) descarga los precios, calcula las señales y deja las órdenes para la apertura.
+      Si la abres más tarde, se pone al día antes de la apertura siguiente.</p></div>
+    <button id="pp-run" class="btn ghost">Comprobar ahora</button></div>
+  <div class="grid2">
+    <div class="card"><h3>Cuenta de Alpaca</h3><div id="pp-account" class="muted">Cargando…</div></div>
+    <div class="card"><h3>Estado</h3><div id="pp-state" class="muted">—</div></div>
+  </div>
+  <div class="card"><h3>Bots en paper</h3><table id="pp-bots"></table></div>
+  <div class="card"><h3>Qué ha hecho</h3><div class="scroll"><table id="pp-events"></table></div></div>
+</section>
+
+<!-- ============================================================ data -->
+<section id="page-data" class="page">
+  <div class="head"><div><h1>Datos de mercado</h1>
+    <p class="sub">Velas diarias de Yahoo Finance, ajustadas por splits y dividendos. Se actualizan solas para los bots en paper; aquí puedes descargar más.</p></div></div>
+  <div class="card"><h3>Lo que tienes</h3><div id="d-summary" class="muted">Cargando…</div>
+    <div class="row">
+      <button id="d-update" class="btn primary">Actualizar todo</button>
+      <label>Símbolos <input id="d-symbols" size="30" placeholder="AAPL, MSFT, QQQ"></label><button id="d-add" class="btn ghost">Descargar</button>
+      <button id="d-sp" class="btn ghost">Descargar el S&amp;P 500 entero</button>
+    </div>
+    <div class="progress"><div id="d-bar"></div></div><p id="d-job" class="small muted"></p>
+    <pre id="d-log" class="log"></pre>
+  </div>
+  <div class="card"><input id="d-filter" class="search" placeholder="Buscar acción…"><div class="scroll"><table id="d-table"></table></div></div>
+</section>
+
+<!-- ============================================================ settings -->
+<section id="page-settings" class="page">
+  <div class="head"><div><h1>Ajustes</h1></div></div>
+  <div class="card" id="alpaca-card"><h3>Alpaca (paper trading)</h3>
+    <div id="al-status" class="muted">Cargando…</div>
+    <div id="al-setup">
+      <ol class="small">
+        <li>En <b>alpaca.markets</b> entra en tu cuenta y elige la cuenta de <b>Paper Trading</b> (dinero ficticio).</li>
+        <li>En el apartado <b>API Keys</b> de esa cuenta genera las claves. La <b>Secret Key</b> solo se muestra una vez: cópiala entonces.</li>
+        <li>Pégalas aquí. Se comprueban con Alpaca y se guardan <b>solo en este ordenador</b> (archivo .env); nunca se envían a nadie más.</li>
+      </ol>
+      <div class="row"><input id="al-key" type="password" placeholder="API Key" size="30" autocomplete="off">
+        <input id="al-secret" type="password" placeholder="Secret Key" size="46" autocomplete="off">
+        <button id="al-save" class="btn primary">Guardar y comprobar</button></div>
+    </div>
+    <p id="al-msg"></p>
+    <p class="muted small">Esta app solo se conecta a la cuenta <b>paper</b> de Alpaca: no puede operar con dinero real.</p>
   </div>
   <div class="card" id="tg-card"><h3>Avisos por Telegram</h3>
     <p id="tg-status" class="muted">Cargando…</p>
     <div id="tg-setup">
-      <ol>
-        <li>En Telegram busca <b>@BotFather</b>, escríbele <code>/newbot</code>, ponle un nombre y un usuario que acabe en <code>bot</code>. Te dará un <b>token</b> (números:letras).</li>
-        <li>Pega el token aquí: <input id="tg-token" type="password" size="48" placeholder="123456789:ABC…" autocomplete="off">
-          <button id="tg-save">Guardar token</button> <span class="muted small">(se guarda solo en tu ordenador, en el archivo .env)</span></li>
-        <li>Abre tu bot en Telegram (el enlace te lo da BotFather), pulsa <b>Iniciar</b> y escríbele cualquier cosa.</li>
-        <li><button id="tg-detect">Detectar mi chat</button></li>
+      <ol class="small">
+        <li>En Telegram busca <b>@BotFather</b>, escríbele <code>/newbot</code>, ponle un nombre y un usuario que acabe en <code>bot</code>. Te dará un <b>token</b>.</li>
+        <li>Pega el token aquí: <input id="tg-token" type="password" size="44" placeholder="123456789:ABC…" autocomplete="off">
+          <button id="tg-save" class="btn ghost">Guardar token</button></li>
+        <li>Abre tu bot en Telegram, pulsa <b>Iniciar</b> y escríbele cualquier cosa.</li>
+        <li><button id="tg-detect" class="btn ghost">Detectar mi chat</button></li>
       </ol>
     </div>
-    <div class="row"><button id="tg-test">Enviar mensaje de prueba</button> <button id="tg-report">Enviar ahora el resumen de hoy</button>
-      <span id="tg-msg" class="muted"></span></div>
-    <p class="muted small">Cada día, unos minutos después del cierre de Nueva York (≈ 22:45 hora de España), la app descarga los precios, recalcula la simulación y te envía un mensaje.
-      El ordenador tiene que estar encendido con la app abierta; si no lo está, el mensaje llega al abrirla (basta antes de las 15:30, que es cuando se ejecutan las órdenes).
-      Los stops y objetivos se tocan <i>durante</i> el día: ponlos en Trading 212 como órdenes stop y límite al comprar; el mensaje de la tarde te dirá si alguno se ejecutó.</p>
-    <div class="scroll"><table id="tg-log"></table></div>
+    <div class="row"><button id="tg-test" class="btn ghost">Enviar mensaje de prueba</button> <span id="tg-msg" class="muted"></span></div>
   </div>
-</section>
-
-<section id="tab-dashboard" class="tab">
-  <div class="grid">
-    <div class="card"><h3>Portfolio</h3><dl id="portfolio"></dl></div>
-    <div class="card"><h3>Mercado</h3><dl id="market"></dl></div>
-    <div class="card"><h3>Estrategias</h3><dl id="strat-counts"></dl></div>
-    <div class="card"><h3>Sistema</h3><dl id="system"></dl></div>
-  </div>
-  <div class="card"><h3>Último escaneo <button id="run-scan">Escanear ahora</button></h3><pre id="scan-text">Sin escaneo.</pre></div>
-  <div class="card"><h3>Modo del sistema</h3>
-    <p class="muted">Progresión estricta: OBSERVATION → BACKTEST → PAPER → MANUAL_APPROVAL → SEMI_AUTOMATIC → FULL_AUTOMATIC. LIVE requiere además la puerta de seguridad.</p>
-    <select id="mode-select"></select> <input id="mode-reason" placeholder="motivo"> <label><input type="checkbox" id="mode-confirm"> confirmo</label>
-    <button id="mode-apply">Cambiar modo</button> <span id="mode-msg" class="muted"></span>
-  </div>
-</section>
-
-<section id="tab-auto" class="tab">
-  <div class="card">
-    <h3>Investigación automática: ¿qué hace?</h3>
-    <p>La app busca sola <b>estrategias de compra de swing trading</b> (cada operación se cierra como máximo en <b>20 días de bolsa</b>, normalmente antes: por stop, objetivo o señal de salida) y se queda con las <b>más consistentes</b>:</p>
-    <ol class="steps">
-      <li><b>Evolución:</b> combina indicadores al azar, se queda con las mejores combinaciones y las va mejorando en cada ciclo (parte siempre de lo mejor que encontró antes).</li>
-      <li><b>IA (Gemini):</b> lee qué ha funcionado y qué no, y propone ideas nuevas.</li>
-      <li><b>Prueba:</b> cada estrategia se prueba sobre <b id="ar-period">el pasado</b>, dividido en 3 tramos, y también con cada <b>mitad de tus acciones</b> por separado. Su <b>consistencia</b> es su resultado en el <i>peor</i> caso: tiene que funcionar en todos los tramos y con las dos mitades, no solo de media. Como mucho 2 condiciones de compra: las reglas complicadas memorizan el pasado.</li>
-      <li><b>Examen previo:</b> los años <b id="ar-pre">finales</b> se reservan: la búsqueda nunca los usa para elegir. Las candidatas tienen que aprobarlos con las mismas reglas que el test final antes de que se te ofrezca el test final.</li>
-      <li><b>Validación:</b> las mejores pasan exámenes extra (costes dobles, cambios de parámetros, ventanas móviles, comparación con estrategias simples de referencia).</li>
-    </ol>
-    <p class="warn">Los datos desde <b id="ar-oos">2023</b> están <b>guardados bajo llave</b>: la búsqueda nunca los ve. Solo se abren una vez por estrategia, con el botón <b>Test final</b>, para comprobarla con datos nuevos para ella.<br>
-    Ojo: probar miles de estrategias sobre el mismo pasado siempre encuentra alguna que parece buena <i>por suerte</i>. Por eso se cuenta cada prueba, y la columna <b>Fiabilidad</b> baja cuantas más pruebas se hacen. Nada de esto es una recomendación de inversión.</p>
-  </div>
-  <div class="card">
-    <h3>Control</h3>
-    <div class="row">
-      <button id="ar-start" class="primary">▶ Empezar a investigar</button>
-      <button id="ar-stop">■ Detener</button>
-      <label><input type="checkbox" id="ar-ai" checked> usar IA (Gemini)</label>
-      <label title="No compra si hay resultados en los próximos días y vende la sesión antes de los resultados (evita los saltos de precio). Requiere descargar los resultados en Datos."><input type="checkbox" id="ar-earn" checked> evitar resultados trimestrales</label>
-      <label title="Cuánto puede durar como máximo cada operación. Cada duración tiene su propio ranking.">Operaciones de
-        <select id="ar-hold"><option value="20">hasta 20 días</option><option value="10">hasta 10 días</option><option value="5">hasta 5 días</option></select></label>
-      <label title="Más condiciones permiten reglas híbridas, pero también memorizar el pasado. Cada opción tiene su propio ranking.">Reglas de
-        <select id="ar-conds"><option value="2">hasta 2 condiciones</option><option value="3">hasta 3 condiciones (híbridas)</option></select></label>
-      <label title="No parte de las mejores estrategias anteriores: explora desde cero para no quedarse atascada en las mismas ideas. Lo que encuentre se suma al mismo ranking."><input type="checkbox" id="ar-fresh"> partir de cero</label>
-      <label>Ciclos <select id="ar-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
-      <span id="ar-msg" class="muted"></span>
+  <div class="card" id="sync-card"><h3>Usar QSTS en varios ordenadores (OneDrive)</h3>
+    <div id="sync-body" class="muted">Cargando…</div>
+    <div id="sync-setup" style="display:none">
+      <p class="small">Tus datos se guardan como una copia en una carpeta de OneDrive al <b>cerrar</b> la app; al abrirla en el <b>otro</b>
+        ordenador te ofrece cargarla. Usa <b>un ordenador cada vez</b>, y deja el paper trading en uno solo.</p>
+      <div class="row"><label>Carpeta <input id="sync-dir" size="56" placeholder="C:\Users\tú\OneDrive\QSTS"></label>
+        <button id="sync-enable" class="btn primary">Activar</button></div>
     </div>
-    <div id="ai-key-box" class="row" style="display:none"><span class="small">La IA no está configurada en este ordenador.
-      Pega tu clave de Gemini (de Google AI Studio):</span> <input id="ai-key" type="password" size="44" autocomplete="off">
-      <button id="ai-key-save">Guardar clave</button> <span class="muted small">(se guarda solo en este ordenador, en el archivo .env)</span></div>
-    <dl id="ar-state"></dl>
-  </div>
-  <div class="card bar"><h3>El listón a superar</h3>
-    <p class="muted">Si una estrategia no gana a <b>comprar todas tus acciones y no hacer nada</b>, no aporta nada: mejor no operar.</p>
-    <div id="ar-passive" class="kpis"></div></div>
-  <div class="card callout" id="ar-best" style="display:none"></div>
-  <div class="card"><h3>Ranking: estrategias más consistentes</h3>
-    <p class="muted" id="ar-board-note"></p>
-    <label class="small"><input type="checkbox" id="ar-group" checked> agrupar las variantes de una misma idea (mismos indicadores)</label>
-    <table id="ar-board"></table></div>
-  <div class="card" id="ar-detail-card"><h3>Detalle</h3><div id="ar-detail" class="muted">Pulsa una fila del ranking para ver su detalle y su backtest.</div>
-    <div id="ar-bt" style="display:none">
-      <h4>Backtest <span id="ar-bt-period" class="muted"></span></h4>
-      <div id="ar-bt-kpis" class="kpis"></div>
-      <div id="ar-bt-chart" class="chart"></div>
-      <p class="muted"><span class="sw" style="background:#4c8dff"></span> estrategia &nbsp; <span class="sw" style="background:#8b93a1"></span> comprar y mantener SPY (el mercado)
-        <span id="ar-bt-oos-legend" style="display:none">&nbsp; <span class="sw" style="background:#ffb74d"></span> datos del test final</span> · capital inicial 10.000</p>
-      <h4>Año a año</h4><table id="ar-bt-years"></table>
-      <h4>Operaciones <span id="ar-bt-ntr" class="muted"></span></h4><div class="scroll"><table id="ar-bt-trades"></table></div>
-    </div></div>
-  <div class="card"><h3>Qué está haciendo ahora</h3><pre id="ar-log" class="muted">—</pre></div>
-</section>
-
-<section id="tab-intra" class="tab">
-  <div class="card">
-    <h3>Laboratorio intradía: ¿qué hace?</h3>
-    <p>Prueba estrategias de <b>un solo día</b> (todas las operaciones se cierran antes del cierre de la bolsa), <b>largas</b> (compra) y
-      <b>cortas</b> (apuesta a la bajada), con tres tipos de patrón de precio:</p>
-    <ul class="steps">
-      <li><b>Rango de apertura:</b> mira el máximo y el mínimo de los primeros minutos (5, 15, 30 o 60) y entra si el precio rompe ese rango
-        (largo si rompe el máximo, corto si rompe el mínimo).</li>
-      <li><b>Hueco de apertura:</b> si la acción abre bastante por encima o por debajo del cierre de ayer, apuesta a que el hueco
-        <b>se cierra</b> (vuelve al cierre de ayer) o a que <b>continúa</b>. Entra unos minutos después de la apertura, nunca en el precio de apertura exacto.</li>
-      <li><b>VWAP</b> (precio medio del día ponderado por volumen): sigue al precio cuando <b>cruza</b> el VWAP, o apuesta a que <b>vuelve</b> a él
-        cuando se ha alejado mucho.</li>
-    </ul>
-    <p>Para cada uno busca sola la mejor combinación de ajustes (stop, objetivo de beneficio, horario) y de <b>filtros de contexto</b>
-      (volatilidad diaria, volumen de la apertura, tendencia diaria). Es decir, un patrón de precio combinado con su contexto.</p>
-    <ol class="steps">
-      <li><b>Velas:</b> de <b>5 minutos</b> (Yahoo solo da los últimos 60 días) o de <b>1 hora</b> (unos 2,9 años; con ellas el rango es la primera hora).
-        Las velas descargadas se guardan, así que la historia crece si las actualizas a menudo.</li>
-      <li><b>Búsqueda:</b> las mismas reglas que la investigación diaria: 3 tramos y dos mitades de las acciones, cuenta la peor nota y se penalizan las reglas complicadas.</li>
-      <li><b>Examen previo y test final:</b> la primera vez que se usa un tipo de velas, el último 25% de las sesiones se guarda bajo llave; la búsqueda nunca lo ve.
-        Cuando la historia guardada se duplica, empieza una época nueva con sesiones nuevas bajo llave.</li>
-    </ol>
-    <p class="warn"><b>Antes de fiarte:</b> operar dentro del día cuesta más (aquí se cuentan <b id="it-cost">0,10%</b> por operación al entrar y otro tanto al salir; si tu bróker cobra más, cuenta más).
-      En Trading 212 los <b>cortos</b> solo se pueden hacer con <b>CFD</b> (producto apalancado, con sus propios costes y riesgos).
-      Con 60 días de velas de 5 minutos no se puede demostrar nada: la app lo marca como <b>orientativo</b> hasta tener bastantes sesiones.
-      <b>Actualiza las velas al menos cada 50 días</b>: Yahoo borra las antiguas y los días perdidos no se recuperan.</p>
-  </div>
-  <div class="card"><h3>Velas descargadas</h3>
-    <div id="it-data" class="muted">—</div>
-    <div class="row">
-      <label>Velas <select id="it-ds"><option value="5m">de 5 minutos</option><option value="1h">de 1 hora</option></select></label>
-      <label title="Las acciones con más dinero negociado de las que tienes en Datos. Las que ya tienen velas se actualizan siempre.">Acciones
-        <select id="it-n"><option value="50">las 50 más negociadas</option><option value="100" selected>las 100 más negociadas</option><option value="200">las 200 más negociadas</option></select></label>
-      <button id="it-ingest">⬇ Descargar / actualizar velas</button>
-      <span id="it-ingest-msg" class="muted"></span>
+    <div class="row" id="sync-actions" style="display:none"><button id="sync-save" class="btn ghost">Guardar copia ahora</button>
+      <button id="sync-load" class="btn primary" style="display:none">Cargar la copia</button>
+      <button id="sync-off" class="btn ghost">Desactivar</button></div>
+    <div class="small" style="margin-top:10px">
+      <p><b>¿Sin OneDrive?</b> <button id="sync-save-file" class="btn ghost">Guardar copia en Descargas</button>
+        y en el otro ordenador, con el archivo en Descargas: <button id="sync-load-file" class="btn ghost">Cargar la copia descargada</button></p>
+      <p id="sync-file-info" class="muted"></p>
     </div>
+    <p id="sync-msg"></p>
   </div>
-  <div class="card">
-    <h3>Control</h3>
-    <div class="row">
-      <button id="it-start" class="primary">▶ Empezar a investigar</button>
-      <button id="it-stop">■ Detener</button>
-      <label>Ciclos <select id="it-cycles"><option value="0">sin parar (hasta que pulses Detener)</option><option value="1">1</option><option value="5">5</option><option value="20">20</option></select></label>
-      <span id="it-msg" class="muted"></span>
-    </div>
-    <dl id="it-state"></dl>
-  </div>
-  <div class="card bar"><h3>El listón a superar</h3>
-    <p class="muted">Mantener las mismas acciones sin hacer nada durante el periodo de búsqueda.</p>
-    <div id="it-passive" class="kpis"></div></div>
-  <div class="card callout" id="it-best" style="display:none"></div>
-  <div class="card"><h3>Ranking intradía</h3><p class="muted" id="it-note"></p>
-    <label class="small">Mostrar <select id="it-family"><option value="">todos los patrones</option><option value="orb">rango de apertura</option>
-      <option value="gap">hueco de apertura</option><option value="vwap">VWAP</option></select></label> <span id="it-family-counts" class="muted small"></span>
-    <table id="it-board"></table></div>
-  <div class="card" id="it-detail-card"><h3>Detalle</h3><div id="it-detail" class="muted">Pulsa una fila del ranking para ver su detalle y su curva.</div>
-    <div id="it-bt" style="display:none">
-      <h4>Curva <span id="it-bt-note" class="muted"></span></h4>
-      <div id="it-chart" class="chart"></div>
-      <p class="muted"><span class="sw" style="background:#4c8dff"></span> búsqueda &nbsp; <span class="sw" style="background:#ab47bc"></span> examen previo
-        <span id="it-oos-legend" style="display:none">&nbsp; <span class="sw" style="background:#ffb74d"></span> test final</span> · capital inicial 10.000</p>
-      <h4>Últimas operaciones</h4><div class="scroll"><table id="it-trades"></table></div>
-    </div></div>
-  <div class="card" id="itp-card"><h3>Simulación día a día <button id="itp-stop" class="small-btn" style="display:none">■ Detener</button></h3>
-    <p class="muted small">Congela una regla y la sigue <b>con sesiones nuevas</b> (desde la siguiente apertura): la prueba más honesta,
-      porque son días que ninguna búsqueda ha visto. Cada noche, con la app abierta, se descargan las velas del día, se calcula lo que
-      habría hecho la regla y, si tienes Telegram, te llega el resumen. No son señales en directo y no se envía nada a ningún bróker.</p>
-    <div id="itp-body" class="muted">—</div>
-    <div id="itp-more" style="display:none">
-      <div id="itp-kpis" class="kpis"></div>
-      <div id="itp-chart" class="chart small"></div>
-      <h4>Última sesión</h4><div class="scroll"><table id="itp-last"></table></div>
-      <h4>Sesión a sesión</h4><div class="scroll"><table id="itp-days"></table></div>
-    </div></div>
-  <div class="card"><h3>Qué está haciendo ahora</h3><pre id="it-log" class="muted">—</pre></div>
-</section>
-
-<section id="tab-signals" class="tab">
-  <div class="card"><h3>Pendientes de aprobación</h3><table id="approvals"></table></div>
-  <div class="card"><h3>Señales del último escaneo</h3><table id="signals"></table></div>
-  <div class="card"><h3>NO TRADE (motivos)</h3><table id="notrade"></table></div>
-</section>
-
-<section id="tab-charts" class="tab">
-  <div class="card">
-    <select id="chart-symbol"></select>
-    <select id="chart-tf"><option>1d</option><option>1h</option><option>4h</option><option>1w</option></select>
-    <input id="chart-ind" value="ema:20,ema:50" title="Indicadores superpuestos (precio)">
-    <input id="chart-osc" value="rsi:14" title="Oscilador (panel inferior)">
-    <input id="chart-asof" placeholder="as-of (opcional, ISO)" title="Reconstruye lo que el sistema veía en ese momento">
-    <button id="chart-load">Cargar</button> <span id="chart-msg" class="muted"></span>
-    <div id="chart" class="chart"></div>
-    <div id="chart-osc-pane" class="chart small"></div>
-  </div>
-</section>
-
-<section id="tab-strategies" class="tab">
-  <div class="card"><h3>Estrategias (nunca se borran)</h3><table id="strategies"></table></div>
-  <div class="card"><h3>Historial</h3><pre id="strategy-history" class="muted">Selecciona una estrategia.</pre></div>
-</section>
-
-<section id="tab-lab" class="tab">
-  <div class="grid two">
-    <div class="card">
-      <h3>Definición (JSON)</h3>
-      <textarea id="lab-def" spellcheck="false"></textarea>
-      <div class="row">
-        <input id="lab-symbols" placeholder="símbolos, p.ej. AAPL,MSFT">
-        <input id="lab-start" placeholder="inicio (YYYY-MM-DD)"><input id="lab-end" placeholder="fin">
-      </div>
-      <div class="row">
-        <label>Capital <input id="lab-cap" value="10000" size="7"></label>
-        <label>Riesgo/trade <input id="lab-risk" value="0.01" size="5"></label>
-        <label>Spread bps <input id="lab-spread" value="5" size="4"></label>
-        <label>Slippage bps <input id="lab-slip" value="5" size="4"></label>
-      </div>
-      <button id="lab-run">Ejecutar backtest</button> <span id="lab-msg" class="muted"></span>
-      <p class="muted">Walk-forward, OOS, Monte Carlo y robustez: pipeline completo vía CLI <code>qsts research</code>.</p>
-    </div>
-    <div class="card"><h3>Resultado</h3><div id="lab-equity" class="chart small"></div><dl id="lab-metrics" class="metrics"></dl></div>
-  </div>
-  <div class="card"><h3>Operaciones</h3><table id="lab-trades"></table></div>
-</section>
-
-<section id="tab-research" class="tab">
-  <div class="card"><h3>Experimentos</h3><table id="experiments"></table></div>
-  <div class="card"><h3>Reproducción</h3><pre id="repro" class="muted">Pulsa REPRODUCE en un experimento.</pre></div>
-</section>
-
-<section id="tab-logs" class="tab">
-  <div class="card"><h3>Notificaciones / eventos</h3><table id="notifications"></table></div>
-  <div class="card"><h3>Journal de decisiones</h3><table id="journal"></table></div>
 </section>
 </main>
-<footer class="muted"><span id="app-version"></span> · Plataforma de investigación. Rentabilidades pasadas no garantizan resultados futuros. NO EVIDENCE → NO TRADE. Gráficos: TradingView Lightweight Charts™.</footer>
+<footer id="foot" class="muted small"></footer>
 <script src="/static/app.js"></script>
 </body>
 </html>

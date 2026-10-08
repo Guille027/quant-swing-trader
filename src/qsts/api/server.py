@@ -1,11 +1,11 @@
-"""Local backend API for the desktop UI (FastAPI). Binds to 127.0.0.1 only.
+"""Local backend API for the desktop app (FastAPI). Binds to 127.0.0.1 only.
 
-The UI is a thin client: every number it shows comes from these endpoints, which call the same
-engines used everywhere else. Nothing is computed or invented in the frontend.
+The UI is a thin client: every number it shows comes from these endpoints. Main parts: the strategy library
+(backtests of bots), automatic paper trading on the Alpaca paper account, market data downloads, Telegram, and
+the data copy shared between two computers.
 """
 from __future__ import annotations
 
-import json
 import math
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,36 +13,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import select
 
-from qsts.app.context import AppContext
-from qsts.app.daily import DailyReporter
-from qsts.app.datajobs import FX_SERIES, DataJobRunner, sample_symbols
 from qsts.app import sync
+from qsts.app.context import AppContext
+from qsts.app.datajobs import DataJobRunner, sample_symbols
 from qsts.app.envfile import set_env_values
-from qsts.app.scanner import MarketScanner, StrategySlot, render_report
-from qsts.backtest.engine import BacktestConfig, CostModel
-from qsts.core.modes import ModeTransitionError, SystemMode
-from qsts.data.bars import Timeframe
-from qsts.data.adjust import adjust
-from qsts.data.quality import DataQualityError, validate_and_clean
+from qsts.broker.alpaca_paper import AlpacaPaper, BrokerError
 from qsts.data.universe import UniverseList, fetch_sp500
-from qsts.db import models as m
-from qsts.execution.intraday_paper import IntradayPaper
-from qsts.execution.paper import PaperError, PaperTrading
-from qsts.features.registry import REGISTRY, FeatureSet, FeatureSpec
+from qsts.lab import metrics as lab_metrics
+from qsts.lab.service import CAPITAL, LabService
+from qsts.lab.strategy import REGISTRY
+from qsts.lab.trader import PaperTrader
 from qsts.notify.telegram import Telegram, TelegramError
-from qsts.research.autoresearch import AutoResearchConfig, AutoResearchRunner
-from qsts.research import intraday as itd
-from qsts.research.validation import OOSAccessDenied
-from qsts.risk.engine import PortfolioState
-from qsts.strategy.definition import definition_from_dict
-from qsts.strategy.lifecycle import LifecycleError
 
 STATIC = Path(__file__).resolve().parent.parent / "ui" / "static"
+ETFS = ("SPY", "QQQ", "IWM", "DIA", "GLD", "TLT")
 
 
 def _j(x):
@@ -62,79 +50,41 @@ def _j(x):
     return x
 
 
-class KillSwitchBody(BaseModel):
-    engage: bool
-    reason: str = "manual"
-    confirm: bool = False
-
-
-class ModeBody(BaseModel):
-    mode: str
-    reason: str
-    confirm: bool = False
-
-
-class BacktestBody(BaseModel):
-    definition: dict
-    symbols: list[str]
-    start: str | None = None
-    end: str | None = None
-    initial_capital: float = 10_000.0
-    risk_per_trade: float = 0.01
-    spread_bps: float = 5.0
-    slippage_bps: float = 5.0
-    strategy_id: str | None = None
-
-
-class AutoResearchBody(BaseModel):
-    ignore_sync: bool = False  # start even though a newer copy from another computer waits to be loaded
-    use_ai: bool = True
-    avoid_earnings: bool = True
-    max_cycles: int = 0  # 0 = until stopped
-    population: int = 20
-    generations: int = 4
-    max_holding_days: int = 20   # swing horizon: 5, 10 or 20 sessions (each one is its own ranking)
-    max_conditions: int = 2      # 2 (simpler, less overfitting) or 3 (hybrid rules)
-    fresh_start: bool = False    # explore from zero, without seeds from earlier work
-
-
 class IngestBody(BaseModel):
-    mode: str  # sp500 | symbols | update | earnings
+    mode: str  # sp500 | symbols | update
     symbols: list[str] = []
     sample: int | None = None  # sp500: random sample size (None = all)
     start: str = "2010-01-01"
 
 
-class IntradayIngestBody(BaseModel):
-    dataset: str = "5m"  # 5m | 1h
-    n_symbols: int = 100  # the most traded stocks you have (those already downloaded are always updated)
+class BotBody(BaseModel):
+    strategy: str
+    symbol: str
+    params: dict = {}
 
 
-class IntradayPaperBody(BaseModel):
-    rid: str
-    dataset: str = "5m"
-    capital: float = 2000.0
-    currency: str = "EUR"
+class BotUpdateBody(BaseModel):
+    favorite: bool | None = None
+    hidden: bool | None = None
+    size_pct: float | None = None
 
 
-class IntradayStartBody(BaseModel):
-    dataset: str = "5m"
-    max_cycles: int = 0  # 0 = until stopped
-    ignore_sync: bool = False
+class ActivateBody(BaseModel):
+    allocation_pct: float = 20.0
+    follow_open: bool = True
 
 
-class PaperStartBody(BaseModel):
-    strategy_id: str
-    capital: float = 10_000.0
-    currency: str = "USD"
+class DeactivateBody(BaseModel):
+    close: bool = True
+
+
+class AlpacaKeysBody(BaseModel):
+    key: str
+    secret: str
 
 
 class TelegramTokenBody(BaseModel):
     token: str
-
-
-class KeyBody(BaseModel):
-    key: str
 
 
 class SyncDirBody(BaseModel):
@@ -150,40 +100,19 @@ class SyncLoadBody(BaseModel):
     path: str | None = None  # load_file: a copy downloaded by hand (default: newest in Downloads)
 
 
-class PaperStopBody(BaseModel):
-    reason: str = "detenida por el usuario"
-
-
-class ApprovalBody(BaseModel):
-    approve: bool
-    reason: str = ""
-
-
-def portfolio_state(ctx: AppContext) -> PortfolioState:
-    try:
-        acc = ctx.execution.broker.account()
-        eq, cash = acc.equity, acc.cash
-    except Exception:  # noqa: BLE001
-        eq = cash = float("nan")
-    peak = ctx.extra.setdefault("peak_equity", eq)
-    if eq > peak:
-        ctx.extra["peak_equity"] = peak = eq
-    return PortfolioState(eq, cash, peak, ctx.extra.get("day_start", eq), ctx.extra.get("week_start", eq))
-
-
 def create_app(ctx: AppContext) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app):
-        if ctx.extra.get("daily_reporter_autostart", True):
-            _reporter().start()  # evening Telegram message of the paper-trading session
+        if ctx.extra.get("trader_autostart", True):
+            _trader().start()  # paper trading of the active bots, every couple of minutes while the app is open
         yield
-        rep = ctx.extra.get("daily_reporter")
-        if rep is not None:
-            rep.stop()
+        tr = ctx.extra.get("trader")
+        if tr is not None:
+            tr.stop()
 
     app = FastAPI(title="QSTS", docs_url="/api/docs", lifespan=lifespan)
     if "code_version" not in ctx.extra:
-        from qsts.research.experiments import code_version
+        from qsts.core.version import code_version
         ctx.extra["code_version"] = code_version()
 
     @app.middleware("http")
@@ -194,6 +123,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    # ------------------------------------------------------------------ system
     @app.post("/api/shutdown")
     def shutdown():
         stop = ctx.extra.get("shutdown")
@@ -202,7 +132,6 @@ def create_app(ctx: AppContext) -> FastAPI:
         stop()
         return {"stopping": True}
 
-    # ------------------------------------------------------------------ system
     @app.get("/api/ping")
     def ping():
         """Instant 'I am up' for the launcher (no database work)."""
@@ -210,164 +139,216 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/status")
     def status():
-        try:
-            acc = ctx.execution.broker.account()
-            broker = {"name": ctx.execution.broker.name, "environment": ctx.execution.broker.environment,
-                      "connected": ctx.execution.connected, "cash": acc.cash, "equity": acc.equity,
-                      "positions": ctx.execution.broker.positions()}
-        except Exception as e:  # noqa: BLE001
-            broker = {"name": ctx.execution.broker.name, "connected": False, "error": repr(e)}
-        return _j({"environment": ctx.settings.env.value, "mode": ctx.modes.mode.name,
-                   "code_version": ctx.extra.get("code_version"),
-                   "live_enabled_by_config": ctx.settings.live_allowed_by_config,
-                   "kill_switch": {"engaged": ctx.kill_switch.is_engaged(), "info": ctx.kill_switch.info()},
-                   "broker": broker, "needs_reconcile": ctx.execution.needs_reconcile,
-                   "symbols_with_data": len(ctx.symbols()), "strategies": ctx.strategy_counts(),
-                   "ai": "configured" if ctx.settings.gemini_api_key else "not configured",
-                   "pending_approvals": len(ctx.execution.pending)})
+        tr = _trader()
+        return _j({"code_version": ctx.extra.get("code_version"), "alpaca": _alpaca_configured(),
+                   "telegram": _telegram() is not None, "trader": tr.state,
+                   "paper_bots": len(tr.active_bots()), "data_job": _data_runner().state.running})
 
-    @app.post("/api/kill-switch")
-    def kill_switch(body: KillSwitchBody):
-        if body.engage:
-            ctx.execution.stop_all_trading(body.reason)
-        else:
+    @app.post("/api/stop-all")
+    def stop_all(body: DeactivateBody):
+        """Emergency stop: every bot leaves paper trading (and closes its position at the next open if asked)."""
+        tr, out = _trader(), []
+        for b in tr.active_bots():
             try:
-                ctx.kill_switch.release(confirmed_by_user=body.confirm)
-            except PermissionError as e:
-                raise HTTPException(400, str(e))
-        return {"engaged": ctx.kill_switch.is_engaged()}
+                out.append({"bot": b.id, **tr.deactivate(b.id, close=body.close)})
+            except ValueError as e:
+                out.append({"bot": b.id, "error": str(e)})
+        return _j({"stopped": out})
 
-    @app.post("/api/mode")
-    def set_mode(body: ModeBody):
-        try:
-            target = SystemMode[body.mode]
-            ctx.modes.transition(target, reason=body.reason, confirmed_by_user=body.confirm)
-        except (KeyError, ModeTransitionError) as e:
-            raise HTTPException(400, str(e))
-        return {"mode": ctx.modes.mode.name}
+    # ------------------------------------------------------------------ strategy library
+    def _basket() -> list[str]:
+        have = set(ctx.symbols())
+        return [s for s in ETFS if s in have] + [s for s in ctx.repo.liquid_symbols(30) if s not in ETFS]
 
-    # ------------------------------------------------------------------ market data / charts
-    @app.get("/api/symbols")
-    def symbols():
-        return ctx.symbols()
+    def _lab() -> LabService:
+        lab = ctx.extra.get("lab")
+        if lab is None:
+            lab = ctx.extra["lab"] = LabService(ctx.sf, ctx.research_frame, ctx.repo.data_token, basket=_basket,
+                                                benchmark=ctx.settings.benchmark)
+            lab.sync()
+        return lab
 
-    @app.get("/api/features")
-    def features():
-        return {k: {"category": d.category, "defaults": d.defaults, "version": d.version}
-                for k, d in sorted(REGISTRY.items()) if not k.startswith("_")}
+    @app.get("/api/library")
+    def library():
+        lib = _lab().library()
+        lib["missing"] = sorted({r["symbol"] for r in lib["rows"] if r.get("error", "").startswith("sin datos")})
+        return _j(lib)
 
-    @app.get("/api/chart/{symbol}")
-    def chart(symbol: str, tf: str = "1d", indicators: str = "", asof: str | None = None):
-        try:
-            raw = ctx.load_bars(symbol, Timeframe(tf))
-        except KeyError:
-            raise HTTPException(404, f"no data for {symbol}")
-        if raw.empty:
-            raise HTTPException(404, f"no data for {symbol}")
-        try:
-            vb = validate_and_clean(raw[["open", "high", "low", "close", "volume"]], symbol, Timeframe(tf))
-        except DataQualityError as e:
-            raise HTTPException(422, str(e))
-        df = vb.df
-        acts = ctx.repo.load_corporate_actions(symbol)
-        if asof:  # reconstruct what the system could see at `asof` (bars AND corporate actions)
-            t = pd.Timestamp(asof)
-            t = t.tz_localize("UTC") if t.tz is None else t
-            df = df[df["available_at"] <= t]
-            acts = acts[acts["ex_date"] <= t]
-        df = adjust(df, acts, "total")  # split/dividend adjusted; raw prices are what is stored
-        specs = []
-        for tok in filter(None, indicators.split(",")):
-            name, _, arg = tok.partition(":")
-            if name not in REGISTRY:
-                raise HTTPException(400, f"unknown indicator {name}")
-            params = {"n": int(arg)} if arg else {}
-            specs.append(FeatureSpec(name, params))
-        feats = FeatureSet(specs).compute(df) if specs else pd.DataFrame(index=df.index)
-        t = [int(x.timestamp()) for x in df.index]
-        return _j({"symbol": symbol, "timeframe": tf, "data_version": vb.version,
-                   "quality": [{"code": i.code, "severity": i.severity.value, "message": i.message} for i in vb.report.issues],
-                   "candles": [{"time": ti, "open": o, "high": h, "low": l, "close": c}
-                               for ti, o, h, l, c in zip(t, df["open"], df["high"], df["low"], df["close"])],
-                   "volume": [{"time": ti, "value": v} for ti, v in zip(t, df["volume"])],
-                   "indicators": {col: [{"time": ti, "value": v} for ti, v in zip(t, feats[col]) if pd.notna(v)]
-                                  for col in feats.columns}})
-
-    # ------------------------------------------------------------------ strategies / experiments
     @app.get("/api/strategies")
     def strategies():
-        with ctx.sf() as s:
-            rows = s.scalars(select(m.Strategy).order_by(m.Strategy.created_at)).all()
-            out = []
-            for r in rows:
-                vers = s.scalars(select(m.StrategyVersion).where(m.StrategyVersion.strategy_id == r.id)
-                                 .order_by(m.StrategyVersion.version)).all()
-                out.append({"id": r.id, "name": r.name, "family": r.family, "status": r.status, "origin": r.origin,
-                            "versions": [{"id": v.id, "version": v.version, "definition": v.definition} for v in vers]})
-        return _j(out)
+        return _j([REGISTRY[k].info() for k in sorted(REGISTRY)])
 
-    @app.get("/api/strategies/{sid}/history")
-    def strategy_history(sid: str):
-        return ctx.registry.history(sid)
-
-    @app.get("/api/experiments")
-    def experiments(limit: int = 100):
-        with ctx.sf() as s:
-            rows = s.scalars(select(m.Experiment).order_by(m.Experiment.created_at.desc()).limit(limit)).all()
-            return _j([{"id": e.id, "kind": e.kind, "strategy_version_id": e.strategy_version_id,
-                        "dataset_version_id": e.dataset_version_id, "seed": e.seed, "code_version": e.code_version,
-                        "created_at": str(e.created_at), "metrics": e.metrics,
-                        "period": [e.config.get("start"), e.config.get("end")], "symbols": e.config.get("symbols")}
-                       for e in rows])
-
-    @app.get("/api/experiments/{eid}")
-    def experiment(eid: str):
-        with ctx.sf() as s:
-            e = s.get(m.Experiment, eid)
-            if e is None:
-                raise HTTPException(404)
-            bt = s.scalars(select(m.Backtest).where(m.Backtest.experiment_id == eid)).first()
-            return _j({"id": e.id, "config": e.config, "metrics": e.metrics, "seed": e.seed,
-                       "code_version": e.code_version, "strategy_version_id": e.strategy_version_id,
-                       "trades": bt.trades if bt else [], "equity": bt.equity_curve if bt else []})
-
-    @app.post("/api/experiments/{eid}/reproduce")
-    def reproduce(eid: str):
-        e = ctx.tracker.get(eid)
-        data = {s: ctx.research_frame(s) for s in e.config["symbols"]}
-        return _j(ctx.tracker.reproduce(eid, data))
-
-    @app.post("/api/lab/backtest")
-    def lab_backtest(body: BacktestBody):
+    @app.post("/api/bots")
+    def create_bot(body: BotBody):
+        lab = _lab()
         try:
-            sd = definition_from_dict(body.definition)
-            sd.validate()
-        except (KeyError, TypeError, ValueError) as e:
-            raise HTTPException(400, f"invalid strategy: {e}")
-        data = {}
-        for sym in body.symbols:
-            try:
-                data[sym] = ctx.research_frame(sym)
-            except (KeyError, DataQualityError) as e:
-                raise HTTPException(422, f"{sym}: {e}")
-        cfg = BacktestConfig(initial_capital=body.initial_capital, risk_per_trade=body.risk_per_trade,
-                             costs=CostModel(spread_bps=body.spread_bps, slippage_bps=body.slippage_bps))
-        start = pd.Timestamp(body.start, tz="UTC") if body.start else None
-        end = pd.Timestamp(body.end, tz="UTC") if body.end else None
-        rec = ctx.tracker.run_backtest(sd, data, cfg, start=start, end=end, strategy_id=body.strategy_id)
-        eq = rec.result.equity["equity"]
-        return _j({"experiment_id": rec.id, "strategy_version_id": sd.version_id, "metrics": rec.metrics,
-                   "complexity": sd.complexity(),
-                   "equity": [{"time": int(t.timestamp()), "value": v} for t, v in eq.items()],
-                   "trades": rec.result.trades.astype(str).to_dict("records")[:500]})
+            b = lab.create_bot(body.strategy, body.symbol, body.params)
+        except KeyError:
+            raise HTTPException(404, "estrategia desconocida")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        downloading = False
+        if b.symbol not in set(ctx.symbols()):  # no prices yet: download them now
+            downloading = _data_runner().start("symbols", [b.symbol], "2010-01-01", earnings=False)
+        return {"id": b.id, "downloading": downloading}
 
-    # ------------------------------------------------------------------ data manager ("Datos")
-    def _invalidate_research_views():
-        ctx.extra.pop("autoresearch_view", None)
-        ctx.extra.pop("intraday_views", None)
-        r = ctx.extra.get("autoresearch")
-        if r is not None and not r.state.running:
-            r.researcher = None
+    @app.post("/api/bots/{bid}/update")
+    def update_bot(bid: str, body: BotUpdateBody):
+        try:
+            _lab().update_bot(bid, **body.model_dump())
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.get("/api/bots/{bid}")
+    def bot_detail(bid: str):
+        lab, tr = _lab(), _trader()
+        try:
+            d = lab.detail(bid)
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        b = lab.get_bot(bid)
+        d["paper"] = _paper_view(b, d) if b.activated_at else None
+        return _j(d)
+
+    def _paper_view(b, d: dict) -> dict:
+        """The bot's paper results since activation, also as a continuation of the backtest curve (in %)."""
+        tr = _trader()
+        _res, bars = _lab().result(b)
+        led = tr.ledger(b)
+        curve = tr.live_curve(b, bars)
+        live, metrics = [], {}
+        if len(curve) and b.capital:
+            start = int(curve.index[0].timestamp())
+            before = [p for p in d["equity"] if p["time"] <= start]
+            base = before[-1]["value"] if before else 0.0
+            live = [{"time": int(t.timestamp()), "value": round(((1 + base / 100) * v / b.capital - 1) * 100, 4)}
+                    for t, v in curve.items()]
+            trades = pd.DataFrame(led["trades"]) if led["trades"] else pd.DataFrame(
+                columns=["pnl", "pnl_pct", "side", "bars"])
+            if "bars" not in trades:
+                trades["bars"] = np.nan
+            st = lab_metrics.trade_stats(trades)
+            metrics = {"net_profit_pct": float(curve.iloc[-1] / b.capital - 1), "win_rate": st["win_rate"],
+                       "profit_factor": st["profit_factor"], "n_trades": st["n_trades"],
+                       "max_drawdown": float(lab_metrics.drawdown(curve).min()),
+                       "d7": lab_metrics.window_return(curve, 7), "d30": lab_metrics.window_return(curve, 30),
+                       "d90": lab_metrics.window_return(curve, 90)}
+        return {"status": b.paper_status, "capital": b.capital, "allocation_pct": b.allocation_pct,
+                "activated_at": b.activated_at.isoformat(timespec="minutes"),
+                "position": led["qty"], "avg_price": led["avg"], "realized": led["realized"],
+                "stop": b.stop_level, "target": b.target_level, "pending": b.pending, "live": live,
+                "metrics": metrics, "trades": led["trades"][::-1][:200], "events": tr.events(b.id, 50),
+                "orders": [{"id": o.id, "purpose": o.purpose, "side": o.side, "qty": o.qty, "type": o.order_type,
+                            "status": o.status, "filled_price": o.filled_price, "stop": o.stop_price,
+                            "limit": o.limit_price, "submitted": o.submitted_at.isoformat(timespec="minutes"),
+                            "filled": o.filled_at.isoformat(timespec="minutes") if o.filled_at else None,
+                            "error": o.error} for o in tr.orders(b.id)[::-1][:50]]}
+
+    @app.get("/api/bots/{bid}/audit")
+    def bot_audit(bid: str):
+        try:
+            return _j(_lab().audit(bid))
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    # ------------------------------------------------------------------ paper trading (Alpaca)
+    def _alpaca_configured() -> bool:
+        return bool(ctx.settings.alpaca_api_key and ctx.settings.alpaca_secret_key)
+
+    def _broker():
+        factory = ctx.extra.get("broker_factory")
+        if factory is not None:
+            return factory()
+        if not _alpaca_configured():
+            return None
+        key = (ctx.settings.alpaca_api_key.get_secret_value(), ctx.settings.alpaca_secret_key.get_secret_value())
+        cached = ctx.extra.get("broker")
+        if cached is None or cached[0] != key:
+            cached = ctx.extra["broker"] = (key, AlpacaPaper(*key))
+        return cached[1]
+
+    def _trader() -> PaperTrader:
+        tr = ctx.extra.get("trader")
+        if tr is None:
+            tr = ctx.extra["trader"] = PaperTrader(
+                ctx.sf, _lab(), _broker, _telegram,
+                refresh=lambda syms: _data_runner().start("bots", syms, "2010-01-01", incremental=True,
+                                                         earnings=False),
+                data_busy=lambda: _data_runner().state.running, delay_min=ctx.settings.daily_report_delay_min,
+                blocked=_sync_block_reason)
+        return tr
+
+    @app.get("/api/alpaca")
+    def alpaca_status():
+        if not _alpaca_configured() and ctx.extra.get("broker_factory") is None:
+            return {"configured": False}
+        try:
+            br = _broker()
+            return _j({"configured": True, "account": br.account(), "clock": br.clock()})
+        except BrokerError as e:
+            return {"configured": True, "error": str(e)}
+
+    @app.post("/api/alpaca/keys")
+    def alpaca_keys(body: AlpacaKeysBody):
+        key, secret = body.key.strip(), body.secret.strip()
+        if len(key) < 10 or len(secret) < 20 or any(ch.isspace() for ch in key + secret):
+            raise HTTPException(400, "eso no parecen las claves de Alpaca (copia la 'API Key' y la 'Secret Key' enteras)")
+        try:
+            acct = (ctx.extra.get("broker_check") or (lambda k, s: AlpacaPaper(k, s).account()))(key, secret)
+        except BrokerError as e:
+            raise HTTPException(400, f"Alpaca no acepta esas claves de paper trading: {e}")
+        set_env_values({"QSTS_ALPACA_API_KEY": key, "QSTS_ALPACA_SECRET_KEY": secret}, ctx.extra.get("env_path", ".env"))
+        ctx.settings.alpaca_api_key, ctx.settings.alpaca_secret_key = SecretStr(key), SecretStr(secret)
+        ctx.extra.pop("broker", None)
+        return _j({"saved": True, "account": acct})
+
+    @app.get("/api/paper")
+    def paper_overview():
+        tr, lab = _trader(), _lab()
+        bots = []
+        for b in lab.bots(include_hidden=True):
+            if not b.activated_at:
+                continue
+            led = tr.ledger(b)
+            bots.append({"id": b.id, "name": REGISTRY[b.strategy].name, "symbol": b.symbol, "status": b.paper_status,
+                         "allocation_pct": b.allocation_pct, "capital": b.capital, "position": led["qty"],
+                         "realized": led["realized"], "trades": len(led["trades"]),
+                         "activated_at": b.activated_at.isoformat(timespec="minutes")})
+        return _j({"state": tr.state, "log": list(tr.logs)[-40:], "events": tr.events(limit=60), "bots": bots,
+                   "alpaca": _alpaca_configured() or ctx.extra.get("broker_factory") is not None})
+
+    @app.post("/api/paper/run")
+    def paper_run():
+        return {"state": _trader().tick()}
+
+    @app.post("/api/bots/{bid}/activate")
+    def activate(bid: str, body: ActivateBody):
+        try:
+            return _j(_trader().activate(bid, body.allocation_pct, body.follow_open))
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except (ValueError, BrokerError) as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/bots/{bid}/deactivate")
+    def deactivate(bid: str, body: DeactivateBody):
+        try:
+            return _j(_trader().deactivate(bid, body.close))
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except (ValueError, BrokerError) as e:
+            raise HTTPException(400, str(e))
+
+    # ------------------------------------------------------------------ market data ("Datos")
+    def _invalidate_views():
+        pass  # backtests are recomputed automatically when the stored prices change (data token)
 
     def _yahoo():
         from qsts.data.providers.yfinance_provider import YFinanceProvider
@@ -377,7 +358,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         r = ctx.extra.get("datajob")
         if r is None:
             r = ctx.extra["datajob"] = DataJobRunner(ctx.repo, ctx.extra.get("data_provider_factory") or _yahoo,
-                                                     on_finish=_invalidate_research_views)
+                                                     on_finish=_invalidate_views)
         return r
 
     def _sp500() -> UniverseList:
@@ -390,19 +371,10 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.get("/api/data/summary")
     def data_summary():
         rows = ctx.repo.summary()
-        joined = ctx.repo.membership_starts("SP500")
-        for r in rows:
-            r["sp500_since"] = str(joined[r["symbol"]]) if r["symbol"] in joined else None
-        earn = ctx.repo.earnings_summary()
-        for r in rows:
-            r["earnings"] = earn.get(r["symbol"])
         return _j({"count": len(rows), "symbols": rows, "benchmark": ctx.settings.benchmark,
-                   "earnings": {"symbols": len(earn), "events": sum(v["events"] for v in earn.values()),
-                                "first": min((v["first"] for v in earn.values()), default=None)},
-                   "earnings_rule": {"blackout_days": ctx.settings.earnings_blackout_days,
-                                     "exit_before": ctx.settings.exit_before_earnings},
                    "has_benchmark": any(r["symbol"] == ctx.settings.benchmark for r in rows),
-                   "first": min((r["first"] for r in rows), default=None), "last": max((r["last"] for r in rows), default=None)})
+                   "first": min((r["first"] for r in rows), default=None),
+                   "last": max((r["last"] for r in rows), default=None)})
 
     @app.get("/api/data/sp500")
     def data_sp500():
@@ -419,15 +391,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         bench = ctx.settings.benchmark
         have = [r["symbol"] for r in ctx.repo.summary()]
         fields, members = {}, None
-        bars = True
         if body.mode == "update":
             if not have:
                 raise HTTPException(400, "no hay datos que actualizar")
             syms, incremental = have, True
-        elif body.mode == "earnings":
-            if not have:
-                raise HTTPException(400, "primero descarga precios")
-            syms, incremental, bars = have, False, False
         elif body.mode == "symbols":
             syms = sorted({x.strip().upper().replace(".", "-") for x in body.symbols if x.strip()})
             if not syms:
@@ -440,17 +407,17 @@ def create_app(ctx: AppContext) -> FastAPI:
                 raise HTTPException(502, f"no se pudo descargar la lista del S&P 500: {e}")
             mem = ul.members
             syms = sample_symbols(list(mem["symbol"]), body.sample) if body.sample else sorted(mem["symbol"])
-            wanted = set(syms) | set(have)  # also fill name/sector of members you already had
+            wanted = set(syms) | set(have)
             fields = {r.symbol: {"name": r.name, "sector": r.sector} for r in mem.itertuples() if r.symbol in wanted}
             members = ("SP500", [(r.symbol, r.date_added.date(), None) for r in mem.itertuples()
                                  if pd.notna(r.date_added)], ul.source)
             incremental = False
         else:
             raise HTTPException(400, "modo desconocido")
-        if bars and bench not in syms and bench not in have:
+        if bench not in syms and bench not in have:
             syms = [bench, *syms]
         started = _data_runner().start(body.mode, syms, body.start, incremental=incremental, asset_fields=fields,
-                                       memberships=members, bars=bars)
+                                       memberships=members, earnings=False)
         if not started:
             raise HTTPException(409, "ya hay una descarga en marcha")
         return {"started": True, "symbols": len(syms)}
@@ -463,61 +430,6 @@ def create_app(ctx: AppContext) -> FastAPI:
     def data_job_stop():
         _data_runner().stop()
         return {"stopping": True}
-
-    # ------------------------------------------------------------------ paper trading ("Simulación")
-    def _paper() -> PaperTrading:
-        p = ctx.extra.get("paper")
-        if p is None:
-            p = ctx.extra["paper"] = PaperTrading(ctx.sf, ctx.research_frame, ctx.settings.benchmark,
-                                                  fx=lambda: ctx.repo.fx_series(FX_SERIES))
-        return p
-
-    @app.get("/api/paper")
-    def paper_view():
-        return _j(_paper().view())
-
-    @app.get("/api/paper/summary")
-    def paper_summary():
-        return _j(_paper().summary())
-
-    @app.get("/api/paper/journal")
-    def paper_journal():
-        return _j(_paper().journal())
-
-    @app.post("/api/paper/start")
-    def paper_start(body: PaperStartBody):
-        try:
-            return {"session_id": _paper().start(body.strategy_id, body.capital, currency=body.currency)}
-        except (PaperError, LifecycleError) as e:
-            raise HTTPException(400, str(e))
-
-    @app.post("/api/paper/stop")
-    def paper_stop(body: PaperStopBody):
-        try:
-            _paper().stop(body.reason)
-        except (PaperError, LifecycleError) as e:
-            raise HTTPException(400, str(e))
-        return {"stopped": True}
-
-    # ------------------------------------------------------------------ Telegram messages of the simulation
-    def _tg_client(token: str | None = None, with_chat: bool = True):
-        tok = token or (ctx.settings.telegram_bot_token.get_secret_value() if ctx.settings.telegram_bot_token else None)
-        if not tok:
-            return None
-        chat = ctx.settings.telegram_chat_id if with_chat else None
-        return (ctx.extra.get("telegram_factory") or Telegram)(tok, chat)
-
-    def _telegram():
-        return _tg_client() if ctx.settings.telegram_chat_id else None
-
-    def _reporter() -> DailyReporter:
-        r = ctx.extra.get("daily_reporter")
-        if r is None:
-            r = ctx.extra["daily_reporter"] = DailyReporter(
-                ctx.sf, _paper, _telegram, _data_runner, ctx.repo.last_bar, benchmark=ctx.settings.benchmark,
-                delay_min=ctx.settings.daily_report_delay_min, blocked=_sync_block_reason,
-                intraday_paper=_intraday_paper, intraday_data=_intraday_coverage, intraday_update=_intraday_download)
-        return r
 
     # ------------------------------------------------------------------ several computers (OneDrive copy)
     def _db():
@@ -541,15 +453,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         newer = _sync_newer()
         return f"hay datos más recientes de {newer} sin cargar" if newer else None
 
+    def _less(rs: dict, ls: dict, who: str) -> str:
+        return (f"OJO: {who} tiene MENOS datos que este ordenador ({rs.get('bots') or 0} bots, "
+                f"{rs.get('paper_orders') or 0} órdenes y {rs.get('stocks') or 0} acciones, frente a {ls.get('bots') or 0}, "
+                f"{ls.get('paper_orders') or 0} y {ls.get('stocks') or 0} aquí). Si lo cargas, este ordenador perdería "
+                "sus datos (quedaría una copia de seguridad).")
+
+    def _check_idle():
+        if _data_runner().state.running:
+            raise HTTPException(409, "espera a que termine la descarga de datos")
+
     @app.get("/api/sync")
     def sync_status():
         st = _sync_status()
-        loaded = ctx.extra.get("sync_loaded")
         try:
             downloaded = sync.find_downloaded(ctx.extra.get("downloads_dir"))
         except OSError:
             downloaded = None
-        return _j({**st, "loaded_at_start": loaded, "code_version": ctx.extra.get("code_version"),
+        return _j({**st, "loaded_at_start": ctx.extra.get("sync_loaded"), "code_version": ctx.extra.get("code_version"),
                    "downloaded": downloaded, "downloads_dir": str(ctx.extra.get("downloads_dir") or sync.downloads_dir())})
 
     @app.post("/api/sync/save_file")
@@ -573,21 +494,11 @@ def create_app(ctx: AppContext) -> FastAPI:
         rs, ls = meta.get("summary") or {}, sync.summary(_db()) if _db().exists() else {}
         if sync.smaller_than_local(rs, _db()) and not body.force:
             sync.discard_pending(ctx.settings.state_dir)
-            raise HTTPException(409, f"OJO: ese archivo tiene MENOS datos que este ordenador ({rs.get('strategies_tested') or 0} "
-                                     f"estrategias y {rs.get('stocks') or 0} acciones, frente a "
-                                     f"{ls.get('strategies_tested') or 0} y {ls.get('stocks') or 0} aquí). Si lo cargas, "
-                                     "este ordenador perdería sus datos (quedaría una copia de seguridad).")
+            raise HTTPException(409, _less(rs, ls, "ese archivo"))
         restart = ctx.extra.get("restart_app")
         if restart is not None:
             restart()
         return _j({"staged": meta, "restarting": restart is not None})
-
-    def _check_idle():
-        r = ctx.extra.get("autoresearch")
-        if r is not None and r.state.running:
-            raise HTTPException(409, "detén primero la investigación")
-        if _data_runner().state.running:
-            raise HTTPException(409, "espera a que termine la descarga de datos")
 
     @app.post("/api/sync/enable")
     def sync_enable(body: SyncDirBody):
@@ -617,15 +528,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         st = _sync_status()
         if st.get("remote_smaller") and not (body and body.force):
             rs, ls = (st.get("remote") or {}).get("summary") or {}, st.get("local_summary") or {}
-            raise HTTPException(409, f"OJO: la copia de {(st.get('remote') or {}).get('machine')} tiene MENOS datos que este "
-                                     f"ordenador ({rs.get('strategies_tested') or 0} estrategias y {rs.get('stocks') or 0} "
-                                     f"acciones, frente a {ls.get('strategies_tested') or 0} y {ls.get('stocks') or 0} aquí). "
-                                     "Si la cargas, este ordenador perdería sus datos (quedaría una copia de seguridad).")
-        r = ctx.extra.get("autoresearch")
-        if r is not None and r.state.running:
-            raise HTTPException(409, "detén primero la investigación")
-        if _data_runner().state.running:
-            raise HTTPException(409, "espera a que termine la descarga de datos")
+            raise HTTPException(409, _less(rs, ls, f"la copia de {(st.get('remote') or {}).get('machine')}"))
+        _check_idle()
         try:
             meta = sync.stage_import(ctx.settings.state_dir)
         except (sync.SyncError, OSError) as e:
@@ -635,19 +539,24 @@ def create_app(ctx: AppContext) -> FastAPI:
             restart()  # the launcher closes the window and opens QSTS again with the loaded data
         return _j({"staged": meta, "restarting": restart is not None})
 
+    # ------------------------------------------------------------------ Telegram
+    def _tg_client(token: str | None = None, with_chat: bool = True):
+        tok = token or (ctx.settings.telegram_bot_token.get_secret_value() if ctx.settings.telegram_bot_token else None)
+        if not tok:
+            return None
+        chat = ctx.settings.telegram_chat_id if with_chat else None
+        return (ctx.extra.get("telegram_factory") or Telegram)(tok, chat)
+
+    def _telegram():
+        return _tg_client() if ctx.settings.telegram_chat_id else None
+
     def _save_env(values: dict) -> None:
         set_env_values(values, ctx.extra.get("env_path", ".env"))
 
     @app.get("/api/telegram")
     def tg_status():
-        rep = _reporter()
-        with ctx.sf() as s:
-            last = s.scalars(select(m.PaperNotification).order_by(m.PaperNotification.sent_at.desc()).limit(10)).all()
-            last = [{"day": str(n.day), "kind": n.kind, "ok": n.ok, "error": n.error, "sent_at": str(n.sent_at)[:16]}
-                    for n in last]
         return _j({"token_set": ctx.settings.telegram_bot_token is not None, "chat_id": ctx.settings.telegram_chat_id,
-                   "configured": _telegram() is not None, "state": rep.state, "log": list(rep.logs)[-12:],
-                   "last": last, "delay_min": ctx.settings.daily_report_delay_min})
+                   "configured": _telegram() is not None})
 
     @app.post("/api/telegram/token")
     def tg_token(body: TelegramTokenBody):
@@ -659,17 +568,6 @@ def create_app(ctx: AppContext) -> FastAPI:
         _save_env({"QSTS_TELEGRAM_BOT_TOKEN": tok})
         ctx.settings.telegram_bot_token = SecretStr(tok)
         return {"bot": (me or {}).get("username"), "name": (me or {}).get("first_name")}
-
-    @app.post("/api/settings/gemini")
-    def set_gemini_key(body: KeyBody):
-        """The AI key is a secret: saved only to this computer's .env (never copied to other computers)."""
-        key = body.key.strip()
-        if len(key) < 20 or any(ch.isspace() for ch in key):
-            raise HTTPException(400, "eso no parece una clave de Gemini (cópiala entera de Google AI Studio)")
-        _save_env({"QSTS_GEMINI_API_KEY": key})
-        ctx.settings.gemini_api_key = SecretStr(key)
-        _invalidate_research_views()  # the next search is built with the AI
-        return {"saved": True}
 
     @app.post("/api/telegram/detect")
     def tg_detect():
@@ -693,336 +591,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         if tg is None:
             raise HTTPException(400, "Telegram no está configurado")
         try:
-            tg.send("✅ <b>QSTS conectado.</b> Aquí recibirás cada tarde el resumen de la simulación y los avisos de venta.")
+            tg.send("✅ <b>QSTS conectado.</b> Aquí recibirás cada operación de tus bots en paper trading.")
         except TelegramError as e:
             raise HTTPException(400, str(e))
         return {"sent": True}
-
-    @app.post("/api/telegram/report")
-    def tg_report():
-        try:
-            return _reporter().send_report("manual")
-        except TelegramError as e:
-            raise HTTPException(400, str(e))
-
-    # ------------------------------------------------------------------ automatic research ("Investigación IA")
-    def _runner() -> AutoResearchRunner:
-        r = ctx.extra.get("autoresearch")
-        if r is None:
-            r = ctx.extra["autoresearch"] = AutoResearchRunner(
-                lambda cfg, log, stop: ctx.autoresearcher(cfg, log=log, stop_event=stop))
-        return r
-
-    options_file = Path(ctx.settings.state_dir) / "autoresearch_options.json"
-
-    def _last_options() -> dict:
-        """Options of the last research started (the ranking shown after a restart must use the same rules)."""
-        try:
-            return json.loads(options_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-
-    def _researcher():
-        r = _runner().researcher
-        if r is None:  # read-only view for the leaderboard / final test when no loop has run yet
-            r = ctx.extra.get("autoresearch_view")
-            if r is None:
-                lo = _last_options()
-                r = ctx.extra["autoresearch_view"] = ctx.autoresearcher(AutoResearchConfig(
-                    oos_start=ctx.settings.oos_start, use_ai=False, avoid_earnings=bool(lo.get("avoid_earnings", True)),
-                    max_holding_days=int(lo.get("max_holding_days", 20)), max_conditions=int(lo.get("max_conditions", 2))))
-        return r
-
-    @app.get("/api/autoresearch/status")
-    def ar_status():
-        return _j(_runner().status() | {"ai_available": bool(ctx.settings.gemini_api_key), "last_options": _last_options(),
-                                        "earnings_symbols": len(ctx.repo.earnings_summary()),
-                                        "oos_start": ctx.settings.oos_start})
-
-    @app.post("/api/autoresearch/start")
-    def ar_start(body: AutoResearchBody):
-        if not ctx.symbols():
-            raise HTTPException(400, "no hay datos: ejecuta primero `qsts ingest`")
-        newer = _sync_newer()
-        if newer and not body.ignore_sync:
-            raise HTTPException(409, f"Hay datos más recientes de {newer} en la carpeta compartida: cárgalos antes en "
-                                     "Inicio. Si investigas ahora y luego los cargas, perderás lo que hagas aquí.")
-        hold = body.max_holding_days if body.max_holding_days in (5, 10, 20) else 20
-        conds = body.max_conditions if body.max_conditions in (2, 3) else 2
-        cfg = AutoResearchConfig(oos_start=ctx.settings.oos_start, use_ai=body.use_ai, avoid_earnings=body.avoid_earnings,
-                                 population=max(4, min(body.population, 100)), generations=max(1, min(body.generations, 50)),
-                                 max_holding_days=hold, max_conditions=conds, fresh_start=body.fresh_start)
-        started = _runner().start(cfg, max(0, body.max_cycles))
-        if started:
-            try:
-                options_file.parent.mkdir(parents=True, exist_ok=True)
-                options_file.write_text(json.dumps({"use_ai": body.use_ai, "avoid_earnings": body.avoid_earnings,
-                                                    "max_holding_days": hold, "max_conditions": conds,
-                                                    "fresh_start": body.fresh_start}), encoding="utf-8")
-            except OSError:
-                pass
-            ctx.extra.pop("autoresearch_view", None)
-        return {"started": started}
-
-    @app.post("/api/autoresearch/stop")
-    def ar_stop():
-        _runner().stop()
-        return {"stopping": True}
-
-    @app.get("/api/autoresearch/leaderboard")
-    def ar_leaderboard(limit: int = 20, group: bool = False):
-        try:
-            return _j(_researcher().leaderboard(max(1, min(limit, 200)), group=group))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    @app.get("/api/autoresearch/{vid}/backtest")
-    def ar_backtest(vid: str):
-        try:
-            return _j(_researcher().backtest_view(vid))
-        except KeyError:
-            raise HTTPException(404, "estrategia desconocida")
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    @app.post("/api/autoresearch/{vid}/final-test")
-    def ar_final_test(vid: str):
-        try:
-            return _j(_researcher().final_test(vid))
-        except KeyError:
-            raise HTTPException(404, "estrategia desconocida")
-        except OOSAccessDenied as e:
-            raise HTTPException(409, f"el test final ya se usó para esta versión: {e}")
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    # ------------------------------------------------------------------ intraday lab ("Intradía")
-    def _dataset(name: str) -> str:
-        if name not in itd.DATASETS:
-            raise HTTPException(400, "tipo de velas desconocido (5m o 1h)")
-        return name
-
-    def _intraday_build(dataset: str, log, stop) -> itd.IntradayLab:
-        tf = itd.DATASETS[dataset]
-        syms = sorted(ctx.repo.coverage(tf))
-        if not syms:
-            raise ValueError(f"no hay velas de {dataset}: descárgalas primero")
-        bars, daily = {}, {}
-        for sym in syms:
-            if stop is not None and stop.is_set():
-                raise itd.StopRequested()
-            try:
-                bars[sym] = ctx.research_frame(sym, tf)
-            except (KeyError, ValueError) as e:  # DataQualityError is a ValueError
-                log(f"{sym}: velas descartadas ({e})"[:200])
-                continue
-            try:
-                daily[sym] = ctx.research_frame(sym)
-            except (KeyError, ValueError):
-                pass  # without daily bars the ATR / trend filters simply skip this stock
-        return itd.IntradayLab(ctx.sf, dataset, bars, daily, log=log, stop_event=stop)
-
-    def _intraday_runner() -> itd.IntradayRunner:
-        r = ctx.extra.get("intraday")
-        if r is None:
-            r = ctx.extra["intraday"] = itd.IntradayRunner(_intraday_build,
-                                                           on_finish=lambda: ctx.extra.pop("intraday_views", None))
-        return r
-
-    def _intraday_lab(dataset: str) -> itd.IntradayLab:
-        r = _intraday_runner()
-        if r.state.running and r.state.dataset == dataset:
-            if r.lab is None:
-                raise HTTPException(409, "cargando las velas…")
-            return r.lab
-        views = ctx.extra.setdefault("intraday_views", {})
-        if dataset not in views:
-            try:
-                views[dataset] = _intraday_build(dataset, lambda msg: None, None)
-            except ValueError as e:
-                raise HTTPException(400, str(e))
-        return views[dataset]
-
-    def _intraday_frames(dataset: str, symbols: list[str]) -> tuple[dict, dict]:
-        tf = itd.DATASETS[dataset]
-        bars, daily = {}, {}
-        for sym in symbols:
-            try:
-                bars[sym] = ctx.research_frame(sym, tf)
-            except (KeyError, ValueError):
-                continue
-            try:
-                daily[sym] = ctx.research_frame(sym)
-            except (KeyError, ValueError):
-                pass
-        return bars, daily
-
-    def _intraday_paper() -> IntradayPaper:
-        p = ctx.extra.get("intraday_paper")
-        if p is None:
-            p = ctx.extra["intraday_paper"] = IntradayPaper(ctx.sf, _intraday_frames)
-        return p
-
-    def _intraday_coverage() -> dict:
-        out = {}
-        for ds, tf in itd.DATASETS.items():
-            cov = ctx.repo.coverage(tf)
-            if cov:
-                out[ds] = (sorted(cov), max(c["last"] for c in cov.values()))
-        return out
-
-    def _intraday_download(dataset: str, symbols: list[str]) -> bool:
-        return _data_runner().start(f"intraday-{dataset}", symbols, "2000-01-01", incremental=True,
-                                    timeframe=itd.DATASETS[dataset])
-
-    @app.get("/api/intraday/paper")
-    def intraday_paper_view(refresh: bool = True):
-        v = _intraday_paper().view(refresh=refresh)
-        rep = ctx.extra.get("daily_reporter")
-        return _j(v | {"auto_state": rep.intraday_state if rep is not None else None})
-
-    @app.post("/api/intraday/paper/start")
-    def intraday_paper_start(body: IntradayPaperBody):
-        lab = _intraday_lab(_dataset(body.dataset))
-        try:
-            row = lab.get_row(body.rid)
-        except KeyError:
-            raise HTTPException(404, "regla desconocida")
-        try:
-            sid = _intraday_paper().start(row.rule, lab.dataset, sorted(lab.days), body.capital, body.currency,
-                                          candidate_id=row.id, pc=lab.pc)
-        except PaperError as e:
-            raise HTTPException(400, str(e))
-        return {"session_id": sid}
-
-    @app.post("/api/intraday/paper/stop")
-    def intraday_paper_stop():
-        try:
-            _intraday_paper().stop()
-        except PaperError as e:
-            raise HTTPException(400, str(e))
-        return {"stopped": True}
-
-    @app.get("/api/intraday/status")
-    def intraday_status():
-        return _j(_intraday_runner().status() | {"boundaries": itd.boundaries(ctx.sf)})
-
-    @app.get("/api/intraday/data")
-    def intraday_data():
-        out = {}
-        for ds, tf in itd.DATASETS.items():
-            cov = ctx.repo.coverage(tf)
-            out[ds] = {"symbols": len(cov), "bars": sum(c["bars"] for c in cov.values()),
-                       "first": str(min(c["first"] for c in cov.values()).date()) if cov else None,
-                       "last": str(max(c["last"] for c in cov.values()).date()) if cov else None}
-        return _j({"datasets": out, "daily_symbols": len(ctx.symbols())})
-
-    @app.post("/api/intraday/ingest")
-    def intraday_ingest(body: IntradayIngestBody):
-        ds = _dataset(body.dataset)
-        tf = itd.DATASETS[ds]
-        have = sorted(ctx.repo.coverage(tf))
-        new = ctx.repo.liquid_symbols(max(1, min(body.n_symbols, 300)))
-        if not have and not new:
-            raise HTTPException(400, "primero descarga precios diarios en 1 · Datos")
-        syms = sorted(set(have) | set(new))
-        started = _data_runner().start(f"intraday-{ds}", syms, "2000-01-01", incremental=True, timeframe=tf)
-        if not started:
-            raise HTTPException(409, "ya hay una descarga en marcha")
-        return {"started": True, "symbols": len(syms), "new": len(set(syms) - set(have))}
-
-    @app.post("/api/intraday/start")
-    def intraday_start(body: IntradayStartBody):
-        ds = _dataset(body.dataset)
-        newer = _sync_newer()
-        if newer and not body.ignore_sync:
-            raise HTTPException(409, f"Hay datos más recientes de {newer} en la carpeta compartida: cárgalos antes en "
-                                     "Inicio. Si investigas ahora y luego los cargas, perderás lo que hagas aquí.")
-        ctx.extra.pop("intraday_views", None)
-        return {"started": _intraday_runner().start(ds, max(0, body.max_cycles))}
-
-    @app.post("/api/intraday/stop")
-    def intraday_stop():
-        _intraday_runner().stop()
-        return {"stopping": True}
-
-    @app.get("/api/intraday/leaderboard")
-    def intraday_leaderboard(dataset: str = "5m", limit: int = 25, family: str | None = None):
-        return _j(_intraday_lab(_dataset(dataset)).leaderboard(max(1, min(limit, 100)), family=family))
-
-    @app.get("/api/intraday/{rid}/curve")
-    def intraday_curve(rid: str, dataset: str = "5m"):
-        try:
-            return _j(_intraday_lab(_dataset(dataset)).curve(rid))
-        except KeyError:
-            raise HTTPException(404, "regla desconocida")
-
-    @app.post("/api/intraday/{rid}/final-test")
-    def intraday_final_test(rid: str, dataset: str = "5m"):
-        try:
-            return _j(_intraday_lab(_dataset(dataset)).final_test(rid))
-        except KeyError:
-            raise HTTPException(404, "regla desconocida")
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    # ------------------------------------------------------------------ scan / signals / approvals
-    @app.post("/api/scan")
-    def scan(asof: str | None = None, universe: str | None = None):
-        syms = universe.split(",") if universe else [s for s in ctx.symbols() if s != "SPY"]
-        with ctx.sf() as s:
-            slots = []
-            for st in s.scalars(select(m.Strategy)).all():
-                v = s.scalars(select(m.StrategyVersion).where(m.StrategyVersion.strategy_id == st.id)
-                              .order_by(m.StrategyVersion.version.desc())).first()
-                if v:
-                    slots.append(StrategySlot(st.id, definition_from_dict(v.definition), st.status))
-        t = pd.Timestamp(asof) if asof else pd.Timestamp.now(tz="UTC")
-        sc = MarketScanner(lambda sym: ctx.adjusted_bars(sym, asof=t), slots, ctx.risk)
-        rep = sc.scan(syms, t, portfolio_state(ctx))
-        ctx.last_scan = rep
-        return _j({"asof": rep.asof, "regime": rep.regime, "assets_scanned": rep.assets_scanned,
-                   "valid_assets": rep.valid_assets, "invalid": rep.invalid, "potential_setups": rep.potential_setups,
-                   "final_signals": rep.final_signals, "signals": [s.__dict__ for s in rep.signals],
-                   "no_trade": [s.__dict__ for s in rep.no_trade[:200]]})
-
-    @app.get("/api/scan/text", response_class=PlainTextResponse)
-    def scan_text():
-        if ctx.last_scan is None:
-            return "No scan yet. POST /api/scan first."
-        rep = ctx.last_scan
-        data_state = ("OK" if rep.valid_assets == rep.assets_scanned else
-                      f"PARTIAL ({len(rep.invalid)} invalid)" if rep.valid_assets else
-                      ("NO DATA" if not rep.assets_scanned else f"INVALID/STALE ({', '.join(sorted(set(rep.invalid.values())))[:60]})"))
-        sysinfo = {"Data": data_state,
-                   "AI": "OK" if ctx.settings.gemini_api_key else "NOT CONFIGURED",
-                   "Broker": ctx.execution.broker.environment.upper(),
-                   "Risk Engine": "OK", "Kill Switch": "ENGAGED" if ctx.kill_switch.is_engaged() else "READY"}
-        return render_report(ctx.last_scan, portfolio_state(ctx), ctx.strategy_counts(), sysinfo)
-
-    @app.get("/api/approvals")
-    def approvals():
-        return _j([{"key": k, "signal": s.__dict__, "qty": d.qty, "risk_amount": d.risk_amount, "tier": d.tier.value}
-                   for k, (s, d) in ctx.execution.pending.items()])
-
-    @app.post("/api/approvals/{key}")
-    def decide(key: str, body: ApprovalBody):
-        if key not in ctx.execution.pending:
-            raise HTTPException(404)
-        if body.approve:
-            o = ctx.execution.approve(key, actor="user")
-            return _j({"status": o.status, "reasons": o.reasons})
-        ctx.execution.reject(key, actor="user", reason=body.reason)
-        return {"status": "REJECTED"}
-
-    @app.get("/api/journal")
-    def journal(limit: int = 200):
-        return _j(ctx.execution.journal[-limit:])
-
-    @app.get("/api/notifications")
-    def notifications(limit: int = 200):
-        return _j([{"ts": n.ts, "event": n.event.value, "title": n.title, "body": n.body}
-                   for n in ctx.log_channel.sent[-limit:]])
 
     # ------------------------------------------------------------------ frontend
     if STATIC.exists():

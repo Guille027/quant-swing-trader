@@ -7,7 +7,8 @@ Design notes:
   filter `available_at <= T` (see qsts.data.repository.PointInTimeStore).
 - Universe membership is stored as intervals so historical universes can be rebuilt
   (survivorship-bias protection).
-- Strategies are never deleted: status changes are appended to strategy_status_history.
+- Lab: bots (a strategy on one stock), the orders sent to the Alpaca paper account and what the trader did.
+  Tables of earlier versions of the app stay in old databases untouched; nothing reads them.
 """
 from __future__ import annotations
 
@@ -77,14 +78,6 @@ class CorporateAction(Base):
     __table_args__ = (UniqueConstraint("asset_id", "ex_date", "kind", name="uq_corp_action"),)
 
 
-class DatasetVersion(Base):
-    __tablename__ = "dataset_versions"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # content hash
-    description: Mapped[str | None] = mapped_column(Text)
-    spec: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
 class EarningsEvent(Base):
     """Quarterly results: announcement time (UTC) and EPS figures. Point-in-time use goes through
     qsts.data.earnings (info / impact sessions), never through the raw timestamp."""
@@ -126,7 +119,7 @@ class News(Base):
     sentiment: Mapped[float | None] = mapped_column(Float)
     importance: Mapped[float | None] = mapped_column(Float)
     relevance: Mapped[float | None] = mapped_column(Float)
-    analysis_ref: Mapped[int | None] = mapped_column(ForeignKey("ai_responses.id"))
+    analysis_ref: Mapped[int | None] = mapped_column(Integer)  # (an AI analysis in earlier versions)
     __table_args__ = (Index("ix_news_pit", "asset_id", "available_at"),)
 
 
@@ -141,375 +134,59 @@ class MacroData(Base):
     __table_args__ = (Index("ix_macro_pit", "series", "available_at"),)
 
 
-class FeatureDefinition(Base):
-    __tablename__ = "features"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # name@version hash
-    name: Mapped[str] = mapped_column(String(64))
-    version: Mapped[str] = mapped_column(String(16))
-    spec: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
-class IndicatorDefinition(Base):
-    __tablename__ = "indicators"
+class LabBot(Base):
+    """A strategy applied to one stock (one row of the library). Paper trading state lives here too."""
+    __tablename__ = "lab_bots"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    category: Mapped[str] = mapped_column(String(32))
-    params: Mapped[dict] = mapped_column(JSON)
-
-
-class Strategy(Base):
-    __tablename__ = "strategies"
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    name: Mapped[str] = mapped_column(String(128))
-    family: Mapped[str] = mapped_column(String(32))
-    status: Mapped[str] = mapped_column(String(16), default="RESEARCH", index=True)
-    origin: Mapped[str] = mapped_column(String(16), default="human")  # human | ai | evolution
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)  # overrides of the strategy's published defaults
+    size_pct: Mapped[float] = mapped_column(Float, default=100.0)  # backtest: % of the bot's equity per position
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
-class StrategyVersion(Base):
-    __tablename__ = "strategy_versions"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # content hash
-    strategy_id: Mapped[str] = mapped_column(ForeignKey("strategies.id"), index=True)
-    version: Mapped[int] = mapped_column(Integer)
-    definition: Mapped[dict] = mapped_column(JSON)
-    parent_version_id: Mapped[str | None] = mapped_column(String(32))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    __table_args__ = (UniqueConstraint("strategy_id", "version", name="uq_strategy_version"),)
-
-
-class StrategyStatusHistory(Base):
-    __tablename__ = "strategy_status_history"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    strategy_id: Mapped[str] = mapped_column(ForeignKey("strategies.id"), index=True)
-    from_status: Mapped[str | None] = mapped_column(String(16))
-    to_status: Mapped[str] = mapped_column(String(16))
-    reason: Mapped[str] = mapped_column(Text)
-    actor: Mapped[str] = mapped_column(String(32))
-    at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
-class Experiment(Base):
-    __tablename__ = "experiments"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    strategy_version_id: Mapped[str] = mapped_column(ForeignKey("strategy_versions.id"), index=True)
-    dataset_version_id: Mapped[str] = mapped_column(ForeignKey("dataset_versions.id"))
-    kind: Mapped[str] = mapped_column(String(32))  # backtest | walk_forward | monte_carlo | oos ...
-    config: Mapped[dict] = mapped_column(JSON)  # params, features, timeframes, periods, seed, costs
-    seed: Mapped[int] = mapped_column(Integer)
-    code_version: Mapped[str | None] = mapped_column(String(64))
-    ai_provider: Mapped[str | None] = mapped_column(String(32))
-    ai_model: Mapped[str | None] = mapped_column(String(64))
-    metrics: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
-class Backtest(Base):
-    __tablename__ = "backtests"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
-    start: Mapped[datetime] = mapped_column(DateTime)
-    end: Mapped[datetime] = mapped_column(DateTime)
-    metrics: Mapped[dict] = mapped_column(JSON)
-    trades: Mapped[list] = mapped_column(JSON)
-    equity_curve: Mapped[list] = mapped_column(JSON)
-
-
-class WalkForwardRun(Base):
-    __tablename__ = "walk_forward_runs"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
-    fold: Mapped[int] = mapped_column(Integer)
-    train_start: Mapped[datetime] = mapped_column(DateTime)
-    train_end: Mapped[datetime] = mapped_column(DateTime)
-    test_start: Mapped[datetime] = mapped_column(DateTime)
-    test_end: Mapped[datetime] = mapped_column(DateTime)
-    chosen_params: Mapped[dict] = mapped_column(JSON)
-    metrics: Mapped[dict] = mapped_column(JSON)
-
-
-class MonteCarloRun(Base):
-    __tablename__ = "monte_carlo_runs"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
-    method: Mapped[str] = mapped_column(String(32))
-    n_sims: Mapped[int] = mapped_column(Integer)
-    percentiles: Mapped[dict] = mapped_column(JSON)
-
-
-class ResearchUniverse(Base):
-    """What a research ranking was scored on (symbols, window, rules, earnings data), to explain why a new ranking
-    started when any of it changes."""
-    __tablename__ = "research_universes"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    key: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-
-
-class ResearchCandidate(Base):
-    """Every strategy evaluated by the automatic research loop (one row per strategy version = one trial).
-    Kept forever: the row count is the multiple-testing burden used by the Deflated Sharpe Ratio."""
-    __tablename__ = "research_candidates"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # row id (version id for legacy rows)
-    version_id: Mapped[str | None] = mapped_column(String(32))  # strategy version id
-    universe_id: Mapped[str | None] = mapped_column(String(32))  # symbols + research window it was scored on
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    origin: Mapped[str] = mapped_column(String(16))  # evolution | ai | baseline
-    cycle: Mapped[int] = mapped_column(Integer)
-    definition: Mapped[dict] = mapped_column(JSON)
-    fitness: Mapped[float | None] = mapped_column(Float, index=True)  # NULL = not scoreable
-    sr: Mapped[float | None] = mapped_column(Float)  # per-period Sharpe of the research run (for the DSR)
-    metrics: Mapped[dict | None] = mapped_column(JSON)  # research-period metrics only
-    status: Mapped[str] = mapped_column(String(16), index=True)  # EVALUATED|INVALID|VALIDATED_PASS|VALIDATED_FAIL|FINAL_PASS|FINAL_FAIL
-    validation: Mapped[dict | None] = mapped_column(JSON)
-    final: Mapped[dict | None] = mapped_column(JSON)  # OOS vault result (never fed back into the search)
-    strategy_id: Mapped[str | None] = mapped_column(String(64))
-    dataset_id: Mapped[str | None] = mapped_column(String(32))
-    error: Mapped[str | None] = mapped_column(Text)
-    __table_args__ = (Index("ix_candidate_version_universe", "version_id", "universe_id"),)
-
-
-class IntradayBoundary(Base):
-    """Start of the out-of-sample part of an intraday dataset, fixed the first time the dataset is used. A new epoch
-    (later boundary, fresh unseen sessions) starts only when the stored history has at least doubled."""
-    __tablename__ = "intraday_boundaries"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    dataset: Mapped[str] = mapped_column(String(8), index=True)  # 5m | 1h
-    epoch: Mapped[int] = mapped_column(Integer)
-    oos_start: Mapped[datetime] = mapped_column(Date)
-    n_sessions: Mapped[int] = mapped_column(Integer)  # sessions stored when it was set
-    set_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    __table_args__ = (UniqueConstraint("dataset", "epoch", name="uq_intraday_epoch"),)
-
-
-class IntradayCandidate(Base):
-    """Every intraday rule evaluated by the intraday lab (one row per rule and universe = one trial, kept forever)."""
-    __tablename__ = "intraday_candidates"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    dataset: Mapped[str] = mapped_column(String(8), index=True)
-    universe_id: Mapped[str] = mapped_column(String(32), index=True)
-    version_id: Mapped[str] = mapped_column(String(32))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    origin: Mapped[str] = mapped_column(String(16))  # random | evolution
-    cycle: Mapped[int] = mapped_column(Integer)
-    rule: Mapped[dict] = mapped_column(JSON)
-    family: Mapped[str | None] = mapped_column(String(8))  # orb (NULL in the first rows) | gap | vwap
-    fitness: Mapped[float | None] = mapped_column(Float, index=True)
-    sr: Mapped[float | None] = mapped_column(Float)
-    metrics: Mapped[dict | None] = mapped_column(JSON)  # search-window metrics only
-    status: Mapped[str] = mapped_column(String(16), index=True)
-    validation: Mapped[dict | None] = mapped_column(JSON)
-    final: Mapped[dict | None] = mapped_column(JSON)
-
-
-class IntradayPaperSession(Base):
-    """Day-by-day paper simulation of ONE frozen intraday rule, from the first session after it was started."""
-    __tablename__ = "intraday_paper_sessions"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    dataset: Mapped[str] = mapped_column(String(8))
-    rule: Mapped[dict] = mapped_column(JSON)
-    candidate_id: Mapped[str | None] = mapped_column(String(32))
-    symbols: Mapped[list] = mapped_column(JSON)
-    start: Mapped[datetime] = mapped_column(Date)  # first session simulated
-    capital: Mapped[float] = mapped_column(Float)
-    currency: Mapped[str] = mapped_column(String(8))
-    config: Mapped[dict] = mapped_column(JSON)  # PortfolioConfig (same costs and sizing as the lab)
-    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", index=True)  # ACTIVE | STOPPED
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    paper_status: Mapped[str] = mapped_column(String(16), default="off")  # off | active | stopped
+    allocation_pct: Mapped[float | None] = mapped_column(Float)  # share of the Alpaca paper account
+    capital: Mapped[float | None] = mapped_column(Float)  # dollars assigned when activated
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime)  # incubation date: live results start here
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
-    stop_reason: Mapped[str | None] = mapped_column(Text)
+    last_signal_day: Mapped[datetime | None] = mapped_column(Date)  # last close whose signal was handled
+    stop_level: Mapped[float | None] = mapped_column(Float)    # protective stop of the open paper position
+    target_level: Mapped[float | None] = mapped_column(Float)  # profit target of the open paper position
+    pending: Mapped[dict | None] = mapped_column(JSON)  # an entry waiting for the next open (after a reversal...)
 
 
-class IntradayPaperDay(Base):
-    """Append-only journal: what the rule did in each session (recorded once, never recomputed)."""
-    __tablename__ = "intraday_paper_days"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("intraday_paper_sessions.id"), index=True)
-    day: Mapped[datetime] = mapped_column(Date)
-    equity: Mapped[float] = mapped_column(Float)  # after the day, in the session currency
-    pnl: Mapped[float] = mapped_column(Float)
-    trades: Mapped[list] = mapped_column(JSON)
-    passive: Mapped[float | None] = mapped_column(Float)  # same day, holding the same stocks (return)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    notified_at: Mapped[datetime | None] = mapped_column(DateTime)  # sent by Telegram
-    __table_args__ = (UniqueConstraint("session_id", "day", name="uq_intraday_paper_day"),)
-
-
-class PaperSession(Base):
-    """A forward paper-trading run of ONE frozen strategy version, from the day it was started onwards."""
-    __tablename__ = "paper_sessions"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    strategy_id: Mapped[str] = mapped_column(ForeignKey("strategies.id"), index=True)
-    version_id: Mapped[str] = mapped_column(String(32))
-    symbols: Mapped[list] = mapped_column(JSON)
-    start: Mapped[datetime] = mapped_column(Date)  # decision bar: first orders are decided at its close
-    capital: Mapped[float] = mapped_column(Float)
-    config: Mapped[dict] = mapped_column(JSON)  # BacktestConfig (same fill/cost model as research)
-    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", index=True)  # ACTIVE | STOPPED
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
-    stop_reason: Mapped[str | None] = mapped_column(Text)
-    # account currency. For EUR the engine runs in USD (capital * fx_start) and amounts are shown in EUR
-    currency: Mapped[str | None] = mapped_column(String(8))
-    fx_start: Mapped[float | None] = mapped_column(Float)  # USD per EUR used to convert the starting capital
-
-
-class PaperNotification(Base):
-    """Messages sent about a paper session (one 'daily' message per session and day: never sent twice)."""
-    __tablename__ = "paper_notifications"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("paper_sessions.id"), index=True)
-    day: Mapped[datetime] = mapped_column(Date)  # the session close the message is about
-    kind: Mapped[str] = mapped_column(String(16))  # daily | manual | test
-    sent_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    ok: Mapped[bool] = mapped_column(Boolean)
-    error: Mapped[str | None] = mapped_column(Text)
-    text: Mapped[str | None] = mapped_column(Text)
-
-
-class PaperDay(Base):
-    """Append-only journal: what the simulation showed after each session's close."""
-    __tablename__ = "paper_days"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("paper_sessions.id"), index=True)
-    day: Mapped[datetime] = mapped_column(Date)
-    equity: Mapped[float] = mapped_column(Float)
-    cash: Mapped[float] = mapped_column(Float)
-    n_positions: Mapped[int] = mapped_column(Integer)
-    orders: Mapped[list | None] = mapped_column(JSON)  # orders for the next open, as shown that evening
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    __table_args__ = (UniqueConstraint("session_id", "day", name="uq_paper_day"),)
-
-
-class OOSAccessLog(Base):
-    """Every read of the reserved out-of-sample dataset is logged (and limited)."""
-    __tablename__ = "oos_access_log"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    strategy_version_id: Mapped[str] = mapped_column(String(32), index=True)
-    at: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    purpose: Mapped[str] = mapped_column(Text)
-
-
-class Signal(Base):
-    __tablename__ = "signals"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    asof: Mapped[datetime] = mapped_column(DateTime)  # data cut-off used for the decision
-    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
-    strategy_version_id: Mapped[str] = mapped_column(String(32), index=True)
-    direction: Mapped[str] = mapped_column(String(8))  # LONG | SHORT | NO_TRADE
-    entry: Mapped[float | None] = mapped_column(Float)
-    stop: Mapped[float | None] = mapped_column(Float)
-    target: Mapped[float | None] = mapped_column(Float)
-    confidence: Mapped[float | None] = mapped_column(Float)  # calibrated only; else NULL
-    size: Mapped[float | None] = mapped_column(Float)
-    reasons: Mapped[dict | None] = mapped_column(JSON)
-    snapshot: Mapped[dict | None] = mapped_column(JSON)  # what the system saw
-
-
-class Order(Base):
-    __tablename__ = "orders"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    client_order_id: Mapped[str] = mapped_column(String(64), unique=True)  # idempotency
-    broker: Mapped[str] = mapped_column(String(32))
-    environment: Mapped[str] = mapped_column(String(16))
-    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"))
-    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"))
-    side: Mapped[str] = mapped_column(String(8))
-    order_type: Mapped[str] = mapped_column(String(16))
-    quantity: Mapped[float] = mapped_column(Float)
-    limit_price: Mapped[float | None] = mapped_column(Float)
+class LabOrder(Base):
+    """Every order the app sent to the Alpaca paper account (and what happened to it)."""
+    __tablename__ = "lab_orders"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # our client_order_id
+    bot_id: Mapped[str] = mapped_column(ForeignKey("lab_bots.id"), index=True)
+    broker_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    side: Mapped[str] = mapped_column(String(8))     # buy | sell
+    qty: Mapped[float] = mapped_column(Float)
+    purpose: Mapped[str] = mapped_column(String(16))  # entry | exit | stop | target | protect
+    order_type: Mapped[str] = mapped_column(String(16))  # market | bracket | oco | stop | limit
     stop_price: Mapped[float | None] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(16), index=True)
-    broker_order_id: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    limit_price: Mapped[float | None] = mapped_column(Float)
+    signal_day: Mapped[datetime | None] = mapped_column(Date)  # the close whose signal it executes
+    status: Mapped[str] = mapped_column(String(24), default="submitted")
+    filled_qty: Mapped[float | None] = mapped_column(Float)
+    filled_price: Mapped[float | None] = mapped_column(Float)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime)
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict | None] = mapped_column(JSON)
 
 
-class Fill(Base):
-    __tablename__ = "fills"
+class LabEvent(Base):
+    """What the paper trader did and why (shown in the app; also the source of Telegram messages)."""
+    __tablename__ = "lab_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime)
-    quantity: Mapped[float] = mapped_column(Float)
-    price: Mapped[float] = mapped_column(Float)
-    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    bot_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(24))  # signal | order | fill | skip | error | info
+    text: Mapped[str] = mapped_column(Text)
 
 
-class Position(Base):
-    __tablename__ = "positions"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    environment: Mapped[str] = mapped_column(String(16))
-    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"))
-    strategy_version_id: Mapped[str | None] = mapped_column(String(32))
-    direction: Mapped[str] = mapped_column(String(8))
-    quantity: Mapped[float] = mapped_column(Float)
-    avg_price: Mapped[float] = mapped_column(Float)
-    stop: Mapped[float | None] = mapped_column(Float)
-    target: Mapped[float | None] = mapped_column(Float)
-    opened_at: Mapped[datetime] = mapped_column(DateTime)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    realized_pnl: Mapped[float | None] = mapped_column(Float)
-    __table_args__ = (Index("ix_positions_open", "environment", "closed_at"),)
-
-
-class PortfolioSnapshot(Base):
-    __tablename__ = "portfolio_snapshots"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    environment: Mapped[str] = mapped_column(String(16))
-    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
-    equity: Mapped[float] = mapped_column(Float)
-    cash: Mapped[float] = mapped_column(Float)
-    exposure: Mapped[float] = mapped_column(Float)
-    drawdown: Mapped[float] = mapped_column(Float)
-    detail: Mapped[dict | None] = mapped_column(JSON)
-
-
-class RiskEvent(Base):
-    __tablename__ = "risk_events"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    severity: Mapped[str] = mapped_column(String(16))
-    rule: Mapped[str] = mapped_column(String(64))
-    detail: Mapped[dict | None] = mapped_column(JSON)
-
-
-class AIRequest(Base):
-    __tablename__ = "ai_requests"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    provider: Mapped[str] = mapped_column(String(32))
-    model: Mapped[str] = mapped_column(String(64))
-    prompt_version: Mapped[str] = mapped_column(String(32))
-    input_hash: Mapped[str] = mapped_column(String(32), index=True)  # cache key
-    payload: Mapped[dict] = mapped_column(JSON)
-
-
-class AIResponse(Base):
-    __tablename__ = "ai_responses"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    request_id: Mapped[int] = mapped_column(ForeignKey("ai_requests.id"), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_now)
-    content: Mapped[dict] = mapped_column(JSON)
-    tokens_in: Mapped[int | None] = mapped_column(Integer)
-    tokens_out: Mapped[int | None] = mapped_column(Integer)
-
-
-class SystemLog(Base):
-    __tablename__ = "system_logs"
-    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    level: Mapped[str] = mapped_column(String(8))
-    component: Mapped[str] = mapped_column(String(32), index=True)
-    message: Mapped[str] = mapped_column(Text)
-    context: Mapped[dict | None] = mapped_column(JSON)
-
-
-class BrokerEvent(Base):
-    __tablename__ = "broker_events"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
-    broker: Mapped[str] = mapped_column(String(32))
-    environment: Mapped[str] = mapped_column(String(16))
-    event: Mapped[str] = mapped_column(String(32))
-    detail: Mapped[dict | None] = mapped_column(JSON)
-    is_error: Mapped[bool] = mapped_column(Boolean, default=False)

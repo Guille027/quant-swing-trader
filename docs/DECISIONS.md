@@ -159,3 +159,18 @@
     revisions never change it), flat every night so no overnight currency effect, and sent by Telegram. While the
     app is open, stored intraday bars are refreshed after each session, which is what lets the 60-day 5-minute
     history grow.
+37. **Restart as a strategy lab.** Searching rules at random kept finding noise (every finalist failed out of sample).
+    The user now brings concrete published strategies; each is coded as written (source noted), run on one stock per
+    "bot", audited and, if chosen, paper traded on Alpaca. The old search, intraday lab, AI and simulation were removed
+    from the code (still in git history); prices, downloads, Telegram, the launcher and the OneDrive copy were kept.
+    Market and timeframe chosen for robustness: US stocks/ETFs on daily bars (long clean history; daily bars only need
+    the app open once a day). Sizing: no leverage, a fixed share of the account per bot.
+38. **Execution model = TradingView's default.** Signal at the close, market order at the next open; stops/targets
+    are resting orders (gap fills at the open; a bar touching both counts as the stop). Live, the same thing: Alpaca
+    queues a `day` order sent after the close for the next session (documented in the SDK); stops/targets are a
+    bracket/OTO with the entry, re-checked every evening as GTC protective orders (falling back to day orders if GTC
+    is refused, because the exit legs' time in force is not documented in the SDK). Entries are never sent once the
+    market has opened (that would be a different price than the backtest); exits always are. Whole shares only.
+39. **Audit instead of a single verdict.** A published backtest is a best case. Each bot gets nine checks (trades, buy
+    & hold, costs, halves, years, neighbouring settings, other stocks, Monte Carlo, PSR) and the count of bots tried
+    is shown; the real test is the paper curve (pink) from the activation date, on days nobody optimised on.

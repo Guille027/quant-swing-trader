@@ -2,7 +2,6 @@
 import pytest
 
 from qsts.app.envfile import set_env_values
-from qsts.notify.report import daily_messages, num
 from qsts.notify.telegram import Telegram, TelegramError, split_message
 
 TOKEN = "123456:ABC-fake"
@@ -47,30 +46,6 @@ def test_find_chat_and_long_messages():
     assert Telegram(TOKEN, 1, http=fake_http([], calls), pause=0).send("y\n" * 3000) == len(calls) > 1
 
 
-VIEW = {"active": True, "currency": "EUR", "fx": 1.1257, "as_of": "2026-10-02", "next_open": "2026-10-05T13:30:00+00:00",
-        "equity": 2401.2, "pnl": 38.2, "return": 0.0162, "stale_sessions": 0, "benchmark": {"return": 0.012},
-        "orders": [{"action": "VENDER", "symbol": "MSFT", "qty": 0.512, "approx_value": 180.0, "reason": "signal_exit"},
-                   {"action": "COMPRAR", "symbol": "NVDA", "qty": 0.553, "approx_value": 236.0, "last_close": 420.1,
-                    "approx_stop": 400.0, "approx_target": 460.0, "likely": True, "partial": False, "earnings_in": None}],
-        "closed": [{"symbol": "AAPL", "exit": "2026-10-02", "pnl": 12.3, "pnl_pct": 0.041, "exit_price": 250.0,
-                    "reason": "target"}],
-        "positions": [{"symbol": "MSFT", "pnl_pct": 0.032, "unrealized_pnl": 7.5, "bars_held": 4, "stop": 400.0,
-                       "target": 470.0, "earnings_in": None}]}
-
-
-def test_daily_messages_say_what_to_do_at_the_next_open():
-    alert, summary = daily_messages(VIEW)
-    assert "VENDER MSFT" in alert and "señal de salida" in alert and "lunes 5 oct, 15:30 h" in alert
-    assert "AAPL +12,30 €" in alert and "objetivo de beneficio" in alert
-    assert "cierre del viernes 2 oct" in summary and "2.401,20 €" in summary
-    assert "COMPRAR NVDA" in summary and "236,00 €" in summary and "stop ≈ 400,00 $" in summary
-    assert "MSFT +3,2 %" in summary and "1 € = 1,1257 $" in summary
-    quiet = {**VIEW, "orders": [], "closed": []}
-    msgs = daily_messages(quiet)
-    assert len(msgs) == 1 and "Nada que comprar ni vender" in msgs[0]
-    assert daily_messages({"active": False}) == [] and num(-1234.5) == "−1.234,50"
-
-
 def test_env_file_keeps_other_settings(tmp_path):
     p = tmp_path / ".env"
     p.write_text("# comment\nQSTS_GEMINI_API_KEY=abc\nQSTS_TELEGRAM_CHAT_ID=1\n")
@@ -104,22 +79,3 @@ def test_telegram_setup_endpoints(tmp_path):
     t = c.get("/api/telegram").json()
     assert t["configured"] is True and TOKEN not in str(t)  # the token never goes back to the screen
     assert c.post("/api/telegram/test").json() == {"sent": True} and calls[-1][1]["chat_id"] == "999"
-    assert c.post("/api/telegram/report").status_code == 400  # no simulation running
-
-
-def test_gemini_key_is_saved_from_the_app(tmp_path):
-    from fastapi.testclient import TestClient
-    from qsts.api.server import create_app
-    from qsts.app.context import build_context
-    from qsts.config import Settings
-    ctx = build_context(Settings(_env_file=None, database_url=f"sqlite:///{tmp_path}/q.db", state_dir=tmp_path / "var",
-                                 gemini_api_key=None))  # a key in the environment must not leak into the test
-    ctx.extra["env_path"] = str(tmp_path / ".env")
-    c = TestClient(create_app(ctx))
-    assert c.get("/api/autoresearch/status").json()["ai_available"] is False
-    assert c.post("/api/settings/gemini", json={"key": "short"}).status_code == 400
-    key = "AIza" + "x" * 35
-    assert c.post("/api/settings/gemini", json={"key": key}).json() == {"saved": True}
-    assert f"QSTS_GEMINI_API_KEY={key}" in (tmp_path / ".env").read_text()
-    st = c.get("/api/autoresearch/status").json()
-    assert st["ai_available"] is True and key not in str(st)

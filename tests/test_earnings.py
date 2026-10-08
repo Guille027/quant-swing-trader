@@ -4,11 +4,9 @@ import pandas as pd
 import pytest
 
 from conftest import synthetic_daily
-from qsts.backtest.engine import BacktestConfig, BacktestEngine
 from qsts.data.bars import Timeframe, nyse_sessions, to_canonical
 from qsts.data.earnings import EARN_COLS, HORIZON, earnings_columns
 from qsts.data.repository import MarketDataRepository
-from qsts.strategy.definition import Condition, F, StopRule, StrategyDefinition, TakeProfitRule, V
 
 
 def ny(*ts):
@@ -54,29 +52,6 @@ def _with_days_to(df, values):
     out = df.copy()
     out["earn_days_to"] = values
     return out
-
-
-ALWAYS = StrategyDefinition(name="always", family="t", hypothesis="h", entry_long=(Condition(F("close"), ">", V(0.0)),),
-                            stop=StopRule("atr", 14, 50.0), take_profit=TakeProfitRule("none"), max_holding_bars=20)
-
-
-def test_engine_blackout_and_exit_before_results():
-    df = to_canonical(synthetic_daily("2021-01-01", "2021-12-31", seed=3), Timeframe.D1)
-    start = pd.Timestamp("2021-03-01", tz="UTC")
-    plain = BacktestEngine().run(ALWAYS, {"A": df}, start=start)
-    far = BacktestEngine(BacktestConfig(earnings_blackout_days=3, exit_before_earnings=True)).run(
-        ALWAYS, {"A": _with_days_to(df, HORIZON + 1.0)}, start=start)
-    assert far.trades.equals(plain.trades)  # nothing due -> identical
-    blocked = BacktestEngine(BacktestConfig(earnings_blackout_days=3)).run(ALWAYS, {"A": _with_days_to(df, 2.0)}, start=start)
-    assert blocked.trades.empty and any(r["reason"] == "earnings_blackout" for r in blocked.rejected_orders)
-    d2 = np.full(len(df), HORIZON + 1.0)
-    k = df.index.get_loc(pd.Timestamp("2021-06-01", tz="UTC"))
-    d2[k] = 2.0  # results gap expected two sessions after 2021-06-01
-    ex = BacktestEngine(BacktestConfig(exit_before_earnings=True)).run(ALWAYS, {"A": _with_days_to(df, d2)}, start=start)
-    t = ex.trades[ex.trades["exit_reason"] == "earnings_exit"]
-    assert len(t) == 1 and str(t["exit_ts"].iloc[0])[:10] == "2021-06-02"  # out at the open before the gap
-    off = BacktestEngine().run(ALWAYS, {"A": _with_days_to(df, d2)}, start=start)
-    assert off.trades.equals(plain.trades)  # options off: the column changes nothing
 
 
 class _FakeTicker:

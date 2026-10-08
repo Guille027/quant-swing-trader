@@ -432,7 +432,7 @@ def _run(url: str, port: int) -> None:
             message(problem)
             return
     if state == "up":
-        from qsts.research.experiments import code_version
+        from qsts.core.version import code_version
         mine, theirs = code_version(), running_version(url)
         if theirs != mine:
             print(f"replacing running version {theirs} with {mine}")

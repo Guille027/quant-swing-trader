@@ -17,8 +17,8 @@ def make_db(path, n_rows=3):
     eng.dispose()
     con = sqlite3.connect(path)
     for i in range(n_rows):
-        con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
-                    "VALUES (?, ?, 'EVALUATED', 'evolution', 1, '{}', ?)", (f"row{i}", 0.1 * i, f"2026-10-0{i + 1} 10:00:00"))
+        con.execute("INSERT INTO lab_bots (id, strategy, symbol, params, size_pct, favorite, hidden, created_at, paper_status) "
+                    "VALUES (?, 'connors_rsi2', 'SPY', '{}', 100, 0, 0, ?, 'off')", (f"row{i}", f"2026-10-0{i + 1} 10:00:00"))
     con.commit()
     con.close()
 
@@ -26,7 +26,7 @@ def make_db(path, n_rows=3):
 def rows(path):
     con = sqlite3.connect(path)
     try:
-        return con.execute("SELECT count(*) FROM research_candidates").fetchone()[0]
+        return con.execute("SELECT count(*) FROM lab_bots").fetchone()[0]
     finally:
         con.close()
 
@@ -49,7 +49,7 @@ def test_save_on_one_computer_load_on_the_other(two_computers, monkeypatch):
     monkeypatch.setenv("COMPUTERNAME", "PC-CASA")
     assert sync.status(pc["db"], pc["state"])["local_changed"] is True
     meta = sync.export_snapshot(pc["db"], pc["state"], code_version="abc")
-    assert meta["machine"] == "PC-CASA" and meta["summary"]["strategies_tested"] == 5
+    assert meta["machine"] == "PC-CASA" and meta["summary"]["bots"] == 5
     assert json.loads((shared / sync.META).read_text())["id"] == meta["id"]
     assert sync.status(pc["db"], pc["state"])["local_changed"] is False  # everything saved
 
@@ -70,8 +70,8 @@ def test_save_on_one_computer_load_on_the_other(two_computers, monkeypatch):
 
     # work on the laptop, close the app: its copy is saved and the PC is told to load it
     con = sqlite3.connect(laptop["db"])
-    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
-                "VALUES ('new', 0.9, 'EVALUATED', 'ai', 2, '{}', '2026-10-09 10:00:00')")
+    con.execute("INSERT INTO lab_bots (id, strategy, symbol, params, size_pct, favorite, hidden, created_at, paper_status) "
+                "VALUES ('new', 'connors_rsi2', 'SPY', '{}', 100, 0, 0, '2026-10-09 10:00:00', 'off')")
     con.commit()
     con.close()
     assert sync.auto_save_on_close(url, laptop["state"]).startswith("copia guardada")
@@ -97,12 +97,12 @@ def test_build_context_applies_a_staged_copy(two_computers, tmp_path):
     from qsts.app.context import build_context
     shared, pc, laptop = two_computers
     con = sqlite3.connect(pc["db"])
-    con.execute("DROP TABLE paper_notifications")  # the PC runs an older version (fewer tables)
+    con.execute("DROP TABLE lab_events")  # the PC runs an older version (fewer tables)
     con.close()
     sync.export_snapshot(pc["db"], pc["state"])
     sync.stage_import(laptop["state"])
     ctx = build_context(Settings(_env_file=None, database_url=f"sqlite:///{laptop['db']}", state_dir=laptop["state"]))
-    assert ctx.extra["sync_loaded"]["summary"]["strategies_tested"] == 5 and rows(laptop["db"]) == 5
+    assert ctx.extra["sync_loaded"]["summary"]["bots"] == 5 and rows(laptop["db"]) == 5
     st = sync.status(laptop["db"], laptop["state"])  # the schema update after loading is not "new work"
     assert st["local_changed"] is False and st["remote_newer"] is False
 
@@ -138,8 +138,8 @@ def test_sync_endpoints(tmp_path, monkeypatch):
     assert s["enabled"] is True and s["remote"] is None
     assert c.post("/api/sync/save", json={}).status_code == 409  # nothing to save on an empty computer
     con = sqlite3.connect(tmp_path / "q.db")
-    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
-                "VALUES ('x', 0.5, 'EVALUATED', 'evolution', 1, '{}', '2026-10-01 10:00:00')")
+    con.execute("INSERT INTO lab_bots (id, strategy, symbol, params, size_pct, favorite, hidden, created_at, paper_status) "
+                "VALUES ('x', 'connors_rsi2', 'SPY', '{}', 100, 0, 0, '2026-10-01 10:00:00', 'off')")
     con.commit()
     con.close()
     meta = c.post("/api/sync/save", json={}).json()
@@ -148,10 +148,9 @@ def test_sync_endpoints(tmp_path, monkeypatch):
     ctx.extra["restart_app"] = lambda: restarted.append(True)
     sync.save_state(st.state_dir, last_id="older")  # pretend the copy came from another computer
     assert c.get("/api/sync").json()["remote_newer"] is True
-    assert c.post("/api/autoresearch/start", json={"use_ai": False}).status_code in (400, 409)
     con = sqlite3.connect(tmp_path / "q.db")  # meanwhile this computer did more work than the copy has
-    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
-                "VALUES ('y', 0.6, 'EVALUATED', 'evolution', 2, '{}', '2026-10-02 10:00:00')")
+    con.execute("INSERT INTO lab_bots (id, strategy, symbol, params, size_pct, favorite, hidden, created_at, paper_status) "
+                "VALUES ('y', 'connors_rsi2', 'SPY', '{}', 100, 0, 0, '2026-10-02 10:00:00', 'off')")
     con.commit()
     con.close()
     refused = c.post("/api/sync/load", json={})
@@ -190,7 +189,7 @@ def test_an_empty_computer_never_replaces_a_real_copy(two_computers, monkeypatch
     make_db(laptop["db"], 9)
     sync.save_state(laptop["state"], last_id="something-else")
     st = sync.status(laptop["db"], laptop["state"])
-    assert st["remote_newer"] and st["remote_smaller"] and st["local_summary"]["strategies_tested"] == 9 + 0
+    assert st["remote_newer"] and st["remote_smaller"] and st["local_summary"]["bots"] == 9 + 0
     (shared / "qsts-datos-PORTATIL.db.gz").write_bytes(b"x")  # what OneDrive does with conflicting writes
     assert sync.status(laptop["db"], laptop["state"])["conflict_files"] == ["qsts-datos-PORTATIL.db.gz"]
 
@@ -199,14 +198,14 @@ def test_copy_carried_as_a_downloaded_file(two_computers, tmp_path):
     shared, pc, laptop = two_computers
     pc_downloads, lap_downloads = tmp_path / "pc_dl", tmp_path / "lap_dl"
     meta = sync.export_to_file(pc["db"], pc["state"], pc_downloads)  # no sync folder needed
-    assert meta["path"].endswith(sync.SNAPSHOT) and meta["summary"]["strategies_tested"] == 5
+    assert meta["path"].endswith(sync.SNAPSHOT) and meta["summary"]["bots"] == 5
     lap_downloads.mkdir()
     # the browser renames repeated downloads; the .json may or may not come along
     (lap_downloads / "qsts-datos (1).db.gz").write_bytes((pc_downloads / sync.SNAPSHOT).read_bytes())
     found = sync.find_downloaded(lap_downloads)
     assert found["name"] == "qsts-datos (1).db.gz"
     staged = sync.stage_import_file(found["path"], laptop["state"])
-    assert staged["machine"].startswith("archivo") and staged["summary"]["strategies_tested"] == 5
+    assert staged["machine"].startswith("archivo") and staged["summary"]["bots"] == 5
     sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"])
     assert rows(laptop["db"]) == 5
     # with its .json next to it, the copy keeps its identity
@@ -234,8 +233,8 @@ def test_file_endpoints(tmp_path):
     assert c.get("/api/sync").json()["downloaded"] is None
     assert c.post("/api/sync/load_file", json={}).status_code == 400
     con = sqlite3.connect(tmp_path / "q.db")
-    con.execute("INSERT INTO research_candidates (id, fitness, status, origin, cycle, definition, created_at) "
-                "VALUES ('x', 0.5, 'EVALUATED', 'evolution', 1, '{}', '2026-10-01 10:00:00')")
+    con.execute("INSERT INTO lab_bots (id, strategy, symbol, params, size_pct, favorite, hidden, created_at, paper_status) "
+                "VALUES ('x', 'connors_rsi2', 'SPY', '{}', 100, 0, 0, '2026-10-01 10:00:00', 'off')")
     con.commit()
     con.close()
     saved = c.post("/api/sync/save_file").json()
@@ -260,7 +259,7 @@ def test_locked_files_leave_everything_as_it_was(two_computers, monkeypatch):
         sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"], wait_s=0.2)
     assert laptop["db"].exists() and rows(laptop["db"]) == 0 and (laptop["state"] / sync.PENDING).exists()
     monkeypatch.setattr(sync.os, "replace", real_replace)  # next start: the lock is gone
-    assert sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"])["summary"]["strategies_tested"] == 5
+    assert sync.apply_pending_import(f"sqlite:///{laptop['db']}", laptop["state"])["summary"]["bots"] == 5
     assert rows(laptop["db"]) == 5 and not list(laptop["db"].parent.glob("*.old"))
 
 

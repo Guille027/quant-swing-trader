@@ -28,7 +28,7 @@ def test_is_running_false_on_free_port():
 def test_launcher_falls_back_to_browser(monkeypatch):
     calls = []
     monkeypatch.setattr(launcher, "is_running", lambda url, timeout=1.0: True)  # app already open
-    from qsts.research.experiments import code_version
+    from qsts.core.version import code_version
     monkeypatch.setattr(launcher, "running_version", lambda url: code_version())  # ... and it is this version
     monkeypatch.setattr(launcher, "start_server", lambda port: calls.append("server"))
     monkeypatch.setattr(launcher.webbrowser, "open", lambda url: calls.append(("browser", url)))
