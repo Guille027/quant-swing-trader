@@ -1,5 +1,5 @@
 #!/bin/bash
-# QSTS 24/7 server on an Oracle Cloud "Always Free" machine (Canonical Ubuntu 24.04).
+# QSTS 24/7 server on an Oracle Cloud "Always Free" machine (Canonical Ubuntu 22.04 or 24.04).
 # Paste this whole text in Oracle Cloud: Create instance -> Show advanced options -> Management ->
 # "Paste cloud-init script". Before pasting, fill in the values between the quotes below.
 TAILSCALE_KEY=""     # Tailscale auth key (admin console -> Settings -> Keys -> Generate auth key), starts with tskey-auth-
@@ -10,7 +10,6 @@ BRANCH="claude/quirky-mayer-g6nhsj"
 exec > /var/log/qsts-install.log 2>&1
 set -eux
 export DEBIAN_FRONTEND=noninteractive
-python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "QSTS necesita Ubuntu 24.04"; exit 1; }
 
 # 2 GB of swap: the small free AMD machine has only 1 GB of memory
 if [ ! -f /swapfile ]; then
@@ -19,15 +18,17 @@ if [ ! -f /swapfile ]; then
 fi
 
 apt-get update
-apt-get install -y git python3-venv python3-pip curl
+apt-get install -y git curl
+# uv installs its own Python 3.12, so this works on Ubuntu 22.04 and 24.04 alike
+curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 U=ubuntu
 H=/home/$U
 URL="https://github.com/$REPO.git"
 if [ -n "$GITHUB_TOKEN" ]; then URL="https://x-access-token:$GITHUB_TOKEN@github.com/$REPO.git"; fi
 [ -d $H/qsts ] || sudo -u $U git clone -b "$BRANCH" "$URL" $H/qsts
-sudo -u $U python3 -m venv $H/qsts/.venv
-sudo -u $U $H/qsts/.venv/bin/pip install -q -e "$H/qsts[ui,yahoo,alpaca]"
+sudo -u $U uv venv --python 3.12 $H/qsts/.venv
+sudo -u $U uv pip install --python $H/qsts/.venv/bin/python -q -e "$H/qsts[ui,yahoo,alpaca]"
 
 cat > /etc/systemd/system/qsts.service <<EOF
 [Unit]
