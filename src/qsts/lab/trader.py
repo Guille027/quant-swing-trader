@@ -44,6 +44,22 @@ def due_session(now: pd.Timestamp, delay_min: int) -> pd.Timestamp:
     return ready[-1]
 
 
+def opg_closed(now: pd.Timestamp) -> bool:
+    """Alpaca rejects opening-auction (OPG) orders sent between 9:28 and 19:00 New York time (alpaca-py
+    TimeInForce docs); outside that window they are queued for the next opening auction."""
+    et = now.tz_convert("America/New_York")
+    t = et.hour * 60 + et.minute
+    return 9 * 60 + 28 <= t < 19 * 60
+
+
+def next_session(day: pd.Timestamp) -> pd.Timestamp:
+    sched = nyse_schedule(day + pd.Timedelta(days=1), day + pd.Timedelta(days=12))
+    return sched.index[0]
+
+
+MOC_FROM, MOC_LAST = 15 * 60 + 40, 15 * 60 + 50  # New York time: close day trades with a market-on-close order
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -122,7 +138,8 @@ class PaperTrader:
         return bk
 
     def _save_book(self, bid: str, bk: dict) -> None:
-        bk = {k: v for k, v in bk.items() if v.get("pending") or v.get("stop") is not None or v.get("target") is not None}
+        bk = {k: v for k, v in bk.items() if v.get("pending") or v.get("deferred") or v.get("stop") is not None
+              or v.get("target") is not None}
         self._update_bot(bid, book=bk, pending=None, stop_level=None, target_level=None)
 
     # ------------------------------------------------------------------ ledger of one bot (from its fills)
@@ -305,12 +322,18 @@ class PaperTrader:
 
     def _submit(self, broker, b: m.LabBot, symbol: str, side: str, qty: float, purpose: str, signal_day,
                 stop: float | None = None, target: float | None = None, order_type: str = "market",
-                tif: str = "day") -> m.LabOrder | None:
+                tif: str = "day", level: float | None = None, simple: bool = False) -> m.LabOrder | None:
         cid = self._client_id(b, purpose, symbol)
         req = {"symbol": symbol, "qty": int(qty), "side": side, "type": order_type, "time_in_force": tif,
                "client_order_id": cid}
-        kind = order_type
-        if purpose == "entry" and (stop or target):
+        kind = order_type if tif not in ("opg", "cls") else f"{order_type}-{tif}"
+        if order_type == "stop" and purpose in ("entry", "exit"):
+            req["stop_price"] = level
+        elif order_type == "limit" and purpose in ("entry", "exit"):
+            req["limit_price"] = level
+        if simple or order_type != "market":
+            pass  # stop / target are placed once the entry is filled (protective orders)
+        elif purpose == "entry" and (stop or target):
             if stop and target:
                 req.update(order_class="bracket", stop_loss=stop, take_profit=target)
                 kind = "bracket"
@@ -327,6 +350,8 @@ class PaperTrader:
             else:
                 req.update(type="limit", limit_price=target)
                 kind = "limit"
+        if purpose in ("entry", "exit") and level is not None:
+            stop, target = (level, None) if order_type == "stop" else (None, level)
         row = m.LabOrder(id=cid, bot_id=b.id, symbol=symbol, side=side, qty=int(qty), purpose=purpose,
                          order_type=kind, stop_price=stop, limit_price=target, signal_day=signal_day)
         try:
@@ -401,6 +426,10 @@ class PaperTrader:
                     and row.purpose in ("entry", "exit"):
                 with self.sf() as s, s.begin():
                     s.get(m.LabOrder, row.id).notified = True
+                if row.purpose == "entry" and row.order_type in ("stop", "limit-opg"):  # conditional entry: normal
+                    self.event("info", f"{row.symbol}: la orden de entrada condicionada no se ejecutó (el precio no "
+                                       "llegó a su nivel). Es lo normal en esta estrategia.", row.bot_id)
+                    return 0
                 self.event("skip", f"⚠️ La orden de {PURPOSE[row.purpose]} de {row.symbol} quedó «{status}» sin ejecutarse "
                                    f"({row.bot_id}).", row.bot_id, notify=True)
             return 0
@@ -442,6 +471,8 @@ class PaperTrader:
             self.sync_orders(broker)
             clock = broker.clock()
             positions = broker.positions()
+            self._send_deferred(broker, now)
+            self._intraday(broker, now, clock)
         except BrokerError as e:
             self.state = f"no se puede conectar con Alpaca: {e}"
             return self.state
@@ -489,7 +520,7 @@ class PaperTrader:
                 self._update_bot(b.id, last_signal_day=due.date())
                 continue
             try:
-                self._process(broker, b, due, view, positions, mismatch, entries_ok)
+                self._process(broker, b, due, view, positions, mismatch, entries_ok, now)
             except BrokerError as e:
                 self.event("error", f"Alpaca: {e}", b.id)
                 continue
@@ -501,7 +532,8 @@ class PaperTrader:
         return self.state
 
     def _process(self, broker, b: m.LabBot, due: pd.Timestamp, view: dict, positions: dict, mismatch: set,
-                 entries_ok: bool) -> None:
+                 entries_ok: bool, now: pd.Timestamp | None = None) -> None:
+        now = now if now is not None else pd.Timestamp.now(tz="UTC")
         st = REGISTRY[b.strategy]
         rows, uni = view["rows"], is_universe(b)
         label = f"«{st.name}»" + (f" ({UNIVERSE_NAME})" if uni else "")
@@ -523,6 +555,8 @@ class PaperTrader:
                 continue
             if sym in busy:
                 self.event("info", f"{sym}: hay una orden pendiente de ejecutarse; se espera a ella.", b.id)
+                continue
+            if st.day_trade:  # intraday: closed at the close by _intraday (or at the next open if that was missed)
                 continue
             sig = rows.get(sym)
             if sig is None:
@@ -550,12 +584,12 @@ class PaperTrader:
         # 2) entries: first those waiting (reversal / following the backtest), then today's best-ranked signals
         occupied = len(held) - len(exiting)
         free = view["max_positions"] - occupied - sum(1 for s in busy if s not in held)
-        wanted: list[tuple[str, int, str, float | None, float | None]] = []
+        wanted: list[tuple] = []
         for sym, v in sorted(bk.items()):
             p = v.get("pending")
             if not p or sym in held:
                 continue
-            wanted.append((sym, int(p["direction"]), p.get("reason", ""), p.get("stop"), p.get("target")))
+            wanted.append((sym, int(p["direction"]), p.get("reason", ""), p.get("stop"), p.get("target"), "market", None))
         taken = self._claims(exclude=b.id)
         for sym in view["ranked"]:
             if sym in held or sym in busy or any(w[0] == sym for w in wanted):
@@ -571,12 +605,17 @@ class PaperTrader:
                                b.id, notify=True)
                 continue  # a stock you hold by hand is never bought by a portfolio bot
             want = int(sig["entry"])
-            close = sig["close"]
+            kind, level = "market", None
+            if np.isfinite(sig.get("entry_stop", np.nan)):
+                kind, level = "stop", float(sig["entry_stop"])
+            elif np.isfinite(sig.get("entry_limit", np.nan)):
+                kind, level = "limit_open", float(sig["entry_limit"])
+            ref = level if kind == "stop" else sig["close"]  # percentages from the expected fill
             stop = sig["stop"] if np.isfinite(sig["stop"]) else (
-                close * (1 - want * sig["stop_pct"]) if np.isfinite(sig["stop_pct"]) else None)
+                ref * (1 - want * sig["stop_pct"]) if np.isfinite(sig["stop_pct"]) else None)
             target = sig["target"] if np.isfinite(sig["target"]) else (
-                close * (1 + want * sig["target_pct"]) if np.isfinite(sig["target_pct"]) else None)
-            wanted.append((sym, want, "señal de entrada", stop, target))
+                ref * (1 + want * sig["target_pct"]) if np.isfinite(sig["target_pct"]) else None)
+            wanted.append((sym, want, "señal de entrada", stop, target, kind, level))
         wanted = wanted[:max(free, 0)]
         for sym, v in bk.items():  # pending entries are used now (or dropped if there is no place for them)
             if sym not in held:
@@ -594,44 +633,135 @@ class PaperTrader:
                 equity += led["qty"] * (c - led["avg"])
                 if sym not in exiting:
                     gross += abs(led["qty"]) * c
-            for sym, direction, why, stop, target in wanted:
+            for sym, direction, why, stop, target, kind, level in wanted:
                 close = rows[sym]["close"] if sym in rows else None
                 if close is None:
                     continue
                 amount = min(equity * view["size"], equity - gross)
-                sent = self._enter(broker, b, sym, direction, why, close, stop, target, due, amount, label, bk)
+                sent = self._enter(broker, b, sym, direction, why, close, stop, target, due, amount, label, bk,
+                                   kind=kind, level=level, now=now, day_trade=st.day_trade)
                 if sent:
                     gross += sent
         self._save_book(b.id, bk)
 
     def _enter(self, broker, b, sym: str, direction: int, why: str, close: float, stop, target, due, amount: float,
-               label: str, bk: dict) -> float:
+               label: str, bk: dict, kind: str = "market", level: float | None = None,
+               now: pd.Timestamp | None = None, day_trade: bool = False) -> float:
         if direction < 0:
             acct, asset = broker.account(), broker.asset(sym)
             if not (acct.get("shorting_enabled") and asset.get("shortable") and asset.get("easy_to_borrow")):
                 self.event("skip", f"⏭️ {sym}: Alpaca no permite ponerse corto ahora en esta acción; se omite la entrada.",
                            b.id, notify=True)
                 return 0.0
-        qty = math.floor(max(amount, 0.0) / close)
+        ref = level if kind == "stop" and level else close  # a stop entry fills at (or above) its level
+        qty = math.floor(max(amount, 0.0) / max(ref, close if kind == "stop" else 0.0))
         if qty < 1:
             self.event("skip", f"⏭️ {sym}: el dinero disponible del bot ({money(amount)}) no llega para 1 acción.",
                        b.id, notify=True)
             return 0.0
-        if stop is not None and direction * (close - stop) <= 0:
+        if stop is not None and direction * (ref - stop) <= 0:
             stop = None
-        if target is not None and direction * (target - close) <= 0:
+        if target is not None and direction * (target - ref) <= 0:
             target = None
-        o = self._submit(broker, b, sym, "buy" if direction > 0 else "sell", qty, "entry", due.date(), stop, target)
+        side = "buy" if direction > 0 else "sell"
+        how = {"market": "para la apertura", "stop": f"con orden STOP a {money(level)} (solo si el precio llega)",
+               "limit_open": f"en la apertura solo si abre a {money(level)} o mejor"}[kind]
+        extra = (f" · stop {money(stop)}" if stop else "") + (f" · objetivo {money(target)}" if target else "") +                 (" · se cierra al final del día" if day_trade else "")
+        text = (f"🔔 {why.capitalize()} en {sym} (cierre del {due.date()}): orden de "
+                f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty} acciones {how} "
+                f"(≈ {money(qty * ref)}){extra} — bot {label}")
         bk.setdefault(sym, {}).update(stop=stop, target=target, pending=None)
+        if kind == "limit_open":
+            order = {"side": side, "qty": qty, "level": level, "signal_day": str(due.date()),
+                     "session": str(next_session(due).date()), "text": text}
+            if opg_closed(now if now is not None else pd.Timestamp.now(tz="UTC")):
+                bk[sym]["deferred"] = order  # Alpaca only accepts it after 19:00 New York time (or before 9:28)
+                self.event("info", text + " — se enviará a Alpaca a partir de las 19:00 de Nueva York (01:00 en "
+                                          "España) o antes de la apertura, si la app está abierta.", b.id, notify=True)
+                return qty * ref
+            o = self._submit(broker, b, sym, side, qty, "entry", due.date(), stop, target, order_type="limit",
+                             tif="opg", level=level, simple=True)
+        elif kind == "stop":
+            o = self._submit(broker, b, sym, side, qty, "entry", due.date(), stop, target, order_type="stop",
+                             level=level, simple=True)
+        else:
+            o = self._submit(broker, b, sym, side, qty, "entry", due.date(), stop, target, simple=day_trade)
         if o is None:
             return 0.0
-        extra = (f" · stop {money(stop)}" if stop else "") + (f" · objetivo {money(target)}" if target else "")
-        self.event("order", f"🔔 {why.capitalize()} en {sym} (cierre del {due.date()}): orden de "
-                            f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty} acciones para la apertura "
-                            f"(≈ {money(qty * close)}){extra} — bot {label}", b.id, notify=True)
-        return qty * close
+        self.event("order", text, b.id, notify=True)
+        return qty * ref
 
-    def _protect(self, broker, b, sym: str, d: int, qty: float, stop, target, due, bk: dict) -> None:
+    def _send_deferred(self, broker, now: pd.Timestamp) -> None:
+        """Limit-on-open entries that had to wait for Alpaca's OPG window."""
+        for b in self.active_bots():
+            bk = self.book(b)
+            changed = False
+            for sym, v in bk.items():
+                d = v.get("deferred")
+                if not d:
+                    continue
+                session_open = pd.Timestamp(d["session"]).tz_localize("America/New_York") + pd.Timedelta(hours=9, minutes=28)
+                if now >= session_open:
+                    v["deferred"] = None
+                    changed = True
+                    self.event("skip", f"⏭️ {sym}: la orden en la apertura del {d['session']} no se pudo enviar a tiempo "
+                                       "(la app no estaba abierta en la ventana permitida por Alpaca).", b.id, notify=True)
+                    continue
+                if opg_closed(now):
+                    continue
+                o = self._submit(broker, b, sym, d["side"], d["qty"], "entry", pd.Timestamp(d["signal_day"]).date(),
+                                 v.get("stop"), v.get("target"), order_type="limit", tif="opg", level=d["level"],
+                                 simple=True)
+                v["deferred"] = None
+                changed = True
+                if o is not None:
+                    self.event("order", d["text"], b.id, notify=True)
+            if changed:
+                self._save_book(b.id, bk)
+
+    def _intraday(self, broker, now: pd.Timestamp, clock: dict) -> None:
+        """Day trades: protective orders once the entry is filled, and out at the close (market-on-close). A
+        position still open after the close (the app was not running) is closed at the next open and reported."""
+        et = now.tz_convert("America/New_York")
+        mins = et.hour * 60 + et.minute
+        for b in self.active_bots():
+            st = REGISTRY[b.strategy]
+            if not st.day_trade:
+                continue
+            bk = self.book(b)
+            orders = self.orders(b.id)
+            for sym, led in self.ledgers(b).items():
+                if not led["qty"]:
+                    continue
+                d = int(np.sign(led["qty"]))
+                if any(o.symbol == sym and o.purpose == "exit" and o.status in OPEN_ORDER for o in orders):
+                    continue
+                side = "sell" if d > 0 else "buy"
+                if clock.get("is_open"):
+                    if mins >= MOC_FROM:
+                        self._cancel_open(broker, b, ("protect", "stop", "target"), symbol=sym)
+                        tif = "cls" if mins < MOC_LAST else "day"
+                        o = self._submit(broker, b, sym, side, abs(led["qty"]), "exit", et.date(), tif=tif)
+                        if o is not None:
+                            self.event("order", f"🔔 {sym}: cierre del día (estrategia intradía) — orden de "
+                                                f"{'VENTA' if d > 0 else 'RECOMPRA'} de {abs(led['qty']):g} acciones "
+                                                f"{'en la subasta de cierre' if tif == 'cls' else 'a mercado'}.", b.id, notify=True)
+                    else:
+                        lv = bk.get(sym) or {}
+                        if lv.get("stop") is not None or lv.get("target") is not None:
+                            self._protect(broker, b, sym, d, abs(led["qty"]), lv.get("stop"), lv.get("target"),
+                                          et, bk, first_tif="day")
+                            self._save_book(b.id, bk)
+                else:
+                    self._cancel_open(broker, b, ("protect", "stop", "target"), symbol=sym)
+                    o = self._submit(broker, b, sym, side, abs(led["qty"]), "exit", et.date())
+                    if o is not None:
+                        self.event("error", f"⚠️ {sym}: la posición intradía no se cerró al cierre (la app no estaba "
+                                            "abierta antes de las 21:50 de España); se cierra en la próxima apertura. "
+                                            "Esto la separa del backtest.", b.id, notify=True)
+
+    def _protect(self, broker, b, sym: str, d: int, qty: float, stop, target, due, bk: dict,
+                 first_tif: str = "gtc") -> None:
         if stop is None and target is None:
             return
         live = [o for o in self.orders(b.id)
@@ -645,8 +775,8 @@ class PaperTrader:
             except BrokerError:
                 pass
         side = "sell" if d > 0 else "buy"
-        o = self._submit(broker, b, sym, side, qty, "protect", due.date(), stop, target, tif="gtc")
-        if o is None:  # GTC not accepted for this order: one day at a time (re-sent every evening)
+        o = self._submit(broker, b, sym, side, qty, "protect", due.date(), stop, target, tif=first_tif)
+        if o is None and first_tif != "day":  # GTC not accepted for this order: one day at a time (re-sent every evening)
             o = self._submit(broker, b, sym, side, qty, "protect", due.date(), stop, target, tif="day")
         bk.setdefault(sym, {}).update(stop=stop, target=target)
         if o is not None:

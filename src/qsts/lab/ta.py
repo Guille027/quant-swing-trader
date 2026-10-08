@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from qsts.indicators.core import (adx, atr, bollinger, cci, ema, hma, keltner, macd, obv, roc, rsi, sma,  # noqa: F401
+from qsts.indicators.core import (ichimoku, adx, atr, bollinger, cci, ema, hma, keltner, macd, obv, roc, rsi, sma,  # noqa: F401
                                   stochastic, supertrend, true_range, williams_r, wma)
 
 
@@ -89,6 +89,55 @@ def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
         ha_o[i] = (ha_o[i - 1] + ha_c[i - 1]) / 2
     return pd.DataFrame({"open": ha_o, "high": np.maximum.reduce([h, ha_o, ha_c]),
                          "low": np.minimum.reduce([l, ha_o, ha_c]), "close": ha_c}, index=df.index)
+
+
+def ibs(df: pd.DataFrame) -> pd.Series:
+    """Internal bar strength: where the close sits in the day's range (0 = at the low, 1 = at the high)."""
+    rng = (df["high"] - df["low"]).replace(0, np.nan)
+    return (df["close"] - df["low"]) / rng
+
+
+def psar(df: pd.DataFrame, start: float = 0.02, inc: float = 0.02, maximum: float = 0.2) -> pd.DataFrame:
+    """ta.sar: Welles Wilder's Parabolic SAR (1978). `direction` +1 while the SAR is below the price (uptrend)."""
+    h, l = df["high"].to_numpy(dtype=float), df["low"].to_numpy(dtype=float)  # noqa: E741
+    n = len(h)
+    sar, d = np.full(n, np.nan), np.zeros(n)
+    if n < 2:
+        return pd.DataFrame({"sar": sar, "direction": d}, index=df.index)
+    up = h[1] >= h[0]
+    ep = h[1] if up else l[1]
+    s = l[0] if up else h[0]
+    af = start
+    sar[1], d[1] = s, 1 if up else -1
+    for i in range(2, n):
+        s = s + af * (ep - s)
+        if up:
+            s = min(s, l[i - 1], l[i - 2])
+            if l[i] < s:  # reversal
+                up, s, ep, af = False, ep, l[i], start
+            elif h[i] > ep:
+                ep, af = h[i], min(af + inc, maximum)
+        else:
+            s = max(s, h[i - 1], h[i - 2])
+            if h[i] > s:
+                up, s, ep, af = True, ep, h[i], start
+            elif l[i] < ep:
+                ep, af = l[i], min(af + inc, maximum)
+        sar[i], d[i] = s, 1 if up else -1
+    d[np.isnan(sar)] = np.nan
+    return pd.DataFrame({"sar": sar, "direction": d}, index=df.index)
+
+
+def month_end(index: pd.DatetimeIndex) -> pd.Series:
+    """True on the last NYSE session of each month. Uses the exchange calendar (known in advance), never prices,
+    so it is causal: on the last session of a month you already know tomorrow is in a new month."""
+    from qsts.data.bars import nyse_sessions
+    if not len(index):
+        return pd.Series(False, index=index)
+    cal = nyse_sessions(index[0], index[-1] + pd.Timedelta(days=45))
+    nxt = pd.Series(cal[1:], index=cal[:-1])
+    nx = nxt.reindex(index)
+    return pd.Series((nx.dt.month != index.month).to_numpy() & nx.notna().to_numpy(), index=index)
 
 
 def _s(x, index=None) -> pd.Series:

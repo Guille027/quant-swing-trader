@@ -54,7 +54,7 @@ function spark(vals) {
 function matches(r, q) {
   const field = { pf: r.profit_factor, win: r.win_rate != null ? r.win_rate * 100 : null, dd: r.max_drawdown != null ? -r.max_drawdown * 100 : null,
     p7: r.d7 != null ? r.d7 * 100 : null, p30: r.d30 != null ? r.d30 * 100 : null, p90: r.d90 != null ? r.d90 * 100 : null,
-    sharpe: r.sharpe, trades: r.n_trades, net: r.net_profit_pct != null ? r.net_profit_pct * 100 : null };
+    sharpe: r.sharpe, trades: r.n_trades, net: r.net_profit_pct != null ? r.net_profit_pct * 100 : null, dias: r.avg_bars };
   for (const tok of q.toLowerCase().split(/\s+/).filter(Boolean)) {
     const m = tok.match(/^([a-z0-9]+)([<>]=?)(-?[\d.,]+)$/);
     if (m && m[1] in field) {
@@ -103,7 +103,7 @@ function renderLibrary() {
   if (!lib) return;
   const q = $("#q").value.trim();
   let rows = lib.rows.filter(r => (filter === "all" || (filter === "fav" && r.favorite) || (filter === "paper" && r.paper_status === "active") ||
-    (filter === "universe" && r.kind === "universe") || (filter === "stock" && r.kind !== "universe")) && matches(r, q));
+    (filter === "universe" && r.kind === "universe") || (filter === "stock" && r.kind !== "universe")) && matches(r, q) && durOk(r));
   rows.sort((a, b) => {
     const x = a[sortKey], y = b[sortKey];
     if (x === y) return 0; if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
@@ -118,17 +118,18 @@ function renderLibrary() {
   const where = (r) => r.kind === "universe" ? `<b>S&amp;P 500</b><span class="kind" title="Escanea todo el índice; como máximo ${r.max_positions} posiciones a la vez">cartera · ${r.max_positions} a la vez</span>`
     : `<b>${esc(r.symbol)}</b><span class="kind one">una acción</span>`;
   $("#lib").innerHTML = `<tr><th>★</th>${th("name", "Nombre")}<th>Curva</th>${th("symbol", "Dónde")}${th("d7", "7 días")}${th("d30", "30 días")}${th("d90", "90 días")}` +
-    `${th("net_profit_pct", "Total")}${th("win_rate", "Ganadoras")}${th("profit_factor", "Factor de beneficio")}` +
+    `${th("net_profit_pct", "Total")}${th("win_rate", "Ganadoras")}${th("profit_factor", "F. benef.")}` +
+    `${th("avg_bars", "Días media")}` +
     `<th title="Probada en cada acción del S&amp;P 500 por separado: en qué parte de ellas gana">Gana en</th><th></th></tr>` +
-    shown.map(r => r.error ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td>${where(r)}</td><td colspan="8" class="muted">${esc(r.error)}</td><td></td></tr>`
-      : r.computing ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td></td><td>${where(r)}</td><td colspan="7" class="muted">` +
+    shown.map(r => r.error ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td>${where(r)}</td><td colspan="9" class="muted">${esc(r.error)}</td><td></td></tr>`
+      : r.computing ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td></td><td>${where(r)}</td><td colspan="8" class="muted">` +
         `${r.computing.state === "error" ? `<span class="bad">${esc(r.computing.msg)}</span>` : `<span class="spin"></span>${esc(r.computing.msg || "calculando")}…`}</td><td></td></tr>`
       : `<tr class="lr" data-id="${esc(r.id)}"><td><button class="star ${r.favorite ? "on" : ""}" data-fav="${esc(r.id)}">${r.favorite ? "★" : "☆"}</button></td>` +
       `<td class="name">${esc(r.name)}${r.custom ? '<span class="badge">ajustada</span>' : ""}${r.in_position ? '<span class="badge">dentro</span>' : ""}</td>` +
       `<td>${spark(r.spark)}</td><td>${where(r)}</td>` +
       `<td>${pill(r.d7)}</td><td>${pill(r.d30)}</td><td>${pill(r.d90)}</td><td>${pill(r.net_profit_pct, x => x > 0, 0)}</td>` +
-      `<td>${pct(r.win_rate)}</td><td>${pill(r.profit_factor, x => x > 1, 2, v => nf(v, 2))}</td>` +
-      `<td>${r.kind === "universe" && r.breadth != null ? `<span class="${r.breadth >= 0.6 ? "up" : "down"}" title="de las acciones, una a una">${pct(r.breadth, 0)} de las acciones</span>` : '<span class="muted">—</span>'}</td>` +
+      `<td>${pct(r.win_rate)}</td><td>${pill(r.profit_factor, x => x > 1, 2, v => nf(v, 2))}</td><td title="Sesiones que se aguanta de media cada operación">${days(r.avg_bars)}</td>` +
+      `<td>${r.kind === "universe" && r.breadth != null ? `<span class="${r.breadth >= 0.6 ? "up" : "down"}" title="de las acciones del S&amp;P 500, probándola en cada una por separado">${pct(r.breadth, 0)}</span>` : '<span class="muted">—</span>'}</td>` +
       `<td>${r.paper_status === "active" ? '<button class="copy off" data-open="1">En paper</button>' : '<button class="copy" data-open="1">Activar en paper</button>'}</td></tr>`).join("");
   $$("#lib th.sort").forEach(h => h.onclick = () => { const k = h.dataset.k; sortDir = sortKey === k ? -sortDir : -1; sortKey = k; renderLibrary(); });
   $$("#lib tr.lr").forEach(tr => tr.onclick = (ev) => {
@@ -138,7 +139,14 @@ function renderLibrary() {
     location.hash = "#/bot/" + encodeURIComponent(tr.dataset.id) + (ev.target.closest("[data-open]") ? "?paper" : "");
   });
 }
-const HEAD = { name: "nombre", symbol: "dónde", d7: "7 días", d30: "30 días", d90: "90 días", net_profit_pct: "total", win_rate: "ganadoras", profit_factor: "factor de beneficio" };
+function durOk(r) {
+  const d = $("#dur").value, b = r.avg_bars;
+  if (!d) return true; if (b === null || b === undefined) return false;
+  return d === "intra" ? b < 0.5 : d === "short" ? b >= 0.5 && b <= 5 : d === "weeks" ? b > 5 && b <= 40 : b > 40;
+}
+const days = (b) => b === null || b === undefined ? "—" : b < 0.5 ? '<span class="kind">intradía</span>' : nf(b, b < 10 ? 1 : 0) + " días";
+$("#dur").onchange = () => { page = 0; renderLibrary(); };
+const HEAD = { avg_bars: "días de media", name: "nombre", symbol: "dónde", d7: "7 días", d30: "30 días", d90: "90 días", net_profit_pct: "total", win_rate: "ganadoras", profit_factor: "factor de beneficio" };
 $("#q").oninput = () => { page = 0; renderLibrary(); };
 $$(".chip").forEach(c => c.onclick = () => { filter = c.dataset.filter; $$(".chip").forEach(x => x.classList.toggle("on", x === c)); page = 0; renderLibrary(); });
 $("#prev").onclick = () => { page--; renderLibrary(); }; $("#next").onclick = () => { page++; renderLibrary(); };
@@ -199,7 +207,10 @@ async function loadBot(id) {
   $("#b-fav").textContent = b.favorite ? "★ Favorito" : "☆ Favorito";
   $("#b-paper").textContent = live ? "Detener paper trading" : "Activar en paper";
   $("#b-summary").textContent = st.summary;
-  $("#b-source").innerHTML = st.source ? `Fuente: ${esc(st.source)}` : "";
+  $("#b-source").innerHTML = (st.source ? `Fuente: ${esc(st.source)}` : "") + (st.style ? ` · <span class="kind">${esc(st.style)}</span>` : "");
+  $("#act-intra").style.display = st.day_trade ? "block" : "none";
+  $("#b-notes").innerHTML = (st.day_trade ? "<b>Intradía:</b> cada operación se abre y se cierra el mismo día (orden al cierre). " : "") +
+    (st.notes ? `<b>Cómo se ha programado:</b> ${esc(st.notes)}` : "");
   $("#b-params").innerHTML = Object.keys(b.params).length ? "Ajustes: " + Object.entries(b.params).map(([k, v]) => `<code>${esc(k)} = ${esc(v)}</code>`).join(" ") +
     (Object.keys(b.custom_params).length ? ' <span class="badge warn">cambiados respecto al original</span>' : "") : "";
   $("#b-rank").innerHTML = uni ? `Si un día hay más acciones con señal que huecos libres, elige: <b>${esc(st.rank_rule)}</b>` +
@@ -230,9 +241,10 @@ function renderMetrics() {
   const sgn = (v) => v > 0 ? "up" : v < 0 ? "down" : "";
   $("#b-metrics").innerHTML = metricBox("Beneficio neto", pct(m.net_profit_pct, 1, true), sgn(m.net_profit_pct)) + metricBox("Ganadoras", pct(m.win_rate)) +
     metricBox("Factor de beneficio", nf(m.profit_factor, 2)) + metricBox("Caída máxima", pct(m.max_drawdown)) + metricBox("Operaciones", m.n_trades ?? "—") +
+    (metricMode === "bt" ? metricBox("Días de media por operación", m.avg_bars == null ? "—" : m.avg_bars < 0.5 ? "intradía" : nf(m.avg_bars, 1)) : "") +
     (metricMode === "bt" ? metricBox("Media por operación", pct(m.ev_pct, 2, true), sgn(m.ev_pct)) +
       metricBox("Ganancia media / operación", usd(m.ev_payoff), sgn(m.ev_payoff)) + metricBox("Al año", pct(m.cagr, 1, true)) +
-      metricBox("Sharpe", nf(m.sharpe, 2)) + metricBox("Tiempo invertido", pct(m.exposure, 0)) : "");
+      metricBox("Sharpe", nf(m.sharpe, 2)) + metricBox("Tiempo invertido", bot.bot.strategy.day_trade ? "solo de día" : pct(m.exposure, 0)) : "");
   $("#b-windows").innerHTML = [["7 días", m.d7], ["30 días", m.d30], ["90 días", m.d90]].map(([l, v]) => `<div>${l}<b class="${sgn(v)}">${pct(v, 1, true)}</b></div>`).join("");
 }
 $$("#page-bot .toggle button").forEach(x => x.onclick = () => { metricMode = x.dataset.mode; $$("#page-bot .toggle button").forEach(y => y.classList.toggle("on", y === x)); renderMetrics(); });

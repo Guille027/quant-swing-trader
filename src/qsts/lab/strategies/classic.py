@@ -19,6 +19,8 @@ class ConnorsRSI2(Strategy):
     default_symbols = ("SPY", "QQQ")
     params = {"rsi_len": 2, "rsi_buy": 10.0, "trend_len": 200, "exit_len": 5}
     param_grid = {"rsi_buy": [5.0, 10.0, 15.0], "exit_len": [3, 5, 10], "trend_len": [150, 200, 250]}
+    style = "pocos días"
+    notes = "Connors compra al cierre del día de la señal; aquí en la apertura siguiente (la señal solo se conoce al cierre)."
 
     def signals(self, bars, p):
         c = bars["close"]
@@ -36,6 +38,7 @@ class GoldenCross(Strategy):
     default_symbols = ("SPY", "QQQ")
     params = {"fast": 50, "slow": 200}
     param_grid = {"fast": [30, 50, 70], "slow": [150, 200, 250]}
+    style = "meses"
 
     def signals(self, bars, p):
         c = bars["close"]
@@ -54,6 +57,9 @@ class TurtleBreakout(Strategy):
     params = {"entry_len": 20, "exit_len": 10, "atr_len": 20, "stop_atr": 2.0}
     param_grid = {"entry_len": [15, 20, 30], "exit_len": [7, 10, 15], "stop_atr": [1.5, 2.0, 3.0]}
     allow_short = True
+    style = "semanas"
+    notes = ("Las Tortugas entraban con una orden stop en el momento de la ruptura; aquí la ruptura se confirma al "
+             "cierre y se entra en la apertura siguiente. Sin la regla de saltarse la señal tras una ganadora.")
 
     def signals(self, bars, p):
         c = bars["close"]
@@ -65,3 +71,16 @@ class TurtleBreakout(Strategy):
         # the stop is 2 ATR from the entry price: as a fraction of today's close (the entry is tomorrow's open)
         return pd.DataFrame({"entry": entry, "exit_long": long_exit, "exit_short": short_exit,
                              "stop_pct": p["stop_atr"] * n / c}, index=bars.index)
+
+
+@register
+class TurtleSystem2(TurtleBreakout):
+    key = "turtle_55_20"
+    name = "Tortugas: ruptura de 55 días"
+    source = "Sistema 2 de las Tortugas de Richard Dennis (según Curtis Faith, 'Way of the Turtle', 2007)"
+    summary = ("Compra si el cierre supera el máximo de los 55 días anteriores y vende en corto si baja del mínimo. "
+               "Sale con la ruptura contraria de 20 días o con un stop a 2 ATR (de 20 días) del precio de entrada.")
+    default_symbols = ("SPY", "GLD")
+    params = {"entry_len": 55, "exit_len": 20, "atr_len": 20, "stop_atr": 2.0}
+    param_grid = {"entry_len": [40, 55, 70], "exit_len": [15, 20, 30], "stop_atr": [1.5, 2.0, 3.0]}
+    style = "meses"

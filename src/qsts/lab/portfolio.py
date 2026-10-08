@@ -17,10 +17,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from qsts.lab.backtest import _ts
-from qsts.lab.strategy import MAX_POSITIONS
+from qsts.lab.backtest import _ts, entry_fill
+from qsts.lab.strategy import FLOAT_COLUMNS, MAX_POSITIONS
 
-FLOAT_SIGNALS = ("stop", "target", "stop_pct", "target_pct", "trail")
+FLOAT_SIGNALS = FLOAT_COLUMNS
 
 
 @dataclass
@@ -54,6 +54,7 @@ class Panel:
     eligible: np.ndarray     # bool: in the index that day (from its date added) and with a bar
     floats: dict = field(default_factory=dict)  # stop / target / stop_pct / target_pct / trail (only if used)
     last_bar: np.ndarray | None = None          # last row with a bar, per stock
+    day_trade: bool = False                     # positions closed at the close of their entry day
 
     def f(self, name: str, i: int, k: int) -> float:
         a = self.floats.get(name)
@@ -66,13 +67,14 @@ class Panel:
 class PanelBuilder:
     """Fills a Panel one stock at a time (so the whole universe's DataFrames never sit in memory together)."""
 
-    def __init__(self, calendar: pd.DatetimeIndex, symbols: list[str]):
+    def __init__(self, calendar: pd.DatetimeIndex, symbols: list[str], day_trade: bool = False):
         self.index, self.symbols = calendar, list(symbols)
         T, N = len(calendar), len(self.symbols)
         nan = lambda: np.full((T, N), np.nan)  # noqa: E731
         self.p = Panel(calendar, self.symbols, nan(), nan(), nan(), nan(), np.zeros((T, N), np.int8),
                        np.zeros((T, N), bool), np.zeros((T, N), bool), nan(), np.zeros((T, N), bool))
         self.p.last_bar = np.full(N, -1)
+        self.p.day_trade = day_trade
 
     def add(self, symbol: str, bars: pd.DataFrame, sig: pd.DataFrame, start: pd.Timestamp | None) -> None:
         k = self.symbols.index(symbol)
@@ -152,9 +154,8 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                        "pnl_pct": pnl / (abs(q) * t["entry_price"]), "return": pnl / t["entry_equity"],
                        "bars": i - t["entry_index"], "reason": reason})
 
-    def open_(k: int, i: int, j: int, direction: int, amount: float, equity_now: float) -> None:
+    def open_(k: int, i: int, j: int, direction: int, amount: float, equity_now: float, fill: float) -> None:
         nonlocal cash
-        fill = o[i, k] * (1 + direction * slip)
         units = amount / fill
         fee = units * fill * comm
         q = direction * units
@@ -224,9 +225,14 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                         amount = min(equity_prev / maxp, equity_prev - gross)
                         if amount <= equity_prev * 1e-4:
                             break
-                        open_(int(k), i, j, int(d), amount, equity_prev)
+                        free -= 1  # an order is sent for this place; a stop / limit order may not be executed
+                        fill = (o[i, k] * (1 + d * slip) if monkey else
+                                entry_fill(int(d), o[i, k], h[i, k], l[i, k], panel.f("entry_stop", j, k),
+                                           panel.f("entry_limit", j, k), slip))
+                        if fill is None:
+                            continue
+                        open_(int(k), i, j, int(d), amount, equity_prev, fill)
                         gross += amount
-                        free -= 1
             for k in list(pos):  # 3) resting orders inside the bar (stop first when both are touched)
                 if not np.isfinite(o[i, k]):
                     continue
@@ -238,6 +244,10 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                     close(k, i, p["stop"], "stop", market=True)
                 elif hit_tgt:
                     close(k, i, p["target"], "target", market=False)
+            if panel.day_trade:  # 4) intraday strategy: everything out at the close (market-on-close)
+                for k in list(pos):
+                    if np.isfinite(c[i, k]):
+                        close(k, i, c[i, k], "close", market=True)
         first = False
         tr = panel.floats.get("trail")
         if tr is not None and not monkey:

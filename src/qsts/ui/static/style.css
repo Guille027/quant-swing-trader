@@ -44,7 +44,7 @@ th { text-align:left; color:#3a3d48; font-weight:600; font-size:13px; padding:10
 th.sort { cursor:pointer; } th.sort:hover { color:var(--violet); }
 td { padding:10px 8px; border-top:1px solid var(--line); white-space:nowrap; }
 table.lib td { padding:9px 8px; } table.lib tr.lr:hover td { background:#faf9ff; cursor:pointer; }
-td.name { font-weight:600; letter-spacing:.2px; text-transform:uppercase; font-size:13px; }
+td.name { font-weight:600; letter-spacing:.2px; text-transform:uppercase; font-size:13px; white-space:normal; min-width:180px; }
 td.name .s2 { display:block; font-weight:400; text-transform:none; color:var(--muted); font-size:11px; letter-spacing:0; }
 .star { cursor:pointer; color:#9aa0ad; font-size:17px; border:0; background:none; } .star.on { color:#f5b301; }
 .pill { display:inline-block; min-width:56px; text-align:center; padding:4px 8px; border-radius:7px; font-weight:600; font-size:13px; color:#fff;

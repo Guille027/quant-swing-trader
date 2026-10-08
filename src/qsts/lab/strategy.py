@@ -12,6 +12,13 @@ automatically for every registered strategy (tests/test_lab.py::test_every_strat
 - optional `stop` / `target`: price levels for a position opened by this bar's signal
 - optional `stop_pct` / `target_pct`: the same, as a fraction of the entry fill price (0.05 = 5%)
 - optional `trail`: a stop level that can only move in the position's favour (applies from the next bar)
+- optional `entry_stop`: instead of buying at the open, a STOP order at this level for the next session (long: fills
+  when the price rises to it, at the open if it gaps through; short: mirror). Not reached = no trade.
+- optional `entry_limit`: a LIMIT-ON-OPEN order: fills at the next open only if the open is at or better than the
+  level (long: open <= level). Used for gap strategies ("buy only if it opens 1% lower").
+
+`day_trade = True`: every position is closed at the close of the day it was opened (market-on-close): intraday
+strategies on daily bars. Holding time is then 0 sessions.
 
 Portfolio mode (the strategy run as a scanner over the S&P 500, at most `max_positions` at a time): when more
 stocks signal than there are free places, the ones with the highest `rank` are taken. `rank(bars, params)` is the
@@ -29,7 +36,9 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 
-SIGNAL_COLUMNS = ("entry", "exit", "exit_long", "exit_short", "stop", "target", "stop_pct", "target_pct", "trail")
+SIGNAL_COLUMNS = ("entry", "exit", "exit_long", "exit_short", "stop", "target", "stop_pct", "target_pct", "trail",
+                  "entry_stop", "entry_limit")
+FLOAT_COLUMNS = ("stop", "target", "stop_pct", "target_pct", "trail", "entry_stop", "entry_limit")
 MAX_POSITIONS = 5  # the user's limit for a portfolio bot
 DEFAULT_RANK_RULE = "la más líquida primero (mayor volumen negociado en dólares, media de 20 sesiones)"
 
@@ -52,6 +61,9 @@ class Strategy:
     universe: ClassVar[bool] = True        # also run it as an S&P 500 portfolio (False: single-asset strategy)
     max_positions: ClassVar[int | None] = None  # the author's number of positions, if published (capped at 5)
     rank_rule: ClassVar[str] = ""          # the author's ranking rule in plain Spanish ("" = the fixed rule)
+    day_trade: ClassVar[bool] = False      # positions closed at the close of their entry day (intraday)
+    style: ClassVar[str] = ""              # "intradía" | "pocos días" | "semanas" | "meses" (as published)
+    notes: ClassVar[str] = ""              # how the published rules were interpreted for this app
 
     def rank(self, bars: pd.DataFrame, p: dict) -> pd.Series | None:
         """The author's ranking (higher = taken first); None = the fixed rule (most liquid first)."""
@@ -87,8 +99,10 @@ class Strategy:
                           else pd.Series(False, index=bars.index))
         out["exit_long"] = flag("exit") | flag("exit_long")
         out["exit_short"] = flag("exit") | flag("exit_short")
-        for c in ("stop", "target", "stop_pct", "target_pct", "trail"):
+        for c in FLOAT_COLUMNS:
             out[c] = pd.to_numeric(sig[c], errors="coerce").astype(float) if c in sig else np.nan
+        if (np.isfinite(out["entry_stop"]) & np.isfinite(out["entry_limit"])).any():
+            raise ValueError(f"{self.key}: a bar cannot have both entry_stop and entry_limit")
         r = self.rank(bars, self.resolve(overrides))
         r = liquidity_rank(bars) if r is None else r
         if not isinstance(r, pd.Series) or not r.index.equals(bars.index):
@@ -111,7 +125,8 @@ class Strategy:
                 "params": dict(cls.params), "param_grid": {k: list(v) for k, v in cls.param_grid.items()},
                 "allow_short": cls.allow_short, "default_symbols": list(cls.default_symbols), "version": cls.version(),
                 "universe": cls.universe, "max_positions": cls.positions(),
-                "rank_rule": cls.rank_rule or DEFAULT_RANK_RULE, "rank_by_author": bool(cls.rank_rule)}
+                "rank_rule": cls.rank_rule or DEFAULT_RANK_RULE, "rank_by_author": bool(cls.rank_rule),
+                "day_trade": cls.day_trade, "style": cls.style, "notes": cls.notes}
 
     @classmethod
     def positions(cls) -> int:

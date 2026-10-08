@@ -97,6 +97,7 @@ def summary(equity: pd.Series, trades: pd.DataFrame, capital: float, position: p
             "cagr": _f((equity.iloc[-1] / capital) ** (365.25 / max((equity.index[-1] - equity.index[0]).days, 1)) - 1)
             if len(equity) > 1 and equity.iloc[-1] > 0 else None,
             "exposure": _f((position != 0).mean()) if position is not None and len(position) else None,
+            "avg_bars": ts["avg_bars"],             # average holding time, in sessions (0 = closed the same day)
             "d7": window_return(equity, 7), "d30": window_return(equity, 30), "d90": window_return(equity, 90),
             "first": str(equity.index[0].date()) if len(equity) else None,
             "last": str(equity.index[-1].date()) if len(equity) else None}

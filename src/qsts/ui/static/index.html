@@ -35,6 +35,8 @@
     <div class="chips"><button data-filter="all" class="chip on">Todos</button><button data-filter="universe" class="chip">Cartera S&amp;P 500</button>
       <button data-filter="stock" class="chip">Una acción</button><button data-filter="fav" class="chip">★ Favoritos</button>
       <button data-filter="paper" class="chip">En paper</button></div>
+    <label class="small">Duración <select id="dur"><option value="">todas</option><option value="intra">intradía (mismo día)</option>
+      <option value="short">pocos días (1–5)</option><option value="weeks">semanas (6–40)</option><option value="months">meses (más de 40)</option></select></label>
   </div>
   <div id="add-bot" class="panel" style="display:none">
     <label>Estrategia <select id="ab-strategy"></select></label>
@@ -73,6 +75,9 @@
       y deja la orden para la apertura; los stops y objetivos quedan puestos en Alpaca. Te avisa por Telegram de cada operación.</p>
     <label>Parte de la cuenta para este bot <input id="act-pct" type="number" min="1" max="100" value="20" style="width:70px">%</label>
     <label><input type="checkbox" id="act-follow" checked> <span id="act-follow-txt">si el backtest está dentro de una operación ahora, entrar también en la próxima apertura</span></label>
+    <p id="act-intra" class="small" style="display:none"><b>Estrategia intradía:</b> para cerrar cada operación al final del día la app tiene que
+      estar abierta durante la sesión de Nueva York, hasta las 21:50 de España. Si no lo está, la posición se cierra en la apertura siguiente
+      (y te avisa, porque eso ya no es lo mismo que el backtest).</p>
     <button id="act-go" class="btn pink">Activar</button> <button id="act-cancel" class="btn ghost">Cancelar</button>
     <span id="act-msg" class="muted"></span>
   </div>
@@ -87,6 +92,7 @@
       <h3>La estrategia</h3>
       <p id="b-summary"></p>
       <p class="muted small" id="b-source"></p>
+      <p class="small" id="b-notes"></p>
       <div id="b-params" class="small"></div>
       <p id="b-rank" class="small"></p>
       <p id="b-next" class="small"></p>

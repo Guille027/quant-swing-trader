@@ -31,7 +31,7 @@ from qsts.lab.audit import audit_portfolio
 from qsts.lab.backtest import REASONS, BacktestConfig, BacktestResult, _simulate, buy_and_hold, run_backtest
 from qsts.lab.portfolio import (Panel, PanelBuilder, PortfolioConfig, PortfolioResult, breadth_summary, candidates,
                                 run_portfolio, snapshot)
-from qsts.lab.strategy import MAX_POSITIONS, REGISTRY, load_all
+from qsts.lab.strategy import FLOAT_COLUMNS, MAX_POSITIONS, REGISTRY, load_all
 
 CAPITAL = 10_000.0
 UNIVERSE = "SP500"
@@ -93,6 +93,7 @@ class LabService:
         self._queue: queue.Queue = queue.Queue()
         self._queued: set[tuple] = set()
         self._worker: threading.Thread | None = None
+        self._batch: dict | None = None  # prices kept in memory while several portfolio bots are computed in a row
         self._lock = threading.RLock()
         load_all()
 
@@ -242,6 +243,8 @@ class LabService:
     def _work(self) -> None:
         while True:
             bid, what = self._queue.get()
+            if self._batch is None or self._batch.get("_version") != self.data_version():
+                self._batch = {"_version": self.data_version()}
             try:
                 b = self.get_bot(bid)
                 if what == "run":
@@ -255,6 +258,8 @@ class LabService:
             finally:
                 with self._lock:
                     self._queued.discard((bid, what))
+                    if not self._queued:
+                        self._batch = None  # nothing left to compute: free the memory
 
     def wait(self, timeout: float = 600.0) -> None:
         """Tests and the CLI: block until the worker has nothing left."""
@@ -328,8 +333,10 @@ class LabService:
         st = REGISTRY[b.strategy]
         uni = self.universe()
         syms = sorted(uni["symbols"])
-        pb = PanelBuilder(self._calendar(uni), syms)
+        pb = PanelBuilder(self._calendar(uni), syms, day_trade=st.day_trade)
         p = (b.params or {}) if params is None else params
+        if frames is None and self._batch is not None:
+            frames = self._batch
         for n, sym in enumerate(syms):
             if n % 10 == 0:
                 self._set_status(b.id, state="calculando", msg=f"{label}: {n} de {len(syms)} acciones", done=n,
@@ -346,13 +353,13 @@ class LabService:
                 else (pd.Timestamp(start) if start is not None else None)
             pb.add(sym, bars, sig, start)
             if breadth is not None:
-                breadth.append(self._one_stock(sym, bars, sig, start))
+                breadth.append(self._one_stock(sym, bars, sig, start, st.day_trade))
         return pb.done()
 
     @staticmethod
-    def _one_stock(sym: str, bars: pd.DataFrame, sig: pd.DataFrame, start) -> dict:
+    def _one_stock(sym: str, bars: pd.DataFrame, sig: pd.DataFrame, start, day_trade: bool = False) -> dict:
         window = np.ones(len(bars), bool) if start is None else np.asarray(bars.index >= start)
-        res = _simulate(bars, sig, window, BacktestConfig(initial_capital=CAPITAL))
+        res = _simulate(bars, sig, window, BacktestConfig(initial_capital=CAPITAL), day_trade=day_trade)
         ts = metrics.trade_stats(res.trades)
         eq = res.equity
         hold = buy_and_hold(bars, eq.index[0], eq.index[-1], CAPITAL) if len(eq) else eq
@@ -595,7 +602,7 @@ class LabService:
             rows[b.symbol] = {"close": float(bars["close"].loc[t]), "entry": int(s["entry"]),
                               "exit_long": bool(s["exit_long"]), "exit_short": bool(s["exit_short"]),
                               "rank": float(s["rank"]), "eligible": True,
-                              **{k: float(s[k]) for k in ("stop", "target", "stop_pct", "target_pct", "trail")}}
+                              **{k: float(s[k]) for k in FLOAT_COLUMNS}}
         ranked = [b.symbol] if rows and rows[b.symbol]["entry"] != 0 else []
         return {"rows": rows, "ranked": ranked, "max_positions": 1, "size": (b.size_pct or 100.0) / 100,
                 "last_day": bars.index[-1]}

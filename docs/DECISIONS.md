@@ -187,3 +187,17 @@
     holding periods and sizing ("monkeys", 95% required). A hidden hold-out period was not added: the app shows the
     whole curve, so the out-of-sample proof stays the paper trading from the activation date. With one stock and one
     place the portfolio engine reproduces the single-stock backtester exactly (tested).
+41. **The 20 famous strategies, coded as published.** Chosen for being widely known and having fixed public rules
+    (books, TradingView's built-in strategies, Quantified Strategies, papers); strategies that need data the app does
+    not have (CANSLIM's earnings, IBD's RS rating, Darvas' volume reading) were left out or replaced as noted on their
+    page. Common interpretation: authors who buy "at the close" are filled at the next open, because the signal is
+    only known at the close. Ranking rules for the S&P 500 scanner only when the author gives one (Antonacci's
+    relative momentum, Minervini's relative strength); otherwise the fixed "most liquid first".
+42. **Intraday on daily bars.** Three order types make same-day strategies testable without minute data, each
+    with an Alpaca equivalent documented in the SDK: stop entries (stop order, day), limit-on-open entries (limit +
+    OPG; Alpaca only accepts OPG outside 9:28-19:00 New York, so they wait for that window) and exit at the close
+    (market-on-close, CLS, accepted until 15:50 New York; sent from 15:40). Day-trade entries are simple orders and
+    the protective stop is placed after the fill. This needs the app open during the US session; a missed close is
+    closed at the next open and reported as a deviation. When a bar touches both the entry stop and the protective
+    stop, the stop is assumed hit (the order inside a daily bar is unknown). True intraday strategies on 5-minute bars
+    (opening range breakout, VWAP) need years of minute data, which Yahoo does not provide: not included.

@@ -35,6 +35,9 @@ python -m qsts.cli desktop        # or: python -m qsts.cli serve  ->  http://127
    Keep the app open (or open it before the next open). Every order and fill goes to Telegram.
 5. **Ajustes**: Alpaca paper keys, Telegram bot, data copy between two computers (OneDrive or a file).
 
+It comes with 20 well-known strategies (short-term mean reversion, TradingView's built-in strategies, trend
+following, momentum and three intraday ones on daily bars); every row shows the average holding time.
+
 New strategies are added to `src/qsts/lab/strategies/` (one class per strategy, see `lab/strategy.py`); every
 strategy is automatically tested for look-ahead.
 

@@ -369,3 +369,56 @@ def test_portfolio_bot_buys_the_best_ranked_stocks_up_to_its_places(uworld):
     assert len(curve) == 2 and curve.iloc[0] == pytest.approx(50_000)
     out = tr.deactivate(bot.id)
     assert sorted(out["symbols"]) == ["AAA", "CCC"]
+
+
+class DayTrade(Strategy):
+    key, name = "test_day", "Intradía de prueba"
+    default_symbols = ()
+    universe = False
+    day_trade = True
+    plan: dict = {}
+
+    def signals(self, bars, p):
+        out = pd.DataFrame({"entry": 0}, index=bars.index)
+        for day, row in self.plan.items():
+            t = pd.Timestamp(day, tz="UTC")
+            if t in out.index:
+                for k, v in row.items():
+                    if k not in out:
+                        out[k] = np.nan
+                    out.loc[t, k] = v
+        return out
+
+
+def test_day_trades_close_at_the_close_and_limit_on_open_waits_for_its_window(world):
+    tr, br, sent, lab = world["trader"], world["broker"], world["sent"], world["lab"]
+    REGISTRY["test_day"] = DayTrade()
+    try:
+        bot = lab.create_bot("test_day", "QQQ")
+        tr.activate(bot.id, 10, follow_open=False, now=AFTER_CLOSE)
+        close = float(world["data"]["bars"]["close"].iloc[-1])
+        DayTrade.plan = {"2024-06-03": {"entry": 1, "entry_limit": close * 0.99}}
+        world["data"]["v"] += 1
+        tr.tick(AFTER_CLOSE)  # 17:30 New York: Alpaca refuses opening-auction orders until 19:00
+        assert not br.orders and "19:00" in sent[-1]
+        tr.tick(pd.Timestamp("2024-06-03 23:30", tz="UTC"))  # 19:30 New York: sent, limit-on-open
+        o = br.last(side="buy")
+        assert o["type"] == "limit" and o["time_in_force"] == "opg" and o["req"]["limit_price"] == pytest.approx(close * 0.99)
+        br.fill(o["id"], close * 0.985)
+        br.is_open = True
+        tr.tick(pd.Timestamp("2024-06-04 15:00", tz="UTC"))  # 11:00 New York: holding, nothing to do yet
+        assert not [x for x in br.orders.values() if x["side"] == "sell"]
+        tr.tick(pd.Timestamp("2024-06-04 19:45", tz="UTC"))  # 15:45 New York: market-on-close sell
+        s = br.last(side="sell")
+        assert s["time_in_force"] == "cls" and s["qty"] == o["qty"] and "cierre del día" in sent[-1]
+        br.fill(s["id"], close, at="2024-06-04T20:00:00+00:00")
+        br.is_open = False
+        tr.tick(pd.Timestamp("2024-06-04 20:10", tz="UTC"))
+        assert tr.ledger(lab.get_bot(bot.id), "QQQ")["qty"] == 0 and "Resultado" in sent[-1]
+        # a missed close: the position is closed at the next open and reported
+        o2 = tr._submit(br, lab.get_bot(bot.id), "QQQ", "buy", 5, "entry", None)
+        br.fill(o2.broker_id, close)
+        tr.tick(pd.Timestamp("2024-06-04 23:00", tz="UTC"))
+        assert br.last(side="sell")["time_in_force"] == "day" and "no se cerró" in " ".join(sent[-3:])
+    finally:
+        REGISTRY.pop("test_day", None)

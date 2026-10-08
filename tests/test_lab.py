@@ -213,3 +213,37 @@ def test_library_bots_detail_and_audit(lab):
     assert "golden_cross-zzz" not in {r["id"] for r in lab.library()["rows"]}
     lab.sync()  # a removed bot is not created again
     assert lab.get_bot("golden_cross-zzz").hidden
+
+
+def test_stop_and_limit_on_open_entries_and_day_trades():
+    base = FLAT + [(100, 101, 99, 100)]
+    nan = np.nan
+    # signal at the close of day 4; buy stop at 103: day 5 opens 101 and trades up to 104 -> filled at 103; day trade: out at that day's close (102)
+    sig = {"entry": [0, 0, 0, 1, 0], "entry_stop": [nan, nan, nan, 103, nan]}
+    rows = base + [(101, 104, 100.5, 102)]
+    st = Scripted(sig)
+    st.day_trade = True
+    t = run_backtest(st, bars_from(rows), cfg=NOCOST).trades.iloc[0]
+    assert t["entry_price"] == 103 and t["exit_price"] == 102 and t["reason"] == "close" and t["bars"] == 0
+    # the open gaps above the stop: filled at the open; never reached: no trade
+    r = run_backtest(Scripted(sig), bars_from(base + [(105, 106, 104, 105)]), cfg=NOCOST)
+    assert r.open_trade["entry_price"] == 105
+    r = run_backtest(Scripted(sig), bars_from(base + [(101, 102, 100, 101)]), cfg=NOCOST)
+    assert r.trades.empty and r.open_trade is None
+    # limit-on-open at 99: only if it OPENS at or below 99 (later in the day does not count)
+    lim = {"entry": [0, 0, 0, 1, 0], "entry_limit": [nan, nan, nan, 99, nan]}
+    assert run_backtest(Scripted(lim), bars_from(base + [(100, 101, 97, 98)]), cfg=NOCOST).open_trade is None
+    assert run_backtest(Scripted(lim), bars_from(base + [(98, 101, 97, 100)]), cfg=NOCOST).open_trade["entry_price"] == 98
+
+
+def test_intraday_strategies_match_between_engines():
+    from qsts.lab.portfolio import PanelBuilder, PortfolioConfig, run_portfolio
+    bars = to_canonical(synthetic_daily("2015-01-01", "2019-12-31", seed=8), Timeframe.D1)
+    for key in ("nr7_breakout", "gap_down_fill", "turnaround_tuesday"):
+        st = REGISTRY[key]
+        single = run_backtest(st, bars, cfg=BacktestConfig(initial_capital=10_000))
+        pb = PanelBuilder(bars.index, ["X"], day_trade=st.day_trade)
+        pb.add("X", bars, st.run(bars), None)
+        port = run_portfolio(pb.done(), PortfolioConfig(initial_capital=10_000, max_positions=1))
+        assert len(single.trades) > 10 and (single.trades["bars"] == 0).all()
+        np.testing.assert_allclose(port.trades["pnl"], single.trades["pnl"], rtol=1e-9)

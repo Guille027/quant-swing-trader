@@ -7,7 +7,10 @@ never leave it.
 Behaviour relied on, as documented in the SDK (alpaca-py 0.44, `alpaca.trading.enums`):
 - a `day` order submitted after the close is queued and submitted the following trading day;
 - equities support the order classes simple, bracket (needs take_profit AND stop_loss), oco and oto (needs one of
-  them); fractional quantities only with market orders, so this app always sends whole shares.
+  them); fractional quantities only with market orders, so this app always sends whole shares;
+- time in force `opg` (market/limit on open: only the opening auction; rejected if sent between 9:28 and 19:00
+  New York time, queued for the next opening auction after 19:00) and `cls` (market/limit on close: rejected if
+  sent after 15:50 New York time).
 Not documented there, so handled defensively: exit legs of a bracket follow the parent's time in force (reported by
 users on Alpaca's forum), so protective orders are re-checked every evening and re-sent if missing.
 """
@@ -90,7 +93,8 @@ class AlpacaPaper:
                 "fractionable": bool(a.fractionable)}
 
     def submit(self, req: dict) -> dict:
-        """`req`: symbol, qty (whole shares), side (buy|sell), type (market|stop|limit), time_in_force (day|gtc),
+        """`req`: symbol, qty (whole shares), side (buy|sell), type (market|stop|limit), time_in_force
+        (day|gtc|opg|cls),
         client_order_id, optional order_class (bracket|oco|oto), stop_price, limit_price, take_profit, stop_loss."""
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
         from alpaca.trading.requests import (LimitOrderRequest, MarketOrderRequest, StopLossRequest,
