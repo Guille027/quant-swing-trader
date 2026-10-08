@@ -120,3 +120,37 @@ def test_sp500_portfolio_bots(app, tmp_path):
     ctx.extra["lab"].wait()
     a = c.get("/api/bots/turtle_20_10-sp500/audit").json()
     assert a["verdict"] and "split" in {x["key"] for x in a["checks"]}
+
+
+def test_server_handover_upload_and_automatic_prices(app, tmp_path):
+    c, ctx, broker = app
+    c.post("/api/data/ingest", json={"mode": "symbols", "symbols": ["SPY", "QQQ"]})
+    wait_job(c)
+    c.get("/api/library")  # the default bots exist
+    ctx.extra["downloads_dir"] = tmp_path / "Downloads"
+    (tmp_path / "Downloads").mkdir()
+    # PC: hand paper trading over to the server -> copy in Downloads, trading off here
+    r = c.post("/api/sync/handover").json()
+    assert r["paper_here"] is False and (tmp_path / "Downloads" / "qsts-datos.db.gz").exists()
+    assert "QSTS_PAPER_HERE=false" in (tmp_path / ".env").read_text()
+    ctx.extra["broker_factory"] = lambda: broker
+    assert c.post("/api/bots/connors_rsi2-spy/activate", json={"allocation_pct": 10}).status_code == 400
+    assert "desactivado" in c.post("/api/paper/run").json()["state"]
+    assert c.post("/api/server/update").status_code == 400  # only on the server
+    # server: receives that file through the browser and restarts to load it
+    restarted = []
+    ctx.extra.update(server_mode=True, restart_app=lambda: restarted.append(1))
+    data = (tmp_path / "Downloads" / "qsts-datos.db.gz").read_bytes()
+    r = c.post("/api/sync/upload", content=data, headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 200, r.text
+    assert r.json()["restarting"] and restarted
+    assert c.post("/api/sync/upload", content=b"x").status_code == 400
+    st = c.get("/api/status").json()
+    assert st["server_mode"] is True and st["paper_here"] is False
+    # automatic prices: after a close, stored symbols older than that session are downloaded once
+    tick = ctx.extra["auto_update_tick"]
+    assert tick(pd.Timestamp("2025-01-03 22:00", tz="UTC")) == "started"  # CSV data ends 2024-12-31
+    wait_job(c)
+    assert tick(pd.Timestamp("2025-01-03 22:05", tz="UTC")) is None  # still stale, but retries wait 20 minutes
+    c.post("/api/settings/auto_update", json={"enabled": False})
+    assert tick(pd.Timestamp("2025-01-03 23:00", tz="UTC")) is None

@@ -74,9 +74,11 @@ def money(x: float | None) -> str:
 class PaperTrader:
     def __init__(self, sf, lab, broker: Callable[[], object | None], telegram: Callable[[], object | None] | None = None,
                  refresh: Callable[[list[str]], bool] | None = None, data_busy: Callable[[], bool] | None = None,
-                 delay_min: int = 45, blocked: Callable[[], str | None] | None = None):
+                 delay_min: int = 45, blocked: Callable[[], str | None] | None = None,
+                 enabled: Callable[[], bool] | None = None):
         self.sf, self.lab, self.broker, self.telegram = sf, lab, broker, telegram
         self.refresh, self.data_busy, self.delay_min, self.blocked = refresh, data_busy, delay_min, blocked
+        self.enabled = enabled or (lambda: True)
         self.state = "parado"
         self.logs: deque[str] = deque(maxlen=100)
         self._attempts: dict = {}
@@ -253,6 +255,9 @@ class PaperTrader:
                 raise ValueError("este bot ya está en paper trading")
             if not 1 <= allocation_pct <= 100:
                 raise ValueError("la parte de la cuenta debe estar entre 1 y 100%")
+            if not self.enabled():
+                raise ValueError("en este ordenador el paper trading está desactivado (lo hace el servidor): "
+                                 "actívalo desde la app del servidor")
             broker = self.broker()
             if broker is None:
                 raise ValueError("conecta primero tu cuenta paper de Alpaca (Ajustes)")
@@ -302,6 +307,9 @@ class PaperTrader:
             b = self.lab.get_bot(bid)
             if b.paper_status != "active":
                 raise ValueError("este bot no está en paper trading")
+            if not self.enabled():  # the server owns these orders: touching them from here would undo its work
+                raise ValueError("en este ordenador el paper trading está desactivado (lo hace el servidor): "
+                                 "detén el bot desde la app del servidor")
             broker = self.broker()
             closed = []
             if broker is not None:
@@ -459,6 +467,9 @@ class PaperTrader:
             return self._tick(now or pd.Timestamp.now(tz="UTC"))
 
     def _tick(self, now: pd.Timestamp) -> str:
+        if not self.enabled():
+            self.state = "desactivado en este ordenador (el paper trading lo hace el servidor)"
+            return self.state
         bots = self.active_bots()
         if not bots:
             self.state = "sin bots en paper trading"

@@ -516,7 +516,49 @@ $("#d-add").onclick = () => ingest({ mode: "symbols", symbols: $("#d-symbols").v
 $("#d-sp").onclick = () => { if (confirm("Descargar ~500 acciones del S&P 500 desde 2010 (unos minutos). ¿Continuar?")) ingest({ mode: "sp500" }); };
 
 // ---------------------------------------------------------------- settings
-async function loadSettings() { loadAlpaca(); loadTelegram(); loadSync(); }
+async function loadSettings() { loadAlpaca(); loadTelegram(); loadSync(); loadServer(); }
+async function loadServer() {
+  let s; try { s = await api("/api/status"); } catch (e) { $("#sv-msg").textContent = e.message; return; }
+  $("#sv-where").innerHTML = s.server_mode ? '<span class="good">✔ Estás en la app del <b>servidor</b> (funciona 24/7).</span>'
+    : "Estás en la app de <b>tu ordenador</b>. La guía para montar el servidor gratis está en <code>docs/SERVIDOR.md</code>.";
+  $("#sv-paper").checked = !!s.paper_here; $("#sv-auto").checked = !!s.auto_update;
+  $("#sv-pc").style.display = s.server_mode || !s.paper_here ? "none" : "block";
+  $("#sv-srv").style.display = s.server_mode ? "block" : "none";
+  $("#sync-card").style.display = s.server_mode ? "none" : "";
+}
+$("#sv-paper").onchange = async () => {
+  const on = $("#sv-paper").checked;
+  if (on && !confirm("¿Seguro? Si el servidor también hace paper trading, las órdenes se duplicarían.")) { $("#sv-paper").checked = false; return; }
+  try { const r = await post("/api/settings/paper_here", { enabled: on }); $("#sv-msg").textContent = "Paper trading en este equipo: " + (on ? "activado." : "desactivado.") + " " + r.state; }
+  catch (e) { $("#sv-msg").textContent = e.message; } loadServer();
+};
+$("#sv-auto").onchange = async () => { try { await post("/api/settings/auto_update", { enabled: $("#sv-auto").checked }); $("#sv-msg").textContent = "Guardado."; } catch (e) { $("#sv-msg").textContent = e.message; } };
+$("#sv-handover").onclick = async () => {
+  if (!confirm("Se guardará una copia de todo en tu carpeta de Descargas y ESTE ordenador dejará de mandar órdenes a Alpaca (lo hará el servidor). ¿Continuar?")) return;
+  $("#sv-msg").textContent = "Guardando copia…";
+  try { const r = await post("/api/sync/handover"); $("#sv-msg").innerHTML = `<span class="good">Listo.</span> Copia guardada en <b>${esc(r.path)}</b>. Ahora abre la app del servidor → Ajustes → «Cargar estos datos» y elige ese archivo.`; }
+  catch (e) { $("#sv-msg").textContent = e.message; } loadServer();
+};
+async function waitBack() {
+  for (let i = 0; i < 90; i++) { await new Promise(r => setTimeout(r, 3000)); try { await api("/api/ping"); location.reload(); return; } catch (e) { /* still restarting */ } }
+  $("#sv-msg").textContent = "El servidor tarda en volver; recarga la página en un rato.";
+}
+$("#sv-upload").onclick = async () => {
+  const f = $("#sv-file").files[0]; if (!f) { $("#sv-msg").textContent = "Elige primero el archivo qsts-datos.db.gz"; return; }
+  if (!confirm("Los datos del servidor se sustituirán por los de ese archivo (se guarda una copia de seguridad). ¿Continuar?")) return;
+  $("#sv-msg").textContent = `Subiendo ${nf(f.size / 1e6, 0)} MB…`;
+  const send = (force) => fetch("/api/sync/upload" + (force ? "?force=true" : ""), { method: "POST", body: f, headers: { "Content-Type": "application/octet-stream" } });
+  try {
+    let r = await send(false);
+    if (r.status === 409) { const d = await r.json(); if (!/MENOS datos/.test(d.detail) || !confirm(d.detail + "\n\n¿Cargarlo igualmente?")) throw new Error(d.detail); r = await send(true); }
+    if (!r.ok) throw new Error((await r.json()).detail);
+    $("#sv-msg").textContent = "Subido. El servidor se está reiniciando con tus datos…"; waitBack();
+  } catch (e) { $("#sv-msg").textContent = e.message; }
+};
+$("#sv-update").onclick = async () => {
+  $("#sv-msg").textContent = "Descargando la última versión (puede tardar unos minutos)…";
+  try { await post("/api/server/update"); $("#sv-msg").textContent = "Actualizado. Reiniciando…"; waitBack(); } catch (e) { $("#sv-msg").textContent = e.message; }
+};
 async function loadAlpaca() {
   let a; try { a = await api("/api/alpaca"); } catch (e) { $("#al-status").textContent = e.message; return; }
   $("#al-status").classList.remove("muted");
@@ -585,6 +627,7 @@ $("#sync-load").onclick = () => loadCopy("/api/sync/load");
 $("#sync-load-file").onclick = () => loadCopy("/api/sync/load_file");
 
 // ---------------------------------------------------------------- start
-api("/api/status").then(s => { $("#foot").innerHTML = `Versión ${esc((s.code_version || "").slice(0, 7))} · paper trading: ${esc(s.trader)} · ` +
+api("/api/status").then(s => { $("#foot").innerHTML = `Versión ${esc((s.code_version || "").slice(0, 7))}${s.server_mode ? " · <b>servidor 24/7</b>" : ""} · paper trading: ${esc(s.trader)} · ` +
+  (s.auto_update_state ? `precios: ${esc(s.auto_update_state)} · ` : "") +
   `Herramienta de investigación: los backtests no garantizan resultados futuros. Solo dinero ficticio (cuenta paper de Alpaca).`; }).catch(() => {});
 route();

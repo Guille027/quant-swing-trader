@@ -201,3 +201,12 @@
     closed at the next open and reported as a deviation. When a bar touches both the entry stop and the protective
     stop, the stop is assumed hit (the order inside a daily bar is unknown). True intraday strategies on 5-minute bars
     (opening range breakout, VWAP) need years of minute data, which Yahoo does not provide: not included.
+43. **24/7 on a free server, private by design.** The user wanted the app running without the PC. Chosen: an
+    Oracle Cloud Always Free machine set up entirely by a cloud-init script (no terminal needed), the app bound to
+    127.0.0.1 and reached only through Tailscale (`tailscale serve --http=80`), so nothing is exposed to the
+    internet and the app needs no login of its own. Exactly one computer may send orders: a per-computer switch
+    (`QSTS_PAPER_HERE`); handing over from the PC saves the copy and turns trading off there in one step, and a
+    computer with trading off refuses to activate or stop bots (it would cancel the server's orders). Keys are not
+    in the copy; they are entered again on the server. Prices are downloaded automatically after each close
+    (close + delay, up to 3 tries) on any computer running the app. Alternatives rejected: GitHub Actions (start
+    times not guaranteed, state between runs), the phone (background apps are killed).

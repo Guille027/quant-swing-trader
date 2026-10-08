@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     alpaca_secret_key: SecretStr | None = None
     # paper trading: minutes after the NYSE close before the day's signals (the vendor publishes the bar)
     daily_report_delay_min: int = 45
+    # this computer runs the paper trader (turned off on the PC when the 24/7 server does it, never both)
+    paper_here: bool = True
+    # download the day's prices by itself after each US close (while the app or the server is running)
+    auto_update: bool = True
 
     @model_validator(mode="after")
     def _check_environment_separation(self) -> "Settings":

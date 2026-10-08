@@ -206,6 +206,25 @@
     </div>
     <div class="row"><button id="tg-test" class="btn ghost">Enviar mensaje de prueba</button> <span id="tg-msg" class="muted"></span></div>
   </div>
+  <div class="card" id="server-card"><h3>Servidor 24/7 (Oracle Cloud)</h3>
+    <p id="sv-where" class="small"></p>
+    <label class="small"><input type="checkbox" id="sv-paper"> <b>Este equipo hace el paper trading</b> (manda las órdenes a Alpaca).
+      Solo uno debe hacerlo: el servidor <i>o</i> el ordenador, nunca los dos.</label>
+    <div id="sv-pc" style="display:none">
+      <p class="small">¿Ya tienes el servidor funcionando? Pasa tus datos y bots al servidor: se guarda una copia en tu carpeta de
+        Descargas y este ordenador deja de mandar órdenes. Luego abre la app del servidor (Ajustes) y sube ese archivo.</p>
+      <button id="sv-handover" class="btn primary">Pasar el paper trading al servidor</button>
+    </div>
+    <div id="sv-srv" style="display:none">
+      <p class="small"><b>Cargar los datos del ordenador:</b> elige el archivo <code>qsts-datos.db.gz</code> que guardaste en tu ordenador
+        (botón «Pasar el paper trading al servidor»). El servidor se reinicia con esos datos (un minuto).</p>
+      <div class="row"><input type="file" id="sv-file" accept=".gz"><button id="sv-upload" class="btn primary">Cargar estos datos</button></div>
+      <p class="small"><button id="sv-update" class="btn ghost">Actualizar el servidor a la última versión</button></p>
+    </div>
+    <label class="small"><input type="checkbox" id="sv-auto"> Descargar los precios solos cada día después del cierre de Wall Street
+      (hacia las 22:45 de España, mientras la app o el servidor estén funcionando)</label>
+    <p id="sv-msg" class="small"></p>
+  </div>
   <div class="card" id="sync-card"><h3>Usar QSTS en varios ordenadores (OneDrive)</h3>
     <div id="sync-body" class="muted">Cargando…</div>
     <div id="sync-setup" style="display:none">

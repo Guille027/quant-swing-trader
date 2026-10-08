@@ -3,6 +3,7 @@
   qsts ingest   --provider yahoo|csv [--root DIR] --symbols AAPL,MSFT --start 2010-01-01 [--end ...]
   qsts serve    [--port 8765]            # backend + UI in the browser (127.0.0.1 only)
   qsts desktop                            # same, in a native window if pywebview is installed
+  qsts server   [--port 8765]            # 24/7 server (Oracle Cloud): no window, restarts itself to load data
   qsts shortcut                           # Windows: desktop/Start-menu shortcut that opens the app
   qsts backtest --strategy connors_rsi2 --symbol SPY   # one backtest in the terminal
   qsts strategies                         # the strategies in the library
@@ -51,6 +52,25 @@ def cmd_serve(args, ctx):
     uvicorn.run(create_app(ctx), host="127.0.0.1", port=args.port, log_level="warning")
 
 
+def cmd_server(args, ctx):
+    """Headless mode for an always-on server (see docs/SERVIDOR.md). Bound to 127.0.0.1 only: it is reached
+    through Tailscale ('tailscale serve'), never opened to the internet. systemd restarts it when it exits, which
+    is how a data copy uploaded from the PC is loaded and how an update takes effect."""
+    import threading
+
+    import uvicorn
+    from qsts.api.server import create_app
+    server = uvicorn.Server(uvicorn.Config(create_app(ctx), host="127.0.0.1", port=args.port, log_level="info"))
+
+    def restart():
+        threading.Timer(1.5, lambda: setattr(server, "should_exit", True)).start()
+    ctx.extra.update(server_mode=True, restart_app=restart, shutdown=lambda: setattr(server, "should_exit", True))
+    if ctx.extra.get("sync_loaded"):
+        print(f"loaded the data copy from {ctx.extra['sync_loaded'].get('machine')}")
+    print(f"QSTS server on http://127.0.0.1:{args.port}")
+    server.run()
+
+
 def cmd_desktop(args, ctx):
     from qsts.app.launcher import main as launch
     launch(args.port)
@@ -86,7 +106,7 @@ def main(argv=None):
     s.add_argument("--symbols", required=True)
     s.add_argument("--start", default="2010-01-01")
     s.add_argument("--end")
-    for name in ("serve", "desktop"):
+    for name in ("serve", "desktop", "server"):
         s = sub.add_parser(name)
         s.add_argument("--port", type=int, default=8765)
     sub.add_parser("shortcut", help="crea el acceso directo QSTS en el escritorio (Windows)")
@@ -96,7 +116,7 @@ def main(argv=None):
     s.add_argument("--symbol", required=True)
     args = p.parse_args(argv)
     ctx = build_context()
-    {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "shortcut": cmd_shortcut,
+    {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "server": cmd_server, "shortcut": cmd_shortcut,
      "strategies": cmd_strategies, "backtest": cmd_backtest}[args.cmd](args, ctx)
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, SecretStr
@@ -28,7 +28,7 @@ from qsts.lab import metrics as lab_metrics
 from qsts.data.bars import Timeframe
 from qsts.lab.service import CAPITAL, UNIVERSE, LabService, is_universe
 from qsts.lab.strategy import REGISTRY
-from qsts.lab.trader import PaperTrader
+from qsts.lab.trader import PaperTrader, due_session
 from qsts.notify.telegram import Telegram, TelegramError
 
 STATIC = Path(__file__).resolve().parent.parent / "ui" / "static"
@@ -77,6 +77,10 @@ class ActivateBody(BaseModel):
     follow_open: bool = True
 
 
+class FlagBody(BaseModel):
+    enabled: bool
+
+
 class DeactivateBody(BaseModel):
     close: bool = True
 
@@ -108,6 +112,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def lifespan(_app):
         if ctx.extra.get("trader_autostart", True):
             _trader().start()  # paper trading of the active bots, every couple of minutes while the app is open
+            threading.Thread(target=_auto_update_loop, daemon=True, name="auto-update").start()
         yield
         tr = ctx.extra.get("trader")
         if tr is not None:
@@ -144,6 +149,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     def status():
         tr = _trader()
         return _j({"code_version": ctx.extra.get("code_version"), "alpaca": _alpaca_configured(),
+                   "server_mode": bool(ctx.extra.get("server_mode")), "paper_here": bool(ctx.settings.paper_here),
+                   "auto_update": bool(ctx.settings.auto_update), "auto_update_state": ctx.extra.get("auto_update_msg"),
                    "telegram": _telegram() is not None, "trader": tr.state,
                    "paper_bots": len(tr.active_bots()), "data_job": _data_runner().state.running})
 
@@ -338,7 +345,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 refresh=lambda syms: _data_runner().start("bots", syms, "2010-01-01", incremental=True,
                                                          earnings=False),
                 data_busy=lambda: _data_runner().state.running, delay_min=ctx.settings.daily_report_delay_min,
-                blocked=_sync_block_reason)
+                blocked=_sync_block_reason, enabled=lambda: bool(ctx.settings.paper_here))
         return tr
 
     @app.get("/api/alpaca")
@@ -404,6 +411,124 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(404, "bot desconocido")
         except (ValueError, BrokerError) as e:
             raise HTTPException(400, str(e))
+
+    # ------------------------------------------------------------------ running 24/7 (server) and automatic prices
+    def auto_update_tick(now: pd.Timestamp | None = None) -> str | None:
+        """After each US close (+ the trader's delay), download the new day's prices of every stored stock that is
+        still trading, so nothing depends on remembering it. Up to 3 tries, 20 minutes apart."""
+        if not ctx.settings.auto_update:
+            return None
+        now = now or pd.Timestamp.now(tz="UTC")
+        due = due_session(now, ctx.settings.daily_report_delay_min)
+        st = ctx.extra.setdefault("auto_update", {})
+        if st.get("day") != str(due.date()):
+            st.clear()
+            st["day"] = str(due.date())
+        if st.get("done") or _data_runner().state.running:
+            return None
+        cov = ctx.repo.coverage(Timeframe.D1)
+        live = [s for s, c in cov.items() if c["last"] >= due - pd.Timedelta(days=10)]
+        stale = sorted(s for s in live if cov[s]["last"] < due)
+        if not stale:
+            st["done"] = True
+            ctx.extra["auto_update_msg"] = f"precios al día (cierre del {due.date()})"
+            return None
+        tries, last = st.get("tries", 0), st.get("last")
+        if tries >= 3 or (last is not None and now - last < pd.Timedelta(minutes=20)):
+            return None
+        if _data_runner().start("auto", stale, "2010-01-01", incremental=True, earnings=False):
+            st.update(tries=tries + 1, last=now)
+            ctx.extra["auto_update_msg"] = f"descargando los precios del {due.date()} ({len(stale)} valores)"
+            return "started"
+        return None
+
+    def _auto_update_loop():
+        import time
+        time.sleep(60)  # let the app finish starting
+        while True:
+            try:
+                auto_update_tick()
+            except Exception as e:  # noqa: BLE001 - never takes the app down
+                ctx.extra["auto_update_msg"] = f"error en la descarga automática: {e!r}"[:200]
+            time.sleep(600)
+
+    ctx.extra["auto_update_tick"] = auto_update_tick
+
+    @app.post("/api/settings/paper_here")
+    def set_paper_here(body: FlagBody):
+        _save_env({"QSTS_PAPER_HERE": "true" if body.enabled else "false"})
+        ctx.settings.paper_here = body.enabled
+        return {"paper_here": body.enabled, "state": _trader().tick()}
+
+    @app.post("/api/settings/auto_update")
+    def set_auto_update(body: FlagBody):
+        _save_env({"QSTS_AUTO_UPDATE": "true" if body.enabled else "false"})
+        ctx.settings.auto_update = body.enabled
+        return {"auto_update": body.enabled}
+
+    @app.post("/api/sync/handover")
+    def sync_handover():
+        """PC side: save a copy of everything to Downloads (to upload it to the server) and stop paper trading here,
+        so the server is the only one sending orders."""
+        _check_idle()
+        try:
+            meta = sync.export_to_file(_db(), ctx.settings.state_dir, ctx.extra.get("downloads_dir"),
+                                       code_version=ctx.extra.get("code_version"))
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409 if isinstance(e, sync.SyncError) else 400, str(e))
+        _save_env({"QSTS_PAPER_HERE": "false"})
+        ctx.settings.paper_here = False
+        return _j({**meta, "paper_here": False})
+
+    @app.post("/api/sync/upload")
+    async def sync_upload(request: Request, force: bool = False):
+        """Server side: receives the copy saved on the PC (the browser sends the file as the request body) and loads
+        it by restarting (systemd starts the server again with the new data)."""
+        _check_idle()
+        dest = Path(ctx.settings.state_dir) / "subida-qsts-datos.db.gz"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with open(dest, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                f.write(chunk)
+        if size < 100:
+            raise HTTPException(400, "el archivo está vacío")
+        try:
+            meta = sync.stage_import_file(dest, ctx.settings.state_dir)
+        except (sync.SyncError, OSError) as e:
+            raise HTTPException(409, str(e))
+        finally:
+            dest.unlink(missing_ok=True)
+        rs, ls = meta.get("summary") or {}, sync.summary(_db()) if _db().exists() else {}
+        if sync.smaller_than_local(rs, _db()) and not force:
+            sync.discard_pending(ctx.settings.state_dir)
+            raise HTTPException(409, _less(rs, ls, "ese archivo"))
+        restart = ctx.extra.get("restart_app")
+        if restart is not None:
+            restart()
+        return _j({"staged": meta, "restarting": restart is not None})
+
+    @app.post("/api/server/update")
+    def server_update():
+        """Server only: download the latest version (git pull + install) and restart."""
+        if not ctx.extra.get("server_mode"):
+            raise HTTPException(400, "en el ordenador se actualiza con 'Actualizar QSTS.bat'")
+        _check_idle()
+        import subprocess
+        import sys as _sys
+        root = Path(__file__).resolve().parents[3]
+        out = []
+        for cmd in (["git", "pull", "--ff-only"],
+                    [_sys.executable, "-m", "pip", "install", "-q", "-e", ".[ui,yahoo,alpaca]"]):
+            r = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=900)
+            out.append((r.stdout + r.stderr)[-1500:])
+            if r.returncode != 0:
+                raise HTTPException(500, "no se pudo actualizar: " + out[-1])
+        restart = ctx.extra.get("restart_app")
+        if restart is not None:
+            restart()
+        return {"updated": True, "log": out, "restarting": restart is not None}
 
     # ------------------------------------------------------------------ market data ("Datos")
     def _invalidate_views():

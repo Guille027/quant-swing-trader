@@ -18,6 +18,10 @@ python -m qsts.cli desktop        # or: python -m qsts.cli serve  ->  http://127
 - Updates: close QSTS and double-click **`Actualizar QSTS.bat`**; the version is shown at the bottom of the app.
 - Logs: `var/desktop.log`. If QSTS cannot open, the window shows why.
 
+## Running it 24/7
+A free Oracle Cloud machine can run QSTS all day (prices, orders, Telegram) while your PC is off; you open it from
+your phone or PC through Tailscale. Step-by-step guide in Spanish: `docs/SERVIDOR.md`.
+
 ## Using it
 1. **Datos**: download prices (the S&P 500 or the symbols you want). The library offers to download what is missing.
 2. **Biblioteca**: every row is a *bot*: a strategy as an **S&P 500 portfolio** (every day it scans the index and

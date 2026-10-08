@@ -37,6 +37,13 @@ and simulation were removed (they remain in the git history).
 - [x] Telegram message for every order sent and every fill (stop / target / exit with the trade's result)
 - [ ] Checked against the real Alpaca paper account (needs the user's keys; not reachable from the build environment)
 
+### Running 24/7
+- [x] `qsts server` (headless, 127.0.0.1, restarted by systemd), cloud-init script for an Oracle Cloud Always Free
+      Ubuntu 24.04 machine with private access through Tailscale (`deploy/oracle/`, guide in `docs/SERVIDOR.md`)
+- [x] Hand-over from the PC (copy + paper trading off there), upload of the copy from the browser, self-update
+      button, per-computer "paper trading here" switch, automatic daily price download after each close
+- [ ] Tried on a real Oracle machine (needs the user's accounts)
+
 ### App
 - [x] New UI: library with sparklines, 7/30/90-day pills, advanced search; bot page with metrics (backtest / paper),
       equity curve, tabs (performance, trades, monthly P&L, Monte Carlo, audit, paper log), comparison, report
