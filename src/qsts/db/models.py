@@ -154,6 +154,9 @@ class LabBot(Base):
     stop_level: Mapped[float | None] = mapped_column(Float)    # protective stop of the open paper position
     target_level: Mapped[float | None] = mapped_column(Float)  # profit target of the open paper position
     pending: Mapped[dict | None] = mapped_column(JSON)  # an entry waiting for the next open (after a reversal...)
+    kind: Mapped[str | None] = mapped_column(String(16))  # "stock" (None) | "universe" (S&P 500 scanner)
+    max_positions: Mapped[int | None] = mapped_column(Integer)  # universe bots: positions at a time (<= 5)
+    book: Mapped[dict | None] = mapped_column(JSON)  # paper state per stock: {symbol: {stop, target, pending}}
 
 
 class LabOrder(Base):

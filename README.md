@@ -20,11 +20,16 @@ python -m qsts.cli desktop        # or: python -m qsts.cli serve  ->  http://127
 
 ## Using it
 1. **Datos**: download prices (the S&P 500 or the symbols you want). The library offers to download what is missing.
-2. **Biblioteca**: every row is a *bot* (a strategy on one stock): equity sparkline, 7/30/90-day and total return,
+2. **Biblioteca**: every row is a *bot*: a strategy as an **S&P 500 portfolio** (every day it scans the index and
+   holds at most 5 stocks, best-ranked signals first: the author's rule or "most liquid first") or on **one stock**.
+   Equity sparkline, 7/30/90-day and total return,
    win rate, profit factor. Search like `spy pf>1.5 win>55 dd<20 p90>5 sharpe>0.8 paper`. "Probar en otra acción"
    creates a bot on any stock.
 3. **A bot's page**: metrics (backtest / paper), equity curve against buy & hold, performance metrics, trades, monthly
-   P&L, Monte Carlo, **Auditoría** (nine honest checks), comparison and a TradingView-style report.
+   P&L, Monte Carlo, **Auditoría** (honest checks; portfolio bots add "works on most stocks", "both halves of the
+   stocks" and "beats random portfolios"), comparison and a TradingView-style report. Portfolio bots also show
+   **Hoy y mañana** (open positions, what it would sell and buy at the next open) and **Por acción** (the strategy on
+   each stock alone).
 4. **Activar en paper**: choose the share of your Alpaca paper account. After each US close (22:00 Spain) the app
    downloads the prices, computes the signals and leaves the orders for the next open; stops/targets rest at Alpaca.
    Keep the app open (or open it before the next open). Every order and fill goes to Telegram.

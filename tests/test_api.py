@@ -1,6 +1,7 @@
 """The app's API end to end with SYNTHETIC prices (CSV provider) and a FAKE Alpaca (no network)."""
 import time
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -43,7 +44,9 @@ def test_library_detail_and_audit(app):
     assert c.post("/api/data/ingest", json={"mode": "symbols", "symbols": lib["missing"]}).json()["started"]
     wait_job(c)
     lib = c.get("/api/library").json()
-    assert not lib["missing"] and all("error" not in r for r in lib["rows"]) and lib["n_strategies"] >= 3
+    assert not lib["missing"] and lib["n_strategies"] >= 3
+    assert all("error" not in r for r in lib["rows"] if r["kind"] == "stock")
+    assert lib["need_universe"]  # the S&P 500 portfolio bots wait for the S&P 500 prices
     r = c.post("/api/bots", json={"strategy": "golden_cross", "symbol": "aapl"}).json()
     assert r["id"] == "golden_cross-aapl" and r["downloading"] is True  # no prices yet: downloaded at once
     wait_job(c)
@@ -84,3 +87,36 @@ def test_alpaca_keys_paper_trading_and_stop_all(app, tmp_path):
     assert [x["bot"] for x in out["stopped"]] == ["connors_rsi2-spy"]
     assert c.get("/api/bots/connors_rsi2-spy").json()["bot"]["paper_status"] == "stopped"
     assert c.post("/api/bots/connors_rsi2-spy/deactivate", json={}).status_code == 400
+
+
+def test_sp500_portfolio_bots(app, tmp_path):
+    from qsts.data.universe import UniverseList
+    c, ctx, _ = app
+    root = tmp_path / "csv" / "1d"
+    names = ["AAA", "BBB", "CCC", "DDD"]
+    for i, s in enumerate(names):
+        d = synthetic_daily("2012-01-01", "2024-12-31", seed=30 + i)
+        d.index.name = "ts"
+        d.to_csv(root / f"{s}.csv")
+    members = pd.DataFrame({"symbol": names, "name": names, "sector": ["Tech"] * 4,
+                            "date_added": pd.to_datetime(["1990-01-01", "2015-06-01", "2000-01-01", "2010-01-01"])})
+    ctx.extra["sp500_fetcher"] = lambda: UniverseList("SP500", "test", "2024-12-31T00:00:00+00:00", members)
+    assert c.post("/api/data/ingest", json={"mode": "sp500"}).json()["started"]
+    wait_job(c)
+    rows = [r for r in c.get("/api/library").json()["rows"] if r["kind"] == "universe"]
+    assert rows and all("computing" in r for r in rows)
+    ctx.extra["lab"].wait()
+    lib = c.get("/api/library").json()
+    assert lib["universe"] == {"n_symbols": 4, "dated": True}
+    row = next(r for r in lib["rows"] if r["id"] == "connors_rsi2-sp500")
+    assert row["symbol"] == "S&P 500" and row["n_trades"] > 0 and row["max_positions"] == 5
+    d = c.get("/api/bots/connors_rsi2-sp500").json()
+    assert d["breadth"]["summary"]["n_symbols"] == 4 and "next" in d and d["hold"]
+    assert all(t["entry"] >= "2015-06-01" for t in d["trades"] if t["symbol"] == "BBB")  # only once in the index
+    r = c.post("/api/bots", json={"strategy": "golden_cross", "symbol": "SP500", "max_positions": 3}).json()
+    assert r["id"] == "golden_cross-sp500-3pos"
+    assert c.post("/api/bots", json={"strategy": "golden_cross", "symbol": "SP500", "max_positions": 8}).status_code == 400
+    assert "computing" in c.get("/api/bots/turtle_20_10-sp500/audit").json()
+    ctx.extra["lab"].wait()
+    a = c.get("/api/bots/turtle_20_10-sp500/audit").json()
+    assert a["verdict"] and "split" in {x["key"] for x in a["checks"]}

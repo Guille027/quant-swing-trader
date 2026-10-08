@@ -254,6 +254,118 @@ def test_follow_the_backtest_position_on_activation(world):
     tr, br, bot = world["trader"], world["broker"], world["bot"]
     Toggle.plan = {"2024-05-01": {"entry": 1}}  # the backtest is long since May
     tr.activate(bot.id, 10, follow_open=True)
-    assert tr.lab.get_bot(bot.id).pending["direction"] == 1
+    assert tr.book(tr.lab.get_bot(bot.id))["SPY"]["pending"]["direction"] == 1
     tr.tick(AFTER_CLOSE)
-    assert br.last(side="buy")["qty"] > 0 and tr.lab.get_bot(bot.id).pending is None
+    assert br.last(side="buy")["qty"] > 0 and not tr.book(tr.lab.get_bot(bot.id)).get("SPY", {}).get("pending")
+
+
+class Multi(Strategy):
+    """Test strategy for portfolio bots: per-stock signals by date ({symbol: {day: {column: value}}})."""
+    key, name = "test_multi", "Escáner de prueba"
+    default_symbols = ()
+    universe = False
+    plan: dict = {}
+    ranks: dict = {}
+
+    def signals(self, bars, p):
+        out = pd.DataFrame({"entry": 0, "exit": False}, index=bars.index)
+        for day, row in self.plan.get(bars.attrs.get("symbol"), {}).items():
+            t = pd.Timestamp(day, tz="UTC")
+            if t in out.index:
+                for k, v in row.items():
+                    out.loc[t, k] = v
+        return out
+
+    def rank(self, bars, p):
+        return pd.Series(self.ranks.get(bars.attrs.get("symbol"), 0.0), index=bars.index, dtype=float)
+
+
+@pytest.fixture
+def uworld(sf, tmp_path):
+    REGISTRY["test_multi"] = Multi()
+    REGISTRY["test_toggle"] = Toggle()
+    Multi.plan, Multi.ranks = {}, {"AAA": 2.0, "BBB": 1.0, "CCC": 3.0}
+    data = {"v": 1, "frames": {}}
+    for i, s in enumerate(["AAA", "BBB", "CCC"]):
+        df = to_canonical(synthetic_daily("2023-01-03", "2024-06-03", seed=20 + i), Timeframe.D1)
+        df.attrs["symbol"] = s
+        data["frames"][s] = df
+
+    def frame(s):
+        if s not in data["frames"]:
+            raise KeyError(s)
+        return data["frames"][s]
+
+    def universe():
+        f = data["frames"]
+        return {"symbols": {s: None for s in f}, "dated": True, "first": {s: f[s].index[0] for s in f},
+                "last": {s: f[s].index[-1] for s in f}}
+    lab = LabService(sf, frame, lambda s: (data["v"],), universe=universe, data_version=lambda: (data["v"],))
+    broker, sent = FakeAlpaca(), []
+
+    class Tg:
+        def send(self, text):
+            sent.append(text)
+    trader = PaperTrader(sf, lab, lambda: broker, lambda: Tg(), refresh=lambda syms: True)
+    bot = lab.create_bot("test_multi", "SP500", max_positions=2)
+    yield {"lab": lab, "trader": trader, "broker": broker, "sent": sent, "bot": bot, "data": data}
+    REGISTRY.pop("test_multi", None)
+    REGISTRY.pop("test_toggle", None)
+
+
+def uplan(w, plan):
+    Multi.plan = plan
+    w["data"]["v"] += 1
+
+
+def uadd_day(w, day):
+    t = pd.Timestamp(day, tz="UTC")
+    for s, bars in list(w["data"]["frames"].items()):
+        c = float(bars["close"].iloc[-1])
+        row = pd.DataFrame({"open": c, "high": c * 1.01, "low": c * 0.99, "close": c, "volume": 1e6},
+                           index=pd.DatetimeIndex([t], name="ts"))
+        df = pd.concat([bars, to_canonical(row, Timeframe.D1)])
+        df.attrs["symbol"] = s
+        w["data"]["frames"][s] = df
+    w["data"]["v"] += 1
+
+
+def test_portfolio_bot_buys_the_best_ranked_stocks_up_to_its_places(uworld):
+    tr, br, sent, bot, lab = uworld["trader"], uworld["broker"], uworld["sent"], uworld["bot"], uworld["lab"]
+    tr.activate(bot.id, 50, follow_open=False, now=AFTER_CLOSE)
+    uplan(uworld, {s: {"2024-06-03": {"entry": 1}} for s in ("AAA", "BBB", "CCC")})
+    assert "calculando" in tr.tick(AFTER_CLOSE) and not br.orders  # the scanner is recomputed with the new close
+    lab.wait()
+    tr.tick(AFTER_CLOSE)
+    buys = [o for o in br.orders.values() if o["side"] == "buy"]
+    assert sorted(o["symbol"] for o in buys) == ["AAA", "CCC"]  # 2 places: ranks 3 (CCC) and 2 (AAA)
+    for o in buys:  # each place gets half of the bot's 50,000
+        close = float(uworld["data"]["frames"][o["symbol"]]["close"].iloc[-1])
+        assert o["qty"] == int(25_000 // close)
+    assert "COMPRA" in sent[-1] and "S&P 500" in sent[-1]
+    for o in buys:
+        br.fill(o["id"], float(uworld["data"]["frames"][o["symbol"]]["close"].iloc[-1]))
+    tr.tick(NEXT_DAY_OPEN)
+    assert sum("Ejecutada" in x for x in sent) == 2
+    assert sorted(tr.summary(lab.get_bot(bot.id))["positions"]) == ["AAA", "CCC"]
+    # a stock bot cannot be activated on a stock the portfolio bot holds
+    single = lab.create_bot("test_toggle", "CCC")
+    with pytest.raises(ValueError, match="misma acción"):
+        tr.activate(single.id, 10)
+    # next close: AAA exits, BBB signals again -> AAA sold and BBB bought in the freed place
+    uadd_day(uworld, "2024-06-04")
+    uplan(uworld, {"AAA": {"2024-06-03": {"entry": 1}, "2024-06-04": {"exit": True}},
+                   "BBB": {"2024-06-03": {"entry": 1}, "2024-06-04": {"entry": 1}},
+                   "CCC": {"2024-06-03": {"entry": 1}}})
+    br.is_open = False
+    later = pd.Timestamp("2024-06-04 21:30", tz="UTC")
+    tr.tick(later)
+    lab.wait()
+    tr.tick(later)
+    assert br.last(side="sell")["symbol"] == "AAA" and br.last(side="buy")["symbol"] == "BBB"
+    d = lab.detail(bot.id)
+    assert d["bot"]["kind"] == "universe" and d["config"]["max_positions"] == 2
+    curve = tr.live_curve(lab.get_bot(bot.id), uworld["data"]["frames"]["AAA"], lambda s: uworld["data"]["frames"][s]["close"])
+    assert len(curve) == 2 and curve.iloc[0] == pytest.approx(50_000)
+    out = tr.deactivate(bot.id)
+    assert sorted(out["symbols"]) == ["AAA", "CCC"]

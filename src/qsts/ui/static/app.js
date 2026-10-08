@@ -63,6 +63,7 @@ function matches(r, q) {
       if (m[2] === ">" && !(v > x) || m[2] === ">=" && !(v >= x) || m[2] === "<" && !(v < x) || m[2] === "<=" && !(v <= x)) return false;
     } else if (tok === "paper") { if (r.paper_status !== "active") return false; }
     else if (tok === "short") { if (!r.allow_short) return false; }
+    else if (tok === "cartera" || tok === "sp500") { if (r.kind !== "universe") return false; }
     else if (!(r.symbol.toLowerCase().includes(tok) || r.name.toLowerCase().includes(tok) || r.strategy.includes(tok))) return false;
   }
   return true;
@@ -79,7 +80,21 @@ async function loadLibrary() {
         clearInterval(timer); timer = setInterval(async () => { const j = await api("/api/data/job"); if (!j.running) { clearInterval(timer); loadLibrary(); } }, 2000);
       } catch (e) { $("#gm-msg").textContent = e.message; }
     };
+  } else if (lib.need_universe) {
+    ms.style.display = "block";
+    ms.innerHTML = `Las pruebas en <b>cartera S&amp;P 500</b> necesitan los precios de las ~500 acciones del índice (unos minutos, una sola vez). ` +
+      `<button class="btn primary" id="get-sp">Descargar el S&amp;P 500</button> <span id="gm-msg" class="muted"></span>`;
+    $("#get-sp").onclick = async () => {
+      try { await post("/api/data/ingest", { mode: "sp500" }); $("#gm-msg").innerHTML = 'Descargando… puedes ver el avance en <a href="#/data">Datos</a>. La tabla se actualizará sola.';
+        clearInterval(timer); timer = setInterval(async () => { const j = await api("/api/data/job"); $("#gm-msg").textContent = j.running ? `Descargando ${j.done} de ${j.total} acciones…` : "";
+          if (!j.running) { clearInterval(timer); loadLibrary(); } }, 3000);
+      } catch (e) { $("#gm-msg").textContent = e.message; }
+    };
   } else ms.style.display = "none";
+  if (lib.rows.some(r => r.computing) && !timer) timer = setInterval(async () => {
+    if (!$("#page-library").classList.contains("on")) return;
+    try { lib = await api("/api/library"); renderLibrary(); if (!lib.rows.some(r => r.computing)) { clearInterval(timer); timer = null; } } catch (e) { /* next round */ }
+  }, 3000);
   const sel = $("#ab-strategy");
   if (!sel.options.length) sel.innerHTML = lib.strategies.map(s => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("");
   renderLibrary();
@@ -87,7 +102,8 @@ async function loadLibrary() {
 function renderLibrary() {
   if (!lib) return;
   const q = $("#q").value.trim();
-  let rows = lib.rows.filter(r => (filter === "all" || (filter === "fav" && r.favorite) || (filter === "paper" && r.paper_status === "active")) && matches(r, q));
+  let rows = lib.rows.filter(r => (filter === "all" || (filter === "fav" && r.favorite) || (filter === "paper" && r.paper_status === "active") ||
+    (filter === "universe" && r.kind === "universe") || (filter === "stock" && r.kind !== "universe")) && matches(r, q));
   rows.sort((a, b) => {
     const x = a[sortKey], y = b[sortKey];
     if (x === y) return 0; if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
@@ -99,14 +115,20 @@ function renderLibrary() {
   $("#page-n").innerHTML = `Página <b>${page + 1}</b> / ${pages}`;
   $("#prev").disabled = page === 0; $("#next").disabled = page >= pages - 1;
   const th = (k, label) => `<th class="sort" data-k="${k}">${label}${sortKey === k ? (sortDir < 0 ? " ↓" : " ↑") : " ⇅"}</th>`;
-  $("#lib").innerHTML = `<tr><th>★</th>${th("name", "Nombre")}<th>Curva</th>${th("symbol", "Acción")}<th>Velas</th>${th("d7", "7 días")}${th("d30", "30 días")}${th("d90", "90 días")}` +
-    `${th("net_profit_pct", "Total")}${th("win_rate", "Ganadoras")}${th("profit_factor", "Factor de beneficio")}<th></th></tr>` +
-    shown.map(r => r.error ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td colspan="9" class="muted">${esc(r.error)}</td><td></td></tr>`
+  const where = (r) => r.kind === "universe" ? `<b>S&amp;P 500</b><span class="kind" title="Escanea todo el índice; como máximo ${r.max_positions} posiciones a la vez">cartera · ${r.max_positions} a la vez</span>`
+    : `<b>${esc(r.symbol)}</b><span class="kind one">una acción</span>`;
+  $("#lib").innerHTML = `<tr><th>★</th>${th("name", "Nombre")}<th>Curva</th>${th("symbol", "Dónde")}${th("d7", "7 días")}${th("d30", "30 días")}${th("d90", "90 días")}` +
+    `${th("net_profit_pct", "Total")}${th("win_rate", "Ganadoras")}${th("profit_factor", "Factor de beneficio")}` +
+    `<th title="Probada en cada acción del S&amp;P 500 por separado: en qué parte de ellas gana">Gana en</th><th></th></tr>` +
+    shown.map(r => r.error ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td>${where(r)}</td><td colspan="8" class="muted">${esc(r.error)}</td><td></td></tr>`
+      : r.computing ? `<tr class="lr" data-id="${esc(r.id)}"><td></td><td class="name">${esc(r.name)}</td><td></td><td>${where(r)}</td><td colspan="7" class="muted">` +
+        `${r.computing.state === "error" ? `<span class="bad">${esc(r.computing.msg)}</span>` : `<span class="spin"></span>${esc(r.computing.msg || "calculando")}…`}</td><td></td></tr>`
       : `<tr class="lr" data-id="${esc(r.id)}"><td><button class="star ${r.favorite ? "on" : ""}" data-fav="${esc(r.id)}">${r.favorite ? "★" : "☆"}</button></td>` +
       `<td class="name">${esc(r.name)}${r.custom ? '<span class="badge">ajustada</span>' : ""}${r.in_position ? '<span class="badge">dentro</span>' : ""}</td>` +
-      `<td>${spark(r.spark)}</td><td><b>${esc(r.symbol)}</b></td><td>${esc(r.timeframe)}</td>` +
+      `<td>${spark(r.spark)}</td><td>${where(r)}</td>` +
       `<td>${pill(r.d7)}</td><td>${pill(r.d30)}</td><td>${pill(r.d90)}</td><td>${pill(r.net_profit_pct, x => x > 0, 0)}</td>` +
       `<td>${pct(r.win_rate)}</td><td>${pill(r.profit_factor, x => x > 1, 2, v => nf(v, 2))}</td>` +
+      `<td>${r.kind === "universe" && r.breadth != null ? `<span class="${r.breadth >= 0.6 ? "up" : "down"}" title="de las acciones, una a una">${pct(r.breadth, 0)} de las acciones</span>` : '<span class="muted">—</span>'}</td>` +
       `<td>${r.paper_status === "active" ? '<button class="copy off" data-open="1">En paper</button>' : '<button class="copy" data-open="1">Activar en paper</button>'}</td></tr>`).join("");
   $$("#lib th.sort").forEach(h => h.onclick = () => { const k = h.dataset.k; sortDir = sortKey === k ? -sortDir : -1; sortKey = k; renderLibrary(); });
   $$("#lib tr.lr").forEach(tr => tr.onclick = (ev) => {
@@ -116,7 +138,7 @@ function renderLibrary() {
     location.hash = "#/bot/" + encodeURIComponent(tr.dataset.id) + (ev.target.closest("[data-open]") ? "?paper" : "");
   });
 }
-const HEAD = { name: "nombre", symbol: "acción", d7: "7 días", d30: "30 días", d90: "90 días", net_profit_pct: "total", win_rate: "ganadoras", profit_factor: "factor de beneficio" };
+const HEAD = { name: "nombre", symbol: "dónde", d7: "7 días", d30: "30 días", d90: "90 días", net_profit_pct: "total", win_rate: "ganadoras", profit_factor: "factor de beneficio" };
 $("#q").oninput = () => { page = 0; renderLibrary(); };
 $$(".chip").forEach(c => c.onclick = () => { filter = c.dataset.filter; $$(".chip").forEach(x => x.classList.toggle("on", x === c)); page = 0; renderLibrary(); });
 $("#prev").onclick = () => { page--; renderLibrary(); }; $("#next").onclick = () => { page++; renderLibrary(); };
@@ -124,11 +146,15 @@ $("#add-bot-open").onclick = () => { const p = $("#add-bot"); p.style.display = 
 $("#ab-strategy").onchange = () => showStrategyInfo();
 function showStrategyInfo() {
   const s = lib && lib.strategies.find(x => x.key === $("#ab-strategy").value);
-  $("#ab-info").textContent = s ? s.summary : "";
+  $("#ab-info").textContent = s ? s.summary + (s.universe ? "" : " (El autor la pensó para un solo activo.)") : "";
 }
+$("#ab-symbol").onfocus = () => { $$('input[name="ab-kind"]').forEach(x => x.checked = x.value === "stock"); };
 $("#ab-go").onclick = async () => {
   $("#ab-msg").textContent = "Creando…";
-  try { const r = await post("/api/bots", { strategy: $("#ab-strategy").value, symbol: $("#ab-symbol").value });
+  const uni = $('input[name="ab-kind"]:checked').value === "universe";
+  try { const r = await post("/api/bots", { strategy: $("#ab-strategy").value, symbol: uni ? "SP500" : $("#ab-symbol").value,
+      max_positions: uni ? +$("#ab-maxpos").value : null });
+    if (r.need_universe) { $("#ab-msg").innerHTML = 'Creado. Falta descargar el S&amp;P 500: pulsa el botón del aviso de arriba.'; loadLibrary(); return; }
     $("#ab-msg").textContent = r.downloading ? "Descargando sus precios… (aparecerá en la tabla en unos segundos)" : "Creado.";
     if (r.downloading) { clearInterval(timer); timer = setInterval(async () => { const j = await api("/api/data/job"); if (!j.running) { clearInterval(timer); loadLibrary(); } }, 2000); }
     else location.hash = "#/bot/" + encodeURIComponent(r.id);
@@ -142,10 +168,32 @@ async function loadBot(id) {
   const wantPaper = id.endsWith("?paper"); id = id.replace(/\?paper$/, "");
   $("#b-name").textContent = "Cargando…";
   try { bot = await api(`/api/bots/${encodeURIComponent(id)}`); } catch (e) { $("#b-name").textContent = e.message; return; }
-  const b = bot.bot, st = b.strategy;
-  $("#b-icon").textContent = b.symbol.slice(0, 1);
+  const b = bot.bot, st = b.strategy, uni = b.kind === "universe";
+  $("#b-icon").textContent = uni ? "500" : b.symbol.slice(0, 1);
+  $("#b-icon").style.fontSize = uni ? "13px" : "";
   $("#b-name").textContent = st.name;
-  $("#b-sub").innerHTML = `<b>${esc(b.symbol)}</b> · velas diarias · ${st.allow_short ? "largos y cortos" : "solo largos"} · datos hasta el ${esc(bot.last_bar)}`;
+  const pg = $("#page-bot");
+  pg.classList.toggle("wait", !!bot.computing);
+  $("#b-computing").style.display = bot.computing ? "block" : "none";
+  if (bot.computing) {
+    const c = bot.computing;
+    $("#b-sub").innerHTML = `<b>Cartera S&amp;P 500</b> · hasta ${b.max_positions} acciones a la vez`;
+    $("#b-comp-bar").style.width = (c.total ? Math.round(100 * c.done / c.total) : 3) + "%";
+    $("#b-comp-msg").innerHTML = c.state === "error" ? `<span class="bad">${esc(c.msg)}</span>` : `<span class="spin"></span>${esc(c.msg || "en cola")}…`;
+    clearInterval(timer); timer = setInterval(async () => {
+      try { const d = await api(`/api/bots/${encodeURIComponent(id)}`); if (!d.computing) { clearInterval(timer); timer = null; loadBot(id + (wantPaper ? "?paper" : "")); }
+        else { $("#b-comp-bar").style.width = (d.computing.total ? Math.round(100 * d.computing.done / d.computing.total) : 3) + "%";
+          $("#b-comp-msg").innerHTML = `<span class="spin"></span>${esc(d.computing.msg || "en cola")}…`; } } catch (e) { /* next round */ }
+    }, 2500);
+    return;
+  }
+  $$(".uonly").forEach(x => x.style.display = uni ? "" : "none");
+  if (!uni && ["today", "breadth"].includes(($("#b-tabs button.on") || {}).dataset?.tab)) $("#b-tabs button[data-tab=perf]").click();
+  $("#b-sub").innerHTML = (uni ? `<b>Cartera S&amp;P 500</b> · ${nf(bot.universe.n_symbols, 0)} acciones · hasta ${b.max_positions} a la vez (${nf(100 / b.max_positions, 0)}% del capital cada una)`
+    : `<b>${esc(b.symbol)}</b>`) + ` · velas diarias · ${st.allow_short ? "largos y cortos" : "solo largos"} · datos hasta el ${esc(bot.last_bar)}`;
+  $("#b-hold-label").textContent = uni ? "comprar y mantener el S&P 500 (SPY)" : "comprar y mantener la acción";
+  $("#act-follow-txt").textContent = uni ? "comprar en la próxima apertura las acciones que el backtest tiene abiertas ahora (si no, empieza con las próximas señales)"
+    : "si el backtest está dentro de una operación ahora, entrar también en la próxima apertura";
   const live = b.paper_status === "active";
   $("#b-status").innerHTML = live ? `<span class="badge live">● En paper desde ${when(b.activated_at)}</span>` : (b.paper_status === "stopped" ? '<span class="badge">Paper detenido</span>' : "");
   $("#b-fav").textContent = b.favorite ? "★ Favorito" : "☆ Favorito";
@@ -154,11 +202,22 @@ async function loadBot(id) {
   $("#b-source").innerHTML = st.source ? `Fuente: ${esc(st.source)}` : "";
   $("#b-params").innerHTML = Object.keys(b.params).length ? "Ajustes: " + Object.entries(b.params).map(([k, v]) => `<code>${esc(k)} = ${esc(v)}</code>`).join(" ") +
     (Object.keys(b.custom_params).length ? ' <span class="badge warn">cambiados respecto al original</span>' : "") : "";
+  $("#b-rank").innerHTML = uni ? `Si un día hay más acciones con señal que huecos libres, elige: <b>${esc(st.rank_rule)}</b>` +
+    (st.rank_by_author ? " (regla del autor)." : " (regla fija de la app: el autor no da ninguna).") : "";
   const ot = bot.open_trade;
+  if (uni) {
+    const pos = bot.positions, nx = bot.next;
+    $("#b-next").innerHTML = (pos.length ? `Ahora mismo la cartera tiene <b>${pos.length}</b> posición${pos.length > 1 ? "es" : ""}: ${pos.map(p => `<b>${esc(p.symbol)}</b>`).join(", ")}.` : "Ahora mismo la cartera no tiene posiciones.") +
+      ` Con el cierre del ${esc(nx.day)}: ` + (nx.exits.length ? `vendería ${nx.exits.map(esc).join(", ")}; ` : "") +
+      (nx.buys.filter(x => x.chosen).length ? `compraría <b>${nx.buys.filter(x => x.chosen).map(x => esc(x.symbol)).join(", ")}</b>.` : "no compraría nada.") +
+      ' <a href="#" id="go-today">ver detalle</a>';
+    $("#go-today").onclick = (ev) => { ev.preventDefault(); $("#b-tabs button[data-tab=today]").click(); $("#b-tabs").scrollIntoView({ behavior: "smooth" }); };
+  } else
   $("#b-next").innerHTML = (ot ? `Ahora mismo el backtest está <b>${ot.side === "largo" ? "comprado" : "en corto"}</b> desde el ${ot.entry} (${pct(ot.pnl_pct, 1, true)}).` : "Ahora mismo el backtest está fuera del mercado.") +
     (bot.next_action ? ` Con el último cierre: <b>${esc(bot.next_action)}</b>.` : "");
   $$("#page-bot .toggle button").forEach(x => x.classList.toggle("on", x.dataset.mode === metricMode));
   renderMetrics(); drawChart(); renderPerf(); renderTrades(); renderMonthly(); renderMC(); renderBench(); renderReport(); renderPaperLog();
+  if (uni) { renderToday(); renderBreadth(); }
   $("#b-audit").innerHTML = "Pulsa la pestaña para calcularla."; auditLoaded = false;
   if ($("#b-tabs button.on").dataset.tab === "audit") loadAudit();
   $("#b-activate").style.display = wantPaper && !live ? "flex" : "none";
@@ -188,7 +247,8 @@ function drawChart() {
     const l = chart.addLineSeries({ color: "#f0499b", lineWidth: 2, title: "paper", priceLineVisible: false }); l.setData(live); series.push(l);
     s.setMarkers([{ time: live[0].time, position: "aboveBar", color: "#f0499b", shape: "arrowDown", text: "Paper trading" }]);
   }
-  $("#b-chart-note").textContent = `Rentabilidad acumulada (%) desde ${bot.summary.first} con ${nf(bot.capital, 0)} $ iniciales; ${bot.config.size_pct}% del capital por operación, ` +
+  $("#b-chart-note").textContent = `Rentabilidad acumulada (%) desde ${bot.summary.first} con ${nf(bot.capital, 0)} $ iniciales; ` +
+    (bot.bot.kind === "universe" ? `hasta ${bot.config.max_positions} acciones a la vez, ${nf(bot.config.slot_pct, 0)}% del capital cada una, ` : `${bot.config.size_pct}% del capital por operación, `) +
     `costes ${nf(bot.config.slippage_bps / 100, 2)}% por lado.` + (live ? " En rosa, los resultados reales en paper trading desde su activación." : "");
   chart.timeScale().fitContent();
 }
@@ -205,15 +265,54 @@ const KEY = [["first_trade", "Primera operación", v => v], ["last_trade", "Últ
 function renderPerf() {
   const wd = bot.weekday, mx = Math.max(0.01, ...wd.map(x => x.value || 0));
   $("#b-weekday").innerHTML = wd.map(x => `<div class="b"><span>${nf(x.value, 2)}</span><i style="height:${(x.value || 0) / mx * 85}%"></i>${x.day}</div>`).join("");
-  $("#b-exposure").textContent = `Media: ${pct(bot.summary.exposure, 0)} de los días con una posición abierta.`;
+  $("#b-exposure").textContent = bot.bot.kind === "universe" ? `De media tiene ${nf(bot.avg_positions, 1)} posiciones abiertas; ${pct(bot.summary.exposure, 0)} de los días con al menos una.`
+    : `Media: ${pct(bot.summary.exposure, 0)} de los días con una posición abierta.`;
   const k = bot.key_metrics || {};
   $("#b-key").innerHTML = KEY.filter(([key]) => key in k).map(([key, label, f]) => `<div><span>•</span>${label}: <b>${k[key] === null ? "—" : f(k[key])}</b></div>`).join("") || '<p class="muted">Pocos datos.</p>';
 }
 function renderTrades() {
-  table($("#b-trades"), bot.trades, [["Lado", t => t.side === "largo" ? '<span class="up">largo</span>' : '<span class="down">corto</span>'],
+  const uni = bot.bot.kind === "universe";
+  table($("#b-trades"), bot.trades, [...(uni ? [["Acción", t => `<b>${esc(t.symbol)}</b>`]] : []), ["Lado", t => t.side === "largo" ? '<span class="up">largo</span>' : '<span class="down">corto</span>'],
     ["Entrada", t => t.entry], ["Salida", t => t.exit], ["Precio entrada", t => usd(t.entry_price)], ["Precio salida", t => usd(t.exit_price)],
     ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${usd(t.pnl)} (${pct(t.pnl_pct, 2, true)})</span>`], ["Días", t => t.bars],
     ["Motivo", t => (REASON_ICON[t.reason] || "") + " " + esc(t.reason)]], "Sin operaciones");
+}
+function renderToday() {
+  const nx = bot.next, pos = bot.positions;
+  $("#b-today").innerHTML = `<div class="explain">Así funciona cada día: después del cierre mira todas las acciones del S&amp;P 500; en la apertura siguiente
+    vende las que dan señal de salida y, si quedan huecos (máximo ${bot.config.max_positions}), compra las que dan señal de entrada, empezando por las mejor
+    clasificadas (${esc(bot.bot.strategy.rank_rule)}).</div>` +
+    `<h4>Posiciones abiertas ahora en el backtest</h4><table id="td-pos"></table>` +
+    `<h4>Señales del cierre del ${esc(nx.day)}</h4><p class="small">${nx.n_signals} acciones dan señal de entrada · huecos libres en la próxima apertura: <b>${nx.free}</b>` +
+    (nx.exits.length ? ` · se venderían: <b>${nx.exits.map(esc).join(", ")}</b>` : "") + `</p><table id="td-buys"></table>` +
+    `<p class="muted small">En verde, las que compraría. El resto da señal pero no hay sitio para ellas.</p>`;
+  table($("#td-pos"), pos, [["Acción", p => `<b>${esc(p.symbol)}</b>`], ["Lado", p => p.side], ["Desde", p => p.entry], ["Entrada", p => usd(p.entry_price)],
+    ["Último cierre", p => usd(p.price)], ["Resultado", p => `<span class="${p.pnl_pct >= 0 ? "up" : "down"}">${pct(p.pnl_pct, 2, true)}</span>`],
+    ["Stop", p => p.stop ? usd(p.stop) : "—"], ["Mañana", p => p.exit_next ? '<span class="bad">se vende</span>' : "sigue"]], "Ninguna");
+  const el = $("#td-buys");
+  if (!nx.buys.length) { el.innerHTML = '<tr><td class="muted">Ninguna acción da señal de entrada con este cierre.</td></tr>'; return; }
+  el.innerHTML = `<tr><th>#</th><th>Acción</th><th>Señal</th><th>Cierre</th><th>Clasificación</th><th></th></tr>` +
+    nx.buys.map((c, i) => `<tr class="${c.chosen ? "chosen" : ""}"><td>${i + 1}</td><td><b>${esc(c.symbol)}</b></td><td>${c.direction > 0 ? "compra" : "venta en corto"}</td>` +
+      `<td>${usd(c.close)}</td><td>${nf(c.rank, c.rank > 1e5 ? 0 : 2)}</td><td>${c.chosen ? "✔ la compraría" : '<span class="muted">sin hueco</span>'}</td></tr>`).join("");
+}
+let breadthSort = "net";
+function renderBreadth() {
+  const b = bot.breadth, sm = b.summary;
+  const rows = b.rows.slice().sort((x, y) => (y[breadthSort] ?? -1e9) - (x[breadthSort] ?? -1e9));
+  $("#b-breadth").innerHTML = `<div class="explain">La estrategia probada en <b>cada acción por separado</b> (100% de una cuenta en esa acción, desde que entró en el índice).
+    Sirve para ver si funciona <b>en general</b> o solo en unas pocas acciones con suerte.</div>` +
+    (sm.n_used ? `<div class="metrics">${metricBox("Gana en", pct(sm.profitable, 0) + " de las acciones", sm.profitable >= 0.6 ? "up" : "down")}` +
+      metricBox("Mejor que mantener en", pct(sm.beats_hold, 0)) + metricBox("Resultado mediano", pct(sm.median_net, 0, true), sm.median_net >= 0 ? "up" : "down") +
+      metricBox("Factor de beneficio (todas juntas)", nf(sm.pooled_pf, 2)) + metricBox("Operaciones en total", nf(sm.trades, 0)) +
+      metricBox("Ganadoras", pct(sm.win_rate)) + metricBox("Media por operación", pct(sm.avg_trade_pct, 2, true)) + `</div>` : '<p class="muted">Pocas operaciones por acción.</p>') +
+    `<p class="muted small">${bot.universe.dated ? "Cada acción solo se opera desde la fecha en que entró en el S&amp;P 500." : "No se conocen las fechas de entrada al índice: se usa toda la historia de cada acción."}
+     Ojo: la lista es la de hoy; las empresas que salieron del índice (o quebraron) no están, y eso hace que los resultados parezcan algo mejores de lo que serían.</p>` +
+    `<p class="small">Ordenar por: <button class="link" data-bs="net">resultado</button> · <button class="link" data-bs="profit_factor">factor de beneficio</button> · ` +
+    `<button class="link" data-bs="trades">operaciones</button> · <button class="link" data-bs="win_rate">ganadoras</button></p><div class="scroll"><table id="br-rows"></table></div>`;
+  table($("#br-rows"), rows, [["Acción", r => `<b>${esc(r.symbol)}</b>`], ["Resultado", r => `<span class="${r.net >= 0 ? "up" : "down"}">${pct(r.net, 0, true)}</span>`],
+    ["Mantener la acción", r => pct(r.hold, 0, true)], ["Factor de beneficio", r => nf(r.profit_factor, 2)], ["Ganadoras", r => pct(r.win_rate, 0)],
+    ["Operaciones", r => r.trades], ["Caída máx.", r => pct(r.max_drawdown, 0)], ["Desde", r => r.since || "—"]], "Sin datos");
+  $$("#b-breadth [data-bs]").forEach(x => x.onclick = () => { breadthSort = x.dataset.bs; renderBreadth(); });
 }
 const MONTHS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 function heat(v) {
@@ -246,13 +345,22 @@ function renderMC() {
 let auditLoaded = false;
 async function loadAudit() {
   if (auditLoaded) return; auditLoaded = true;
-  $("#b-audit").innerHTML = "Calculando (prueba la estrategia en otras acciones, con otros ajustes y otros costes)…";
+  if (!/spin/.test($("#b-audit").innerHTML)) $("#b-audit").innerHTML = "Calculando (prueba la estrategia con otros ajustes, otros costes y otros periodos)…";
   let a; try { a = await api(`/api/bots/${encodeURIComponent(bot.bot.id)}/audit`); } catch (e) { $("#b-audit").textContent = e.message; return; }
+  if (a.computing !== undefined) {
+    const c = a.computing || {};
+    $("#b-audit").innerHTML = `<p><span class="spin"></span>${esc(c.msg || "en cola")}…</p><p class="muted small">La auditoría de una cartera repite la simulación muchas veces
+      (con otros costes, otras mitades, 100 «monos» que compran al azar y otros ajustes): tarda unos minutos la primera vez. Puedes seguir mirando el resto.</p>`;
+    const id = bot.bot.id;
+    setTimeout(() => { if (bot && bot.bot.id === id && $("#page-bot").classList.contains("on")) { auditLoaded = false; loadAudit(); } }, 3000);
+    return;
+  }
   const V = { "sólida": "✅ Parece sólida", "dudosa": "⚠️ Dudosa", "frágil": "❌ Frágil" };
   $("#b-audit").innerHTML = `<div class="verdict">${V[a.verdict] || a.verdict}: pasa ${a.passed} de ${a.total} comprobaciones</div>` +
     `<p class="muted small">Ninguna comprobación garantiza el futuro: la prueba de verdad es el paper trading con días nuevos.</p><ul class="checks">` +
     a.checks.map(c => `<li><span class="ic">${c.ok === null ? "➖" : c.ok ? "✅" : "❌"}</span><div><b>${esc(c.label)}</b><span class="muted small">${esc(c.detail)}</span>` +
       (c.symbols ? `<details><summary class="small">ver acciones</summary><table class="small">${c.symbols.map(s => `<tr><td>${esc(s.symbol)}</td><td class="${s.net >= 0 ? "up" : "down"}">${pct(s.net, 0, true)}</td><td>FB ${nf(s.profit_factor, 2)}</td><td class="muted">mantener ${pct(s.hold, 0, true)}</td></tr>`).join("")}</table></details>` : "") +
+      (c.monkeys ? `<details><summary class="small">ver los monos</summary><p class="small">Resultado de cada cartera al azar (de peor a mejor): ${c.monkeys.map(v => pct(v, 0, true)).join(" · ")}</p></details>` : "") +
       (c.variants ? `<details><summary class="small">ver variantes</summary><table class="small">${c.variants.map(v => `<tr><td>${esc(v.param)} = ${esc(v.value)}</td><td class="${v.net >= 0 ? "up" : "down"}">${pct(v.net, 0, true)}</td><td>Sharpe ${nf(v.sharpe, 2)}</td></tr>`).join("")}</table></details>` : "") +
       `</div></li>`).join("") + "</ul>";
 }
@@ -273,7 +381,7 @@ function rangeBox(r, label, color) {
     `<div class="t">${label}</div></div>`;
 }
 function renderBench() {
-  $("#b-bench").innerHTML = rangeBox(bot.pnl_range.hold, `Comprar y mantener ${esc(bot.bot.symbol)}`, "#f5a623") + rangeBox(bot.pnl_range.strategy, "La estrategia", "#2d8cff");
+  $("#b-bench").innerHTML = rangeBox(bot.pnl_range.hold, bot.bot.kind === "universe" ? "Comprar y mantener el S&P 500 (SPY)" : `Comprar y mantener ${esc(bot.bot.symbol)}`, "#f5a623") + rangeBox(bot.pnl_range.strategy, "La estrategia", "#2d8cff");
 }
 const REP = [["net_profit", "Beneficio neto", "usd"], ["gross_profit", "Beneficio bruto", "usd"], ["gross_loss", "Pérdida bruta", "usd"],
   ["profit_factor", "Factor de beneficio", "num"], ["n_trades", "Operaciones", "int"], ["win_rate", "Ganadoras", "pct"],
@@ -290,18 +398,19 @@ function renderPaperLog() {
   const p = bot.paper;
   if (!p) { $("#b-paperlog").innerHTML = "Este bot no está en paper trading. Pulsa <b>Activar en paper</b> para que opere solo en tu cuenta paper de Alpaca."; return; }
   $("#b-paperlog").classList.remove("muted");
-  $("#b-paperlog").innerHTML = `<p>Capital asignado: <b>${usd(p.capital)}</b> (${nf(p.allocation_pct, 0)}% de la cuenta) · desde ${when(p.activated_at)} · ` +
-    `posición: <b>${p.position ? `${nf(p.position, 0)} acciones a ${usd(p.avg_price)}` : "ninguna"}</b>` +
-    (p.stop ? ` · stop ${usd(p.stop)}` : "") + (p.target ? ` · objetivo ${usd(p.target)}` : "") +
-    (p.pending ? ` · <span class="badge warn">entrada pendiente: ${esc(p.pending.reason)}</span>` : "") + `</p>` +
+  $("#b-paperlog").innerHTML = `<p>Capital asignado: <b>${usd(p.capital)}</b> (${nf(p.allocation_pct, 0)}% de la cuenta) · desde ${when(p.activated_at)}</p>` +
+    `<h4>Posiciones abiertas en Alpaca</h4><table id="pl-pos"></table>` +
+    (p.pending_entries.length ? `<p class="small"><span class="badge warn">Entradas pendientes para la próxima apertura</span> ${p.pending_entries.map(x => `<b>${esc(x.symbol)}</b> (${esc(x.reason)})`).join(", ")}</p>` : "") +
     `<h4>Operaciones cerradas</h4><table id="pl-trades"></table><h4>Órdenes enviadas a Alpaca</h4><table id="pl-orders"></table><h4>Registro</h4><table id="pl-events"></table>`;
-  table($("#pl-trades"), p.trades, [["Lado", t => t.side], ["Entrada", t => t.entry], ["Salida", t => t.exit], ["Acciones", t => nf(t.qty, 0)],
+  table($("#pl-pos"), p.positions, [["Acción", x => `<b>${esc(x.symbol)}</b>`], ["Acciones", x => nf(x.qty, 0)], ["Precio medio", x => usd(x.avg_price)],
+    ["Stop", x => x.stop ? usd(x.stop) : "—"], ["Objetivo", x => x.target ? usd(x.target) : "—"]], "Ninguna");
+  table($("#pl-trades"), p.trades, [["Acción", t => `<b>${esc(t.symbol || "")}</b>`], ["Lado", t => t.side], ["Entrada", t => t.entry], ["Salida", t => t.exit], ["Acciones", t => nf(t.qty, 0)],
     ["Resultado", t => `<span class="${t.pnl >= 0 ? "up" : "down"}">${usd(t.pnl)} (${pct(t.pnl_pct, 2, true)})</span>`], ["Motivo", t => esc(t.reason)]], "Aún ninguna");
   const PURP = { entry: "entrada", exit: "salida", stop: "stop", target: "objetivo", protect: "protección" };
   const STATUS = { filled: "ejecutada", canceled: "cancelada", expired: "caducada", rejected: "rechazada", new: "pendiente",
     accepted: "pendiente", pending_new: "pendiente", held: "en espera", partially_filled: "ejecutada en parte", submitted: "enviada",
     done_for_day: "terminada por hoy", replaced: "sustituida" };
-  table($("#pl-orders"), p.orders, [["Enviada", o => when(o.submitted)], ["Para", o => PURP[o.purpose] || o.purpose], ["Orden", o => `${o.side === "buy" ? "compra" : "venta"} ${nf(o.qty, 0)} (${esc(o.type)})`],
+  table($("#pl-orders"), p.orders, [["Enviada", o => when(o.submitted)], ["Para", o => PURP[o.purpose] || o.purpose], ["Orden", o => `${o.side === "buy" ? "compra" : "venta"} ${nf(o.qty, 0)} ${esc(o.symbol || "")} (${esc(o.type)})`],
     ["Estado", o => esc(STATUS[o.status] || o.status) + (o.error ? ` <span class="bad small">${esc(o.error)}</span>` : "")], ["Ejecutada", o => o.filled_price ? `${usd(o.filled_price)} · ${when(o.filled)}` : "—"]], "Aún ninguna");
   table($("#pl-events"), p.events, [["Cuándo", e => when(e.at)], ["", e => esc(e.text)]], "Sin actividad");
 }
@@ -310,7 +419,8 @@ $("#b-hide").onclick = async () => {
   if (!confirm("¿Quitar este bot de la biblioteca? (se puede volver a crear)")) return;
   try { await post(`/api/bots/${encodeURIComponent(bot.bot.id)}/update`, { hidden: true }); location.hash = "#/"; } catch (e) { alert(e.message); }
 };
-$("#b-other").onclick = () => { location.hash = "#/"; setTimeout(() => { $("#add-bot").style.display = "flex"; $("#ab-strategy").value = bot.bot.strategy.key; showStrategyInfo(); $("#ab-symbol").focus(); }, 300); };
+$("#b-other").onclick = () => { const uni = bot.bot.kind === "universe"; location.hash = "#/"; setTimeout(() => { $("#add-bot").style.display = "flex"; $("#ab-strategy").value = bot.bot.strategy.key; showStrategyInfo();
+  $$('input[name="ab-kind"]').forEach(x => x.checked = x.value === (uni ? "stock" : "universe")); if (uni) $("#ab-symbol").focus(); }, 300); };
 $("#b-paper").onclick = async () => {
   if (bot.bot.paper_status === "active") {
     const close = confirm("¿Detener el paper trading de este bot?\n\nAceptar: también se cierra su posición en la próxima apertura.\nCancelar: no hacer nada.");
@@ -324,7 +434,7 @@ $("#act-cancel").onclick = () => $("#b-activate").style.display = "none";
 $("#act-go").onclick = async () => {
   $("#act-msg").textContent = "Conectando con Alpaca…";
   try { const r = await post(`/api/bots/${encodeURIComponent(bot.bot.id)}/activate`, { allocation_pct: +$("#act-pct").value, follow_open: $("#act-follow").checked });
-    $("#act-msg").textContent = `Activado con ${usd(r.capital)}.` + (r.follow ? " Entrará en la próxima apertura, como el backtest." : "");
+    $("#act-msg").textContent = `Activado con ${usd(r.capital)}.` + (r.follow ? ` En la próxima apertura comprará ${r.symbols.length > 1 || bot.bot.kind === "universe" ? r.symbols.join(", ") : ""} como el backtest.` : "");
     setTimeout(() => loadBot(bot.bot.id), 800);
   } catch (e) { $("#act-msg").innerHTML = `<span class="bad">${esc(e.message)}</span>` + (/Alpaca/.test(e.message) ? ' <a href="#/settings">Ir a Ajustes</a>' : ""); }
 };
@@ -343,9 +453,10 @@ async function loadPaper() {
         (ac.trading_blocked ? '<br><span class="bad">Alpaca indica que el trading está bloqueado en esta cuenta.</span>' : ""); }
     $("#pp-state").classList.remove("muted");
     $("#pp-state").innerHTML = `${esc(p.state)}<pre class="log">${esc(p.log.slice().reverse().join("\n")) || "—"}</pre>`;
-    table($("#pp-bots"), p.bots, [["Bot", b => `<a href="#/bot/${encodeURIComponent(b.id)}">${esc(b.name)}</a>`], ["Acción", b => `<b>${esc(b.symbol)}</b>`],
+    table($("#pp-bots"), p.bots, [["Bot", b => `<a href="#/bot/${encodeURIComponent(b.id)}">${esc(b.name)}</a>`],
+      ["Dónde", b => b.kind === "universe" ? '<b>S&amp;P 500</b><span class="kind">cartera</span>' : `<b>${esc(b.symbol)}</b>`],
       ["Estado", b => b.status === "active" ? '<span class="badge live">en paper</span>' : '<span class="badge">detenido</span>'],
-      ["Capital", b => `${usd(b.capital)} (${nf(b.allocation_pct, 0)}%)`], ["Posición", b => b.position ? nf(b.position, 0) + " acciones" : "—"],
+      ["Capital", b => `${usd(b.capital)} (${nf(b.allocation_pct, 0)}%)`], ["Posición", b => b.kind === "universe" ? (b.held.length ? b.held.map(esc).join(", ") : "—") : (b.position ? nf(b.position, 0) + " acciones" : "—")],
       ["Resultado cerrado", b => `<span class="${b.realized >= 0 ? "up" : "down"}">${usd(b.realized)}</span>`], ["Operaciones", b => b.trades],
       ["Desde", b => when(b.activated_at)]], "Ningún bot en paper todavía: abre uno en la Biblioteca y pulsa «Activar en paper».");
     table($("#pp-events"), p.events, [["Cuándo", e => when(e.at)], ["Bot", e => e.bot ? `<a href="#/bot/${encodeURIComponent(e.bot)}">${esc(e.bot)}</a>` : ""], ["", e => esc(e.text)]], "Sin actividad");

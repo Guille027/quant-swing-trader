@@ -123,6 +123,14 @@ class MarketDataRepository:
                                                              m.Price.timeframe == Timeframe(timeframe).value))
         return None if t is None else pd.Timestamp(t).tz_localize("UTC")
 
+    def global_token(self) -> tuple:
+        """Fingerprint of all stored market data (changes when anything is downloaded again)."""
+        with self.sf() as s:
+            p = s.execute(select(func.max(m.Price.ingested_at), func.max(m.Price.ts))).one()
+            a = s.execute(select(func.count(m.Asset.id))).scalar()
+            c = s.execute(select(func.count(m.CorporateAction.id))).scalar()
+        return (str(p[0]), str(p[1]), int(a or 0), int(c or 0))
+
     def summary(self, timeframe: Timeframe = Timeframe.D1) -> list[dict]:
         """One row per symbol with stored bars: name, sector, first/last bar, number of bars."""
         with self.sf() as s:

@@ -27,6 +27,7 @@ from qsts.broker.alpaca_paper import BrokerError
 from qsts.core.hashing import hash_obj
 from qsts.data.bars import nyse_schedule
 from qsts.db import models as m
+from qsts.lab.service import UNIVERSE_NAME, NotReady, is_universe
 from qsts.lab.strategy import REGISTRY
 
 FINAL = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day", "stopped", "suspended"}
@@ -110,12 +111,27 @@ class PaperTrader:
             for k, v in fields.items():
                 setattr(b, k, v)
 
+    # ------------------------------------------------------------------ the bot's state per stock
+    @staticmethod
+    def book(b: m.LabBot) -> dict:
+        """{symbol: {"stop", "target", "pending"}}: protective levels of each open paper position and entries waiting
+        for the next open (older versions kept them in single columns: read once from there)."""
+        bk = {k: dict(v) for k, v in (b.book or {}).items()}
+        if not bk and not is_universe(b) and (b.pending or b.stop_level or b.target_level):
+            bk[b.symbol] = {"stop": b.stop_level, "target": b.target_level, "pending": b.pending}
+        return bk
+
+    def _save_book(self, bid: str, bk: dict) -> None:
+        bk = {k: v for k, v in bk.items() if v.get("pending") or v.get("stop") is not None or v.get("target") is not None}
+        self._update_bot(bid, book=bk, pending=None, stop_level=None, target_level=None)
+
     # ------------------------------------------------------------------ ledger of one bot (from its fills)
-    def ledger(self, b: m.LabBot) -> dict:
-        """Position, average price, realised P&L and closed trades, replayed from the bot's filled orders."""
+    def ledger(self, b: m.LabBot, symbol: str | None = None) -> dict:
+        """Position, average price, realised P&L and closed trades in one stock, replayed from the bot's fills."""
+        symbol = symbol or b.symbol
         qty = avg = realized = 0.0
         trades, opened = [], None
-        fills = sorted((o for o in self.orders(b.id) if (o.filled_qty or 0) > 0 and o.filled_price),
+        fills = sorted((o for o in self.orders(b.id) if o.symbol == symbol and (o.filled_qty or 0) > 0 and o.filled_price),
                        key=lambda o: o.filled_at or o.submitted_at)
         for o in fills:
             q = o.filled_qty if o.side == "buy" else -o.filled_qty
@@ -128,39 +144,91 @@ class PaperTrader:
                 closed = min(abs(q), abs(qty))
                 pnl = closed * (o.filled_price - avg) * np.sign(qty)
                 realized += pnl
-                trades.append({"side": "largo" if qty > 0 else "corto", "entry": (opened.filled_at or opened.submitted_at).date().isoformat() if opened else None,
+                trades.append({"symbol": symbol, "side": "largo" if qty > 0 else "corto",
+                               "entry": (opened.filled_at or opened.submitted_at).date().isoformat() if opened else None,
                                "exit": (o.filled_at or o.submitted_at).date().isoformat(), "entry_price": avg,
                                "exit_price": o.filled_price, "qty": closed, "pnl": pnl,
                                "pnl_pct": pnl / (closed * avg) if avg else None, "reason": PURPOSE.get(o.purpose, o.purpose)})
                 qty += q
                 if abs(qty) < 1e-9:
                     qty, avg, opened = 0.0, 0.0, None
-        return {"qty": qty, "avg": avg, "realized": realized, "trades": trades,
+        return {"symbol": symbol, "qty": qty, "avg": avg, "realized": realized, "trades": trades,
                 "equity": (b.capital or 0.0) + realized}
 
-    def live_curve(self, b: m.LabBot, bars: pd.DataFrame) -> pd.Series:
-        """The bot's paper equity at each close since it was activated (fills replayed day by day)."""
+    def ledgers(self, b: m.LabBot) -> dict[str, dict]:
+        """One ledger per stock the bot has traded."""
+        syms = sorted({o.symbol for o in self.orders(b.id)} | ({b.symbol} if not is_universe(b) else set()))
+        return {s: self.ledger(b, s) for s in syms}
+
+    def summary(self, b: m.LabBot) -> dict:
+        """The bot's whole paper book: open positions, realised P&L and every closed trade (all stocks)."""
+        leds = self.ledgers(b)
+        trades = sorted((t for led in leds.values() for t in led["trades"]), key=lambda t: t["exit"] or "")
+        return {"positions": {s: led for s, led in leds.items() if led["qty"]},
+                "realized": sum(led["realized"] for led in leds.values()), "trades": trades}
+
+    def live_curve(self, b: m.LabBot, bars: pd.DataFrame, closes: Callable[[str], pd.Series] | None = None) -> pd.Series:
+        """The bot's paper equity at each close since it was activated (fills replayed day by day). `bars` gives
+        the calendar (and the prices of a stock bot); `closes(symbol)` the prices of the other stocks."""
         if not b.activated_at:
             return pd.Series(dtype=float)
         start = pd.Timestamp(b.activated_at).tz_localize("UTC").normalize()
-        closes = bars["close"][bars.index >= start]
-        if not len(closes):
+        cal = bars["close"][bars.index >= start]
+        if not len(cal):
             return pd.Series(dtype=float)
         fills = sorted((o for o in self.orders(b.id) if (o.filled_qty or 0) > 0 and o.filled_price),
                        key=lambda o: o.filled_at or o.submitted_at)
-        cash, qty, k, out = b.capital or 0.0, 0.0, 0, []
-        for day, close in closes.items():
+        px: dict[str, pd.Series] = {}
+        for sym in {o.symbol for o in fills}:
+            if not is_universe(b) and sym == b.symbol:
+                px[sym] = cal
+                continue
+            try:
+                px[sym] = (closes(sym) if closes else pd.Series(dtype=float)).reindex(cal.index, method="ffill")
+            except (KeyError, ValueError):
+                px[sym] = pd.Series(np.nan, index=cal.index)
+        cash, qty, k, out = b.capital or 0.0, {}, 0, []
+        last: dict[str, float] = {}
+        for day in cal.index:
             end = day + pd.Timedelta(days=1)
             while k < len(fills) and pd.Timestamp(fills[k].filled_at or fills[k].submitted_at).tz_localize("UTC") < end:
                 o = fills[k]
                 q = o.filled_qty if o.side == "buy" else -o.filled_qty
                 cash -= q * o.filled_price
-                qty += q
+                qty[o.symbol] = qty.get(o.symbol, 0.0) + q
+                last.setdefault(o.symbol, o.filled_price)
                 k += 1
-            out.append(cash + qty * close)
-        return pd.Series(out, index=closes.index)
+            value = 0.0
+            for sym, q in qty.items():
+                p = px[sym].get(day, np.nan)
+                if np.isfinite(p):
+                    last[sym] = float(p)
+                value += q * last.get(sym, 0.0)
+            out.append(cash + value)
+        return pd.Series(out, index=cal.index)
 
     # ------------------------------------------------------------------ activation
+    def _claims(self, exclude: str | None = None) -> dict[str, str]:
+        """Stocks already used by an active bot (a stock bot always claims its stock; a portfolio bot the stocks
+        it holds or is about to buy): two bots on the same stock would share one Alpaca position."""
+        out = {}
+        for x in self.active_bots():
+            if x.id == exclude:
+                continue
+            if not is_universe(x):
+                out[x.symbol] = x.id
+                continue
+            for s, led in self.ledgers(x).items():
+                if led["qty"]:
+                    out[s] = x.id
+            for s, v in self.book(x).items():
+                if v.get("pending"):
+                    out[s] = x.id
+            for o in self.orders(x.id):
+                if o.purpose == "entry" and o.status in OPEN_ORDER:
+                    out[o.symbol] = x.id
+        return out
+
     def activate(self, bid: str, allocation_pct: float, follow_open: bool = True, now: pd.Timestamp | None = None) -> dict:
         with self._lock:
             b = self.lab.get_bot(bid)
@@ -171,33 +239,46 @@ class PaperTrader:
             broker = self.broker()
             if broker is None:
                 raise ValueError("conecta primero tu cuenta paper de Alpaca (Ajustes)")
-            others = [x for x in self.active_bots() if x.symbol == b.symbol]
-            if others:
-                raise ValueError(f"ya hay un bot activo con {b.symbol} ({others[0].id}): dos bots en la misma acción "
-                                 "se mezclarían en la misma posición de Alpaca")
+            if not is_universe(b):
+                owner = self._claims().get(b.symbol)
+                if owner:
+                    raise ValueError(f"ya hay un bot activo con {b.symbol} ({owner}): dos bots en la misma acción "
+                                     "se mezclarían en la misma posición de Alpaca")
             used = sum(x.allocation_pct or 0 for x in self.active_bots())
             if used + allocation_pct > 100:
                 raise ValueError(f"ya tienes asignado el {used:g}% de la cuenta: no se puede pasar del 100% (sin apalancamiento)")
+            follow = []
+            if follow_open:  # the backtest is inside trades right now: open the same positions at the next open
+                try:
+                    follow = self.lab.open_trades(b)
+                except NotReady:
+                    raise ValueError("la cartera todavía se está calculando: espera a que termine y vuelve a activarla")
             acct = broker.account()
             if acct.get("trading_blocked") or acct.get("account_blocked"):
                 raise ValueError("Alpaca indica que la cuenta tiene el trading bloqueado")
             capital = float(acct["equity"]) * allocation_pct / 100
-            pending = None
-            if follow_open:  # the backtest is inside a trade right now: open the same position at the next open
-                res, _bars = self.lab.result(b)
-                ot = res.open_trade
-                if ot is not None:
-                    pending = {"direction": int(ot["direction"]), "reason": "seguir la operación abierta del backtest",
-                               "stop": ot.get("stop"), "target": ot.get("target"), "created": _now().isoformat()}
+            taken = self._claims(exclude=bid)
+            bk = {}
+            for t in follow:
+                if t["symbol"] in taken:
+                    continue
+                bk[t["symbol"]] = {"pending": {"direction": int(t["direction"]),
+                                               "reason": "seguir la operación abierta del backtest",
+                                               "stop": t.get("stop"), "target": t.get("target"),
+                                               "created": _now().isoformat()}}
             at = (now or pd.Timestamp.now(tz="UTC")).tz_convert("UTC").tz_localize(None).to_pydatetime()
             self._update_bot(bid, paper_status="active", allocation_pct=allocation_pct, capital=capital,
                              activated_at=at, stopped_at=None, last_signal_day=None, stop_level=None,
-                             target_level=None, pending=pending)
+                             target_level=None, pending=None, book=bk)
             st = REGISTRY[b.strategy]
-            self.event("info", f"▶️ Bot activado en paper: «{st.name}» con {b.symbol}, {allocation_pct:g}% de la cuenta "
-                               f"({money(capital)})" + (" — entrará en la próxima apertura como el backtest" if pending else ""),
-                       bid, notify=True)
-            return {"capital": capital, "follow": pending is not None}
+            what = f"cartera {UNIVERSE_NAME} (máx. {b.max_positions} posiciones)" if is_universe(b) else b.symbol
+            follow_txt = ""
+            if bk:
+                follow_txt = (" — entrará en la próxima apertura como el backtest" if not is_universe(b) else
+                              f" — en la próxima apertura comprará lo que tiene abierto el backtest: {', '.join(sorted(bk))}")
+            self.event("info", f"▶️ Bot activado en paper: «{st.name}» con {what}, {allocation_pct:g}% de la cuenta "
+                               f"({money(capital)})" + follow_txt, bid, notify=True)
+            return {"capital": capital, "follow": bool(bk), "symbols": sorted(bk)}
 
     def deactivate(self, bid: str, close: bool = True) -> dict:
         with self._lock:
@@ -205,27 +286,28 @@ class PaperTrader:
             if b.paper_status != "active":
                 raise ValueError("este bot no está en paper trading")
             broker = self.broker()
-            closed = False
+            closed = []
             if broker is not None:
                 self._cancel_open(broker, b)
-                led = self.ledger(b)
-                if close and led["qty"]:
-                    self._submit(broker, b, "sell" if led["qty"] > 0 else "buy", abs(led["qty"]), "exit", None)
-                    closed = True
-            self._update_bot(bid, paper_status="stopped", stopped_at=_now(), pending=None)
-            self.event("info", f"⏹️ Bot detenido: {bid}" + (" (se cierra su posición en la próxima apertura)" if closed else ""),
+                for sym, led in self.ledgers(b).items():
+                    if close and led["qty"]:
+                        self._submit(broker, b, sym, "sell" if led["qty"] > 0 else "buy", abs(led["qty"]), "exit", None)
+                        closed.append(sym)
+            self._update_bot(bid, paper_status="stopped", stopped_at=_now(), pending=None, book={})
+            self.event("info", f"⏹️ Bot detenido: {bid}" + (f" (se cierra{'n' if len(closed) > 1 else ''} "
+                                                              f"{', '.join(closed)} en la próxima apertura)" if closed else ""),
                        bid, notify=True)
-            return {"closing": closed}
+            return {"closing": bool(closed), "symbols": closed}
 
     # ------------------------------------------------------------------ orders
-    def _client_id(self, b: m.LabBot, purpose: str) -> str:
-        return f"qsts-{hash_obj([b.id, purpose, _now().isoformat()], 10)}-{purpose[:3]}"
+    def _client_id(self, b: m.LabBot, purpose: str, symbol: str = "") -> str:
+        return f"qsts-{hash_obj([b.id, symbol, purpose, _now().isoformat()], 10)}-{purpose[:3]}"
 
-    def _submit(self, broker, b: m.LabBot, side: str, qty: float, purpose: str, signal_day,
+    def _submit(self, broker, b: m.LabBot, symbol: str, side: str, qty: float, purpose: str, signal_day,
                 stop: float | None = None, target: float | None = None, order_type: str = "market",
                 tif: str = "day") -> m.LabOrder | None:
-        cid = self._client_id(b, purpose)
-        req = {"symbol": b.symbol, "qty": int(qty), "side": side, "type": order_type, "time_in_force": tif,
+        cid = self._client_id(b, purpose, symbol)
+        req = {"symbol": symbol, "qty": int(qty), "side": side, "type": order_type, "time_in_force": tif,
                "client_order_id": cid}
         kind = order_type
         if purpose == "entry" and (stop or target):
@@ -245,7 +327,7 @@ class PaperTrader:
             else:
                 req.update(type="limit", limit_price=target)
                 kind = "limit"
-        row = m.LabOrder(id=cid, bot_id=b.id, symbol=b.symbol, side=side, qty=int(qty), purpose=purpose,
+        row = m.LabOrder(id=cid, bot_id=b.id, symbol=symbol, side=side, qty=int(qty), purpose=purpose,
                          order_type=kind, stop_price=stop, limit_price=target, signal_day=signal_day)
         try:
             o = broker.submit(req)
@@ -253,7 +335,7 @@ class PaperTrader:
             row.status, row.error = "rejected", str(e)[:500]
             with self.sf() as s, s.begin():
                 s.add(row)
-            self.event("error", f"⚠️ Alpaca rechazó la orden de {PURPOSE.get(purpose, purpose)} de {b.symbol} ({b.id}): {e}",
+            self.event("error", f"⚠️ Alpaca rechazó la orden de {PURPOSE.get(purpose, purpose)} de {symbol} ({b.id}): {e}",
                        b.id, notify=True)
             return None
         row.broker_id, row.status, row.raw = o.get("id"), o.get("status") or "submitted", o
@@ -261,15 +343,18 @@ class PaperTrader:
             s.add(row)
         return row
 
-    def _cancel_open(self, broker, b: m.LabBot, purposes: tuple = ("entry", "exit", "protect", "stop", "target")) -> int:
+    def _cancel_open(self, broker, b: m.LabBot, purposes: tuple = ("entry", "exit", "protect", "stop", "target"),
+                     symbol: str | None = None) -> int:
         n = 0
         for o in self.orders(b.id):
+            if symbol is not None and o.symbol != symbol:
+                continue
             if o.purpose in purposes and o.status in OPEN_ORDER and o.broker_id:
                 try:
                     broker.cancel(o.broker_id)
                     n += 1
                 except BrokerError as e:
-                    self.event("error", f"No se pudo cancelar una orden de {b.symbol}: {e}", b.id)
+                    self.event("error", f"No se pudo cancelar una orden de {o.symbol}: {e}", b.id)
         return n
 
     def sync_orders(self, broker) -> int:
@@ -323,14 +408,19 @@ class PaperTrader:
         verb = {"buy": "compradas", "sell": "vendidas"}[row.side]
         icon = {"stop": "🛑 Stop ejecutado", "target": "🎯 Objetivo alcanzado"}.get(row.purpose, "✅ Ejecutada")
         text = f"{icon}: {verb} {filled_qty:g} {row.symbol} a {money(price)} — bot «{REGISTRY[b.strategy].name}»"
+        if is_universe(b):
+            text += f" ({UNIVERSE_NAME})"
+        led = self.ledger(b, row.symbol)
         if row.purpose in ("exit", "stop", "target"):
-            led = self.ledger(b)
             if led["trades"]:
                 t = led["trades"][-1]
                 pct = f"{t['pnl_pct'] * 100:+.2f}".replace(".", ",") if t["pnl_pct"] is not None else "—"
                 text += f"\nResultado de la operación: {money(t['pnl'])} ({pct} %)"
-            if not led["qty"]:
-                self._update_bot(b.id, stop_level=None, target_level=None)
+        if not led["qty"]:  # flat in this stock: its protective levels are gone
+            bk = self.book(b)
+            if row.symbol in bk:
+                bk[row.symbol].update(stop=None, target=None)
+                self._save_book(b.id, bk)
         self.event("fill", text, b.id, notify=True)
         return 1
 
@@ -360,142 +450,192 @@ class PaperTrader:
         if not todo:
             self.state = f"al día (última señal: cierre del {due.date()})"
             return self.state
-        stale = []
-        for b in todo:
-            try:
-                _res, bars = self.lab.result(b)
-                if bars.index[-1] < due:
-                    stale.append(b.symbol)
-            except (KeyError, ValueError):
-                stale.append(b.symbol)
+        stale = sorted({s for b in todo for s in self.lab.stale_symbols(b, due)})
         if stale:
             n, last = self._attempts.get(due.date(), (0, None))
             if self.data_busy and self.data_busy():
                 self.state = "esperando a que termine una descarga de precios"
                 return self.state
             if n < MAX_UPDATE_ATTEMPTS and (last is None or now - last >= pd.Timedelta(minutes=RETRY_MINUTES)):
-                if self.refresh and self.refresh(sorted(set(stale))):
+                if self.refresh and self.refresh(stale):
                     self._attempts[due.date()] = (n + 1, now)
-                    self.event("info", f"Descargando los precios del {due.date()} para las señales de los bots")
+                    self.event("info", f"Descargando los precios del {due.date()} para las señales de los bots "
+                                       f"({len(stale)} valores)")
                 self.state = f"descargando los precios del {due.date()}"
                 return self.state
             if n < MAX_UPDATE_ATTEMPTS:
                 self.state = f"esperando los precios del {due.date()}"
                 return self.state
-            self.event("skip", f"⚠️ No hay precios del {due.date()} para {', '.join(sorted(set(stale)))}: "
-                               "esos bots no operan hoy.", notify=True)
+            if not self._attempts.get(("skipped", due.date())):
+                self._attempts[("skipped", due.date())] = True
+                shown = ", ".join(stale[:8]) + (f" y {len(stale) - 8} más" if len(stale) > 8 else "")
+                self.event("skip", f"⚠️ No hay precios del {due.date()} para {shown}: esos valores no operan hoy.",
+                           notify=True)
+        # what each stock should hold according to the active bots: anything else at Alpaca is a mismatch
+        expected: dict[str, float] = {}
+        for b in bots:
+            for s, led in self.ledgers(b).items():
+                expected[s] = expected.get(s, 0.0) + led["qty"]
+        mismatch = {s for s in set(expected) | set(positions)
+                    if abs((positions.get(s) or {}).get("qty", 0.0) - expected.get(s, 0.0)) > 1e-6}
         entries_ok = not clock.get("is_open")
+        waiting = []
         for b in todo:
-            if b.symbol in stale:
+            view = self.lab.signal_view(b, due)
+            if view is None:  # a portfolio bot being recomputed with the new prices: next round
+                waiting.append(b.id)
+                continue
+            if not view["rows"]:
                 self._update_bot(b.id, last_signal_day=due.date())
                 continue
             try:
-                self._process(broker, b, due, positions, entries_ok)
+                self._process(broker, b, due, view, positions, mismatch, entries_ok)
             except BrokerError as e:
                 self.event("error", f"Alpaca: {e}", b.id)
                 continue
             self._update_bot(b.id, last_signal_day=due.date())
+        if waiting:
+            self.state = f"calculando las señales de la cartera del {due.date()} ({len(waiting)} bot(s))"
+            return self.state
         self.state = f"señales del cierre del {due.date()} procesadas"
         return self.state
 
-    def _process(self, broker, b: m.LabBot, due: pd.Timestamp, positions: dict, entries_ok: bool) -> None:
+    def _process(self, broker, b: m.LabBot, due: pd.Timestamp, view: dict, positions: dict, mismatch: set,
+                 entries_ok: bool) -> None:
         st = REGISTRY[b.strategy]
-        res, bars = self.lab.result(b)
-        sig = res.signals.loc[due] if due in res.signals.index else None
-        led = self.ledger(b)
-        pos = led["qty"]
-        have = (positions.get(b.symbol) or {}).get("qty", 0.0)
-        if abs(have - pos) > 1e-6:
-            self.event("error", f"⚠️ Descuadre en {b.symbol}: el bot espera {pos:g} acciones y Alpaca tiene {have:g}. "
-                                "No se envía nada para este bot hasta que lo revises (¿operaste a mano?).", b.id, notify=True)
-            return
-        if any(o.status in OPEN_ORDER and o.purpose in ("entry", "exit") for o in self.orders(b.id)):
-            self.event("info", f"{b.symbol}: hay una orden pendiente de ejecutarse; se espera a ella.", b.id)
-            return
-        close = float(bars["close"].iloc[-1])
-        d = int(np.sign(pos))
-        if sig is None:
-            return
-        # 1) exits (always sent, even late: getting out matters more than the price)
-        flip = d != 0 and int(sig["entry"]) == -d
-        if d != 0 and ((d > 0 and sig["exit_long"]) or (d < 0 and sig["exit_short"]) or flip):
-            self._cancel_open(broker, b, ("protect", "stop", "target"))
-            self._cancel_legs(broker, b)
-            o = self._submit(broker, b, "sell" if d > 0 else "buy", abs(pos), "exit", due.date())
-            if o is not None:
-                self.event("order", f"🔔 Señal de salida en {b.symbol} (cierre del {due.date()}): orden de "
-                                    f"{'VENTA' if d > 0 else 'RECOMPRA'} de {abs(pos):g} acciones para la apertura — "
-                                    f"bot «{st.name}»", b.id, notify=True)
-            if flip:  # the other side opens at the following open, once this exit is filled
-                self._update_bot(b.id, pending={"direction": -d, "reason": "giro de la estrategia",
-                                                "stop": None, "target": None, "signal_day": str(due.date())})
-            return
-        # 2) entries: from today's signal, or one waiting (reversal / following the backtest)
-        want, why, stop, target = 0, "", None, None
-        if d == 0 and b.pending:
-            want, why = int(b.pending["direction"]), b.pending.get("reason", "")
-            stop, target = b.pending.get("stop"), b.pending.get("target")
-        if d == 0 and int(sig["entry"]) != 0:
-            want, why = int(sig["entry"]), "señal de entrada"
+        rows, uni = view["rows"], is_universe(b)
+        label = f"«{st.name}»" + (f" ({UNIVERSE_NAME})" if uni else "")
+        bk = self.book(b)
+        leds = self.ledgers(b)
+        held = {s: led for s, led in leds.items() if led["qty"]}
+        orders = self.orders(b.id)
+        busy = {o.symbol for o in orders if o.status in OPEN_ORDER and o.purpose in ("entry", "exit")}
+        exiting: set[str] = set()
+        # 1) open positions: exits (always sent, even late: getting out matters more than the price) or protection
+        for sym, led in held.items():
+            pos = led["qty"]
+            d = int(np.sign(pos))
+            if sym in mismatch:
+                have = (positions.get(sym) or {}).get("qty", 0.0)
+                self.event("error", f"⚠️ Descuadre en {sym}: el bot espera {pos:g} acciones y Alpaca tiene {have:g}. "
+                                    "No se envía nada para esa acción hasta que lo revises (¿operaste a mano?).",
+                           b.id, notify=True)
+                continue
+            if sym in busy:
+                self.event("info", f"{sym}: hay una orden pendiente de ejecutarse; se espera a ella.", b.id)
+                continue
+            sig = rows.get(sym)
+            if sig is None:
+                self.event("skip", f"{sym}: sin precio del {due.date()}; la posición sigue igual hoy.", b.id)
+                continue
+            flip = sig["entry"] == -d
+            if (d > 0 and sig["exit_long"]) or (d < 0 and sig["exit_short"]) or flip:
+                self._cancel_open(broker, b, ("protect", "stop", "target"), symbol=sym)
+                o = self._submit(broker, b, sym, "sell" if d > 0 else "buy", abs(pos), "exit", due.date())
+                exiting.add(sym)
+                if o is not None:
+                    self.event("order", f"🔔 Señal de salida en {sym} (cierre del {due.date()}): orden de "
+                                        f"{'VENTA' if d > 0 else 'RECOMPRA'} de {abs(pos):g} acciones para la apertura — "
+                                        f"bot {label}", b.id, notify=True)
+                if flip:  # the other side opens at the following open, once this exit is filled
+                    bk.setdefault(sym, {})["pending"] = {"direction": -d, "reason": "giro de la estrategia",
+                                                         "stop": None, "target": None, "signal_day": str(due.date())}
+                continue
+            lv = bk.setdefault(sym, {})
+            new_stop = lv.get("stop")
+            if np.isfinite(sig["trail"]):  # trailing stops move only in the position's favour
+                t = float(sig["trail"])
+                new_stop = t if new_stop is None else (max(new_stop, t) if d > 0 else min(new_stop, t))
+            self._protect(broker, b, sym, d, abs(pos), new_stop, lv.get("target"), due, bk)
+        # 2) entries: first those waiting (reversal / following the backtest), then today's best-ranked signals
+        occupied = len(held) - len(exiting)
+        free = view["max_positions"] - occupied - sum(1 for s in busy if s not in held)
+        wanted: list[tuple[str, int, str, float | None, float | None]] = []
+        for sym, v in sorted(bk.items()):
+            p = v.get("pending")
+            if not p or sym in held:
+                continue
+            wanted.append((sym, int(p["direction"]), p.get("reason", ""), p.get("stop"), p.get("target")))
+        taken = self._claims(exclude=b.id)
+        for sym in view["ranked"]:
+            if sym in held or sym in busy or any(w[0] == sym for w in wanted):
+                continue
+            if sym in taken:
+                continue
+            sig = rows[sym]
+            if sym in mismatch:
+                if not uni:
+                    have = (positions.get(sym) or {}).get("qty", 0.0)
+                    self.event("error", f"⚠️ Descuadre en {sym}: el bot espera 0 acciones y Alpaca tiene {have:g}. "
+                                        "No se envía nada para esa acción hasta que lo revises (¿operaste a mano?).",
+                               b.id, notify=True)
+                continue  # a stock you hold by hand is never bought by a portfolio bot
+            want = int(sig["entry"])
+            close = sig["close"]
             stop = sig["stop"] if np.isfinite(sig["stop"]) else (
                 close * (1 - want * sig["stop_pct"]) if np.isfinite(sig["stop_pct"]) else None)
             target = sig["target"] if np.isfinite(sig["target"]) else (
                 close * (1 + want * sig["target_pct"]) if np.isfinite(sig["target_pct"]) else None)
-        if d == 0 and want:
-            if not entries_ok:
-                self.event("skip", f"⏭️ {b.symbol}: la señal de entrada del {due.date()} no se envía porque la bolsa ya "
-                                   "ha abierto (la app no estaba abierta antes de la apertura).", b.id, notify=True)
-                self._update_bot(b.id, pending=None)
-                return
-            self._enter(broker, b, st, want, why, close, stop, target, due)
-            return
-        # 3) an open position: keep its stop / target resting at Alpaca (trailing stops move only in its favour)
-        if d != 0:
-            new_stop = b.stop_level
-            if np.isfinite(sig["trail"]):
-                t = float(sig["trail"])
-                new_stop = t if new_stop is None else (max(new_stop, t) if d > 0 else min(new_stop, t))
-            self._protect(broker, b, d, abs(pos), new_stop, b.target_level, due)
+            wanted.append((sym, want, "señal de entrada", stop, target))
+        wanted = wanted[:max(free, 0)]
+        for sym, v in bk.items():  # pending entries are used now (or dropped if there is no place for them)
+            if sym not in held:
+                v["pending"] = None
+        if wanted and not entries_ok:
+            names = ", ".join(w[0] for w in wanted)
+            self.event("skip", f"⏭️ {names}: la señal de entrada del {due.date()} no se envía porque la bolsa ya "
+                               "ha abierto (la app no estaba abierta antes de la apertura).", b.id, notify=True)
+            wanted = []
+        if wanted:
+            equity = (b.capital or 0.0) + sum(led["realized"] for led in leds.values())
+            gross = 0.0
+            for sym, led in held.items():
+                c = rows.get(sym, {}).get("close") or led["avg"]
+                equity += led["qty"] * (c - led["avg"])
+                if sym not in exiting:
+                    gross += abs(led["qty"]) * c
+            for sym, direction, why, stop, target in wanted:
+                close = rows[sym]["close"] if sym in rows else None
+                if close is None:
+                    continue
+                amount = min(equity * view["size"], equity - gross)
+                sent = self._enter(broker, b, sym, direction, why, close, stop, target, due, amount, label, bk)
+                if sent:
+                    gross += sent
+        self._save_book(b.id, bk)
 
-    def _enter(self, broker, b, st, direction: int, why: str, close: float, stop, target, due) -> None:
+    def _enter(self, broker, b, sym: str, direction: int, why: str, close: float, stop, target, due, amount: float,
+               label: str, bk: dict) -> float:
         if direction < 0:
-            acct, asset = broker.account(), broker.asset(b.symbol)
+            acct, asset = broker.account(), broker.asset(sym)
             if not (acct.get("shorting_enabled") and asset.get("shortable") and asset.get("easy_to_borrow")):
-                self.event("skip", f"⏭️ {b.symbol}: Alpaca no permite ponerse corto ahora en esta acción; se omite la entrada.",
+                self.event("skip", f"⏭️ {sym}: Alpaca no permite ponerse corto ahora en esta acción; se omite la entrada.",
                            b.id, notify=True)
-                self._update_bot(b.id, pending=None)
-                return
-        led = self.ledger(b)
-        qty = math.floor(led["equity"] * (b.size_pct or 100) / 100 / close)
+                return 0.0
+        qty = math.floor(max(amount, 0.0) / close)
         if qty < 1:
-            self.event("skip", f"⏭️ {b.symbol}: el capital del bot ({money(led['equity'])}) no llega para 1 acción.",
+            self.event("skip", f"⏭️ {sym}: el dinero disponible del bot ({money(amount)}) no llega para 1 acción.",
                        b.id, notify=True)
-            return
+            return 0.0
         if stop is not None and direction * (close - stop) <= 0:
             stop = None
         if target is not None and direction * (target - close) <= 0:
             target = None
-        o = self._submit(broker, b, "buy" if direction > 0 else "sell", qty, "entry", due.date(), stop, target)
-        self._update_bot(b.id, pending=None, stop_level=stop, target_level=target)
-        if o is not None:
-            extra = (f" · stop {money(stop)}" if stop else "") + (f" · objetivo {money(target)}" if target else "")
-            self.event("order", f"🔔 {why.capitalize()} en {b.symbol} (cierre del {due.date()}): orden de "
-                                f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty} acciones para la apertura "
-                                f"(≈ {money(qty * close)}){extra} — bot «{st.name}»", b.id, notify=True)
+        o = self._submit(broker, b, sym, "buy" if direction > 0 else "sell", qty, "entry", due.date(), stop, target)
+        bk.setdefault(sym, {}).update(stop=stop, target=target, pending=None)
+        if o is None:
+            return 0.0
+        extra = (f" · stop {money(stop)}" if stop else "") + (f" · objetivo {money(target)}" if target else "")
+        self.event("order", f"🔔 {why.capitalize()} en {sym} (cierre del {due.date()}): orden de "
+                            f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty} acciones para la apertura "
+                            f"(≈ {money(qty * close)}){extra} — bot {label}", b.id, notify=True)
+        return qty * close
 
-    def _cancel_legs(self, broker, b) -> None:
-        """Stop / target legs of this bot's bracket entries that are still waiting."""
-        for o in self.orders(b.id):
-            if o.purpose in ("stop", "target") and o.status in OPEN_ORDER and o.broker_id:
-                try:
-                    broker.cancel(o.broker_id)
-                except BrokerError:
-                    pass
-
-    def _protect(self, broker, b, d: int, qty: float, stop, target, due) -> None:
+    def _protect(self, broker, b, sym: str, d: int, qty: float, stop, target, due, bk: dict) -> None:
         if stop is None and target is None:
             return
-        live = [o for o in self.orders(b.id) if o.purpose in ("protect", "stop", "target") and o.status in OPEN_ORDER]
+        live = [o for o in self.orders(b.id)
+                if o.symbol == sym and o.purpose in ("protect", "stop", "target") and o.status in OPEN_ORDER]
         same = live and all((o.stop_price is None or stop is None or abs(o.stop_price - stop) < 0.005) for o in live)
         if same:
             return
@@ -505,12 +645,12 @@ class PaperTrader:
             except BrokerError:
                 pass
         side = "sell" if d > 0 else "buy"
-        o = self._submit(broker, b, side, qty, "protect", due.date(), stop, target, tif="gtc")
+        o = self._submit(broker, b, sym, side, qty, "protect", due.date(), stop, target, tif="gtc")
         if o is None:  # GTC not accepted for this order: one day at a time (re-sent every evening)
-            o = self._submit(broker, b, side, qty, "protect", due.date(), stop, target, tif="day")
-        self._update_bot(b.id, stop_level=stop, target_level=target)
+            o = self._submit(broker, b, sym, side, qty, "protect", due.date(), stop, target, tif="day")
+        bk.setdefault(sym, {}).update(stop=stop, target=target)
         if o is not None:
-            self.event("order", f"🛡️ {b.symbol}: stop{' y objetivo' if target else ''} colocados en Alpaca "
+            self.event("order", f"🛡️ {sym}: stop{' y objetivo' if target else ''} colocados en Alpaca "
                                 f"(stop {money(stop)}{', objetivo ' + money(target) if target else ''}).", b.id)
 
     # ------------------------------------------------------------------ background thread

@@ -11,6 +11,11 @@ and simulation were removed (they remain in the git history).
       Sortino, Calmar, ulcer, tail ratio, Kelly, VaR/CVaR, monthly P&L, weekday exposure, long/short report,
       buy & hold comparison, Monte Carlo
 - [x] Audit ("Edge check") with 9 checks
+- [x] S&P 500 portfolio bots: scanner over the index, ≤5 positions, ranked entries (author's rule or most liquid),
+      each stock traded only from its date added; equivalence test with the single-stock backtester; per-stock
+      breadth; audit with breadth, halves of the stocks and 100 random "monkey" portfolios; background computation
+      cached on disk
+- [x] Paper trading of portfolio bots (several stocks per bot, one Alpaca position per stock across bots)
 - [x] Classic reference strategies: RSI(2) of Connors, golden cross 50/200, Turtles 20/10
 - [ ] Strategies brought by the user (added one by one, each with its source)
 

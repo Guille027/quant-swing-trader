@@ -21,7 +21,8 @@ import pandas as pd
 from qsts.lab.strategy import Strategy
 
 REASONS = {"signal": "señal", "reverse": "señal contraria", "stop": "stop", "stop_gap": "stop (hueco de apertura)",
-           "target": "objetivo", "target_gap": "objetivo (hueco de apertura)", "end": "abierta (fin de datos)"}
+           "target": "objetivo", "target_gap": "objetivo (hueco de apertura)", "end": "abierta (fin de datos)",
+           "data_end": "sin más datos de la acción"}
 
 
 @dataclass

@@ -174,3 +174,16 @@
 39. **Audit instead of a single verdict.** A published backtest is a best case. Each bot gets nine checks (trades, buy
     & hold, costs, halves, years, neighbouring settings, other stocks, Monte Carlo, PSR) and the count of bots tried
     is shown; the real test is the paper curve (pink) from the activation date, on days nobody optimised on.
+40. **Strategies are judged on the whole S&P 500, not on one chosen stock.** A strategy that only wins on the stock
+    it was shown on is usually luck. Each strategy also runs as a portfolio bot: every session it scans today's S&P 500
+    members and holds at most 5 positions (the user's limit), each with 1/5 of the equity at the previous close and
+    never more than the equity not yet invested (no leverage). When more stocks signal than there are free places,
+    the author's ranking rule is used if the source gives one; otherwise a fixed rule: most liquid first (20-session
+    average traded value), simple, causal and what one would do in practice. Survivorship: the member list is today's;
+    a stock is traded only from its "date added" (it was not in the index before, and stocks are often added after
+    rising); removed companies are still missing and the screen says so (point-in-time member lists with delisted
+    prices are not available from the data source). Extra audit checks: the strategy on each stock alone (breadth),
+    on two alternating halves of the stocks, and against 100 random portfolios with the same entry frequency,
+    holding periods and sizing ("monkeys", 95% required). A hidden hold-out period was not added: the app shows the
+    whole curve, so the out-of-sample proof stays the paper trading from the activation date. With one stock and one
+    place the portfolio engine reproduces the single-stock backtester exactly (tested).

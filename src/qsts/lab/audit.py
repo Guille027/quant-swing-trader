@@ -132,3 +132,121 @@ def audit(strategy: Strategy, bars: pd.DataFrame, params: dict | None, cfg: Back
     passed = sum(1 for c in decided if c["ok"])
     return {"checks": checks, "passed": passed, "total": len(decided),
             "verdict": ("sólida" if passed == len(decided) else "dudosa" if passed >= len(decided) * 0.6 else "frágil")}
+
+
+N_MONKEYS = 100
+
+
+def audit_portfolio(panel, cfg, bench: pd.Series, breadth: dict | None, n_tested: int = 1,
+                    rebuild=None, strategy: Strategy | None = None, params: dict | None = None,
+                    progress=None) -> dict:
+    """The audit of a portfolio bot (the strategy as an S&P 500 scanner). Same idea as `audit`, plus the checks a
+    universe makes possible: does it work on most stocks on their own, on both halves of the stocks, and does it
+    beat random entries with the same frequency and holding time ('monkeys')?
+    `rebuild(params)` returns the panel with other parameter values (robustness check); `bench`: SPY's closes."""
+    from qsts.lab.portfolio import monkey_spec, run_portfolio
+    say = progress or (lambda _msg: None)
+    base = run_portfolio(panel, cfg)
+    eq, tr = base.equity, base.trades
+    bh = bench[(bench.index >= eq.index[0]) & (bench.index <= eq.index[-1])] if len(eq) else bench.iloc[:0]
+    bh = cfg.initial_capital * bh / bh.iloc[0] if len(bh) else bh
+    checks = []
+
+    def add(key, label, ok, detail, **data):
+        checks.append({"key": key, "label": label, "ok": ok, "detail": detail, **data})
+
+    n = len(tr)
+    add("trades", "Suficientes operaciones", n >= MIN_TRADES,
+        f"{n} operaciones (mínimo {MIN_TRADES} para que las estadísticas signifiquen algo).", value=n)
+
+    s_strat, s_bh = _sharpe(eq), _sharpe(bh)
+    add("beats_hold", "Mejor rentabilidad/riesgo que el S&P 500 (SPY)",
+        None if s_strat is None or s_bh is None else s_strat >= s_bh,
+        f"Sharpe {_d(s_strat)} frente a {_d(s_bh)} de comprar y mantener el SPY." if s_strat is not None
+        and s_bh is not None else "No se puede calcular.", strategy=s_strat, hold=s_bh)
+
+    say("costes más altos")
+    costly = run_portfolio(panel, replace(cfg, slippage_bps=cfg.slippage_bps * 2 + 5,
+                                          commission_pct=cfg.commission_pct + 0.05))
+    add("costs", "Sigue ganando con costes más altos", _net(costly) > 0,
+        f"Con el doble de deslizamiento y 0,05% de comisión: {_p(_net(costly))} (sin ellos: {_p(_net(base))}).",
+        value=_net(costly))
+
+    if len(eq) > 40:
+        mid = eq.index[len(eq) // 2]
+        h1 = run_portfolio(panel, replace(cfg, start=str(eq.index[0].date()), end=str(mid.date())))
+        h2 = run_portfolio(panel, replace(cfg, start=str(mid.date()), end=str(eq.index[-1].date())))
+        add("halves", "Gana en las dos mitades del periodo", _net(h1) > 0 and _net(h2) > 0,
+            f"Primera mitad (hasta {mid.date()}): {_p(_net(h1))} · segunda mitad: {_p(_net(h2))}.",
+            first=_net(h1), second=_net(h2))
+
+    yrs = metrics.yearly(eq)
+    if len(yrs) >= 3:
+        pos = sum(1 for y in yrs if (y["strategy"] or 0) > 0) / len(yrs)
+        add("years", "Gana en la mayoría de los años", pos >= 0.6,
+            f"{pos:.0%} de los {len(yrs)} años en positivo.", value=pos)
+
+    if breadth and breadth.get("n_used"):
+        add("breadth", "Funciona en la mayoría de las acciones, una a una", breadth["profitable"] >= 0.6,
+            f"Probada en cada acción por separado: gana (factor de beneficio > 1) en {breadth['profitable']:.0%} de "
+            f"{breadth['n_used']} acciones; mediana {_p(breadth['median_net'])}; "
+            f"supera a mantener la acción en el {breadth['beats_hold']:.0%}.", value=breadth["profitable"])
+
+    say("las dos mitades de las acciones")
+    half = np.arange(len(panel.symbols)) % 2 == 0  # alphabetical order, alternating: A, C, E... and B, D, F...
+    a, b = run_portfolio(panel, cfg, symbols_mask=half), run_portfolio(panel, cfg, symbols_mask=~half)
+    add("split", "Gana con las dos mitades de las acciones", _net(a) > 0 and _net(b) > 0,
+        f"Solo con la mitad A de las acciones: {_p(_net(a))} · solo con la mitad B: {_p(_net(b))}.",
+        first=_net(a), second=_net(b))
+
+    spec = monkey_spec(panel, tr)
+    if spec is not None:
+        nets = []
+        for s in range(N_MONKEYS):
+            if s % 10 == 0:
+                say(f"monos {s}/{N_MONKEYS}")
+            nets.append(_net(run_portfolio(panel, cfg, monkey={**spec, "seed": s})))
+        nets = np.array(nets)
+        beat = float((_net(base) > nets).mean())
+        add("monkey", "Mejor que entrar al azar (monos)", beat >= 0.95,
+            f"{N_MONKEYS} carteras que compran acciones al azar con la misma frecuencia, duración y tamaño: la "
+            f"estrategia supera al {beat:.0%} (se pide 95%). La mitad de los monos acaba en "
+            f"{_p(float(np.median(nets)))} o más.", value=beat, monkeys=sorted(float(x) for x in nets))
+
+    if rebuild is not None and strategy is not None and strategy.param_grid:
+        neigh = []
+        for k, values in strategy.param_grid.items():
+            for v in values:
+                p = {**(params or {}), k: v}
+                if strategy.resolve(p) == strategy.resolve(params):
+                    continue
+                say(f"variante {k} = {v}")
+                r = run_portfolio(rebuild(p), cfg)
+                neigh.append({"param": k, "value": v, "net": _net(r), "sharpe": _sharpe(r.equity)})
+        if neigh:
+            good = [x for x in neigh if x["net"] > 0 and (s_strat is None or s_strat <= 0
+                                                          or (x["sharpe"] or -9) >= 0.5 * s_strat)]
+            share = len(good) / len(neigh)
+            add("robust", "Aguanta cambios en sus ajustes", share >= 0.6,
+                f"{len(good)} de {len(neigh)} variantes cercanas siguen ganando y conservan al menos la mitad del Sharpe.",
+                value=share, variants=neigh)
+
+    mc = metrics.monte_carlo(tr)
+    if mc:
+        add("luck", "Resiste la mala suerte (Monte Carlo)", (mc["final"]["5"] or -1) > 0,
+            f"Reordenando y repitiendo sus operaciones 1.000 veces: en el 5% peor de los casos termina en "
+            f"{_p(mc['final']['5'])}; probabilidad de acabar perdiendo {mc['p_loss']:.0%}.", value=mc["final"]["5"])
+
+    rets = eq.pct_change().dropna()
+    bh_r = bh.pct_change().dropna()
+    bench_sr = max(0.0, float(bh_r.mean() / bh_r.std(ddof=1))) if len(bh_r) > 2 and bh_r.std(ddof=1) > 0 else 0.0
+    p = metrics.psr(rets, bench_sr)
+    add("psr", "Probablemente no es suerte", None if p is None else p >= 0.9,
+        (f"Probabilidad de que su rentabilidad/riesgo real supere al S&P 500: {p:.0%} (se pide 90%). "
+         f"Ojo: llevas {n_tested} bots probados en la app; cuantas más pruebas, más fácil que alguno salga "
+         "bien por casualidad.") if p is not None else "Demasiados pocos datos.", value=p)
+
+    decided = [c for c in checks if c["ok"] is not None]
+    passed = sum(1 for c in decided if c["ok"])
+    return {"checks": checks, "passed": passed, "total": len(decided),
+            "verdict": ("sólida" if passed == len(decided) else "dudosa" if passed >= len(decided) * 0.6 else "frágil")}

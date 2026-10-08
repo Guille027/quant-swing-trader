@@ -7,6 +7,7 @@ the data copy shared between two computers.
 from __future__ import annotations
 
 import math
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -24,7 +25,8 @@ from qsts.app.envfile import set_env_values
 from qsts.broker.alpaca_paper import AlpacaPaper, BrokerError
 from qsts.data.universe import UniverseList, fetch_sp500
 from qsts.lab import metrics as lab_metrics
-from qsts.lab.service import CAPITAL, LabService
+from qsts.data.bars import Timeframe
+from qsts.lab.service import CAPITAL, UNIVERSE, LabService, is_universe
 from qsts.lab.strategy import REGISTRY
 from qsts.lab.trader import PaperTrader
 from qsts.notify.telegram import Telegram, TelegramError
@@ -59,8 +61,9 @@ class IngestBody(BaseModel):
 
 class BotBody(BaseModel):
     strategy: str
-    symbol: str
+    symbol: str  # a stock / ETF, or "SP500" for a portfolio bot
     params: dict = {}
+    max_positions: int | None = None
 
 
 class BotUpdateBody(BaseModel):
@@ -160,11 +163,40 @@ def create_app(ctx: AppContext) -> FastAPI:
         have = set(ctx.symbols())
         return [s for s in ETFS if s in have] + [s for s in ctx.repo.liquid_symbols(30) if s not in ETFS]
 
+    def _data_version() -> tuple:
+        if "data_token0" not in ctx.extra:
+            ctx.extra["data_token0"] = ctx.repo.global_token()
+        return (*ctx.extra["data_token0"], ctx.extra.get("data_gen", 0))
+
+    def _universe() -> dict:
+        """The S&P 500 stocks with stored prices and the day each one joined the index (traded only from then)."""
+        ver = _data_version()
+        hit = ctx.extra.get("universe_cache")
+        if hit is not None and hit[0] == ver:
+            return hit[1]
+        cov = ctx.repo.coverage(Timeframe.D1)
+        starts = ctx.repo.membership_starts(UNIVERSE)
+        if starts:
+            syms, dated = {s: d for s, d in starts.items() if s in cov and s not in ETFS}, True
+        else:  # downloaded without the member list: every stored stock with a sector (no dates added known)
+            sectors = {r["symbol"]: r["sector"] for r in ctx.repo.summary()}
+            syms, dated = {s: None for s in cov if sectors.get(s) and s not in ETFS}, False
+        out = {"symbols": syms, "dated": dated, "first": {s: cov[s]["first"] for s in syms},
+               "last": {s: cov[s]["last"] for s in syms}}
+        ctx.extra["universe_cache"] = (ver, out)
+        return out
+
     def _lab() -> LabService:
+        with ctx.extra.setdefault("lab_lock", threading.Lock()):  # the window asks several things at once
+            return _make_lab()
+
+    def _make_lab() -> LabService:
         lab = ctx.extra.get("lab")
         if lab is None:
-            lab = ctx.extra["lab"] = LabService(ctx.sf, ctx.research_frame, ctx.repo.data_token, basket=_basket,
-                                                benchmark=ctx.settings.benchmark)
+            lab = ctx.extra["lab"] = LabService(
+                ctx.sf, ctx.research_frame, ctx.repo.data_token, basket=_basket, benchmark=ctx.settings.benchmark,
+                universe=_universe, data_version=_data_version, frame_raw=ctx._research_frame,
+                cache_dir=Path(ctx.settings.state_dir) / "lab_cache")
             lab.sync()
         return lab
 
@@ -172,6 +204,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     def library():
         lib = _lab().library()
         lib["missing"] = sorted({r["symbol"] for r in lib["rows"] if r.get("error", "").startswith("sin datos")})
+        lib["need_universe"] = any(r.get("need_universe") for r in lib["rows"])
         return _j(lib)
 
     @app.get("/api/strategies")
@@ -182,12 +215,14 @@ def create_app(ctx: AppContext) -> FastAPI:
     def create_bot(body: BotBody):
         lab = _lab()
         try:
-            b = lab.create_bot(body.strategy, body.symbol, body.params)
+            b = lab.create_bot(body.strategy, body.symbol, body.params, body.max_positions)
         except KeyError:
             raise HTTPException(404, "estrategia desconocida")
         except ValueError as e:
             raise HTTPException(400, str(e))
         downloading = False
+        if is_universe(b):
+            return {"id": b.id, "downloading": False, "need_universe": not _universe()["symbols"]}
         if b.symbol not in set(ctx.symbols()):  # no prices yet: download them now
             downloading = _data_runner().start("symbols", [b.symbol], "2010-01-01", earnings=False)
         return {"id": b.id, "downloading": downloading}
@@ -207,28 +242,33 @@ def create_app(ctx: AppContext) -> FastAPI:
         lab, tr = _lab(), _trader()
         try:
             d = lab.detail(bid)
-        except KeyError:
+        except KeyError as e:
+            if str(e).strip("'") == UNIVERSE:
+                raise HTTPException(400, "faltan los precios del S&P 500: descárgalos en Datos")
             raise HTTPException(404, "bot desconocido")
         except ValueError as e:
             raise HTTPException(400, str(e))
         b = lab.get_bot(bid)
-        d["paper"] = _paper_view(b, d) if b.activated_at else None
+        d["paper"] = _paper_view(b, d) if b.activated_at and "computing" not in d else None
         return _j(d)
+
+    def _closes(sym: str) -> pd.Series:
+        return _lab().frame(sym)["close"]
 
     def _paper_view(b, d: dict) -> dict:
         """The bot's paper results since activation, also as a continuation of the backtest curve (in %)."""
-        tr = _trader()
-        _res, bars = _lab().result(b)
-        led = tr.ledger(b)
-        curve = tr.live_curve(b, bars)
+        tr, lab = _trader(), _lab()
+        cal = lab.frame(lab.benchmark) if is_universe(b) else lab.result(b)[1]
+        book = tr.summary(b)
+        curve = tr.live_curve(b, cal, _closes)
         live, metrics = [], {}
         if len(curve) and b.capital:
             start = int(curve.index[0].timestamp())
-            before = [p for p in d["equity"] if p["time"] <= start]
+            before = [p for p in d.get("equity", []) if p["time"] <= start]
             base = before[-1]["value"] if before else 0.0
             live = [{"time": int(t.timestamp()), "value": round(((1 + base / 100) * v / b.capital - 1) * 100, 4)}
                     for t, v in curve.items()]
-            trades = pd.DataFrame(led["trades"]) if led["trades"] else pd.DataFrame(
+            trades = pd.DataFrame(book["trades"]) if book["trades"] else pd.DataFrame(
                 columns=["pnl", "pnl_pct", "side", "bars"])
             if "bars" not in trades:
                 trades["bars"] = np.nan
@@ -238,14 +278,24 @@ def create_app(ctx: AppContext) -> FastAPI:
                        "max_drawdown": float(lab_metrics.drawdown(curve).min()),
                        "d7": lab_metrics.window_return(curve, 7), "d30": lab_metrics.window_return(curve, 30),
                        "d90": lab_metrics.window_return(curve, 90)}
+        levels = tr.book(b)
+        positions = [{"symbol": s, "qty": led["qty"], "avg_price": led["avg"],
+                      "stop": (levels.get(s) or {}).get("stop"), "target": (levels.get(s) or {}).get("target")}
+                     for s, led in sorted(book["positions"].items())]
+        pending = [{"symbol": s, **v["pending"]} for s, v in sorted(levels.items()) if v.get("pending")]
+        one = positions[0] if positions and not is_universe(b) else None
         return {"status": b.paper_status, "capital": b.capital, "allocation_pct": b.allocation_pct,
                 "activated_at": b.activated_at.isoformat(timespec="minutes"),
-                "position": led["qty"], "avg_price": led["avg"], "realized": led["realized"],
-                "stop": b.stop_level, "target": b.target_level, "pending": b.pending, "live": live,
-                "metrics": metrics, "trades": led["trades"][::-1][:200], "events": tr.events(b.id, 50),
-                "orders": [{"id": o.id, "purpose": o.purpose, "side": o.side, "qty": o.qty, "type": o.order_type,
-                            "status": o.status, "filled_price": o.filled_price, "stop": o.stop_price,
-                            "limit": o.limit_price, "submitted": o.submitted_at.isoformat(timespec="minutes"),
+                "positions": positions, "pending_entries": pending,
+                "position": one["qty"] if one else 0.0, "avg_price": one["avg_price"] if one else 0.0,
+                "stop": one["stop"] if one else None, "target": one["target"] if one else None,
+                "pending": pending[0] if pending and not is_universe(b) else None,
+                "realized": book["realized"], "live": live,
+                "metrics": metrics, "trades": book["trades"][::-1][:200], "events": tr.events(b.id, 50),
+                "orders": [{"id": o.id, "symbol": o.symbol, "purpose": o.purpose, "side": o.side, "qty": o.qty,
+                            "type": o.order_type, "status": o.status, "filled_price": o.filled_price,
+                            "stop": o.stop_price, "limit": o.limit_price,
+                            "submitted": o.submitted_at.isoformat(timespec="minutes"),
                             "filled": o.filled_at.isoformat(timespec="minutes") if o.filled_at else None,
                             "error": o.error} for o in tr.orders(b.id)[::-1][:50]]}
 
@@ -253,7 +303,9 @@ def create_app(ctx: AppContext) -> FastAPI:
     def bot_audit(bid: str):
         try:
             return _j(_lab().audit(bid))
-        except KeyError:
+        except KeyError as e:
+            if str(e).strip("'") == UNIVERSE:
+                raise HTTPException(400, "faltan los precios del S&P 500: descárgalos en Datos")
             raise HTTPException(404, "bot desconocido")
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -275,6 +327,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         return cached[1]
 
     def _trader() -> PaperTrader:
+        with ctx.extra.setdefault("trader_lock", threading.Lock()):
+            return _make_trader()
+
+    def _make_trader() -> PaperTrader:
         tr = ctx.extra.get("trader")
         if tr is None:
             tr = ctx.extra["trader"] = PaperTrader(
@@ -316,10 +372,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         for b in lab.bots(include_hidden=True):
             if not b.activated_at:
                 continue
-            led = tr.ledger(b)
-            bots.append({"id": b.id, "name": REGISTRY[b.strategy].name, "symbol": b.symbol, "status": b.paper_status,
-                         "allocation_pct": b.allocation_pct, "capital": b.capital, "position": led["qty"],
-                         "realized": led["realized"], "trades": len(led["trades"]),
+            book = tr.summary(b)
+            held = sorted(book["positions"])
+            bots.append({"id": b.id, "name": REGISTRY[b.strategy].name,
+                         "symbol": "S&P 500" if is_universe(b) else b.symbol, "kind": b.kind or "stock",
+                         "status": b.paper_status, "allocation_pct": b.allocation_pct, "capital": b.capital,
+                         "position": sum(book["positions"][s]["qty"] for s in held) if not is_universe(b) else len(held),
+                         "held": held, "realized": book["realized"], "trades": len(book["trades"]),
                          "activated_at": b.activated_at.isoformat(timespec="minutes")})
         return _j({"state": tr.state, "log": list(tr.logs)[-40:], "events": tr.events(limit=60), "bots": bots,
                    "alpaca": _alpaca_configured() or ctx.extra.get("broker_factory") is not None})
@@ -348,7 +407,8 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     # ------------------------------------------------------------------ market data ("Datos")
     def _invalidate_views():
-        pass  # backtests are recomputed automatically when the stored prices change (data token)
+        # stock bots notice new prices by their own data token; portfolio bots by this counter
+        ctx.extra["data_gen"] = ctx.extra.get("data_gen", 0) + 1
 
     def _yahoo():
         from qsts.data.providers.yfinance_provider import YFinanceProvider

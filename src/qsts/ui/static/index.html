@@ -24,20 +24,24 @@
 <section id="page-library" class="page">
   <div class="head">
     <div><h1>Biblioteca de estrategias</h1>
-      <p class="sub">Cada fila es un <b>bot</b>: una estrategia aplicada a una acción. Backtest con velas diarias, sin apalancamiento,
-        entrando en la apertura siguiente a la señal (como TradingView). Pulsa una fila para ver todo.</p></div>
-    <button id="add-bot-open" class="btn primary">+ Probar en otra acción</button>
+      <p class="sub">Cada estrategia se prueba de dos formas. <b>Cartera S&amp;P 500</b>: cada día mira las ~500 acciones del índice y compra
+        las que cumplen las condiciones, con un máximo de 5 a la vez (la prueba de verdad: ¿funciona en general?). <b>Una acción</b>: la
+        estrategia en un solo valor. Velas diarias, sin apalancamiento, entrando en la apertura siguiente a la señal (como TradingView).</p></div>
+    <button id="add-bot-open" class="btn primary">+ Nueva prueba</button>
   </div>
   <div id="missing" class="notice" style="display:none"></div>
   <div class="toolbar">
     <input id="q" class="search" placeholder="Búsqueda avanzada: spy pf>1.5 win>55 dd<20 p30>2 p90>5 sharpe>0.8 paper" autocomplete="off">
-    <div class="chips"><button data-filter="all" class="chip on">Todos</button><button data-filter="fav" class="chip">★ Favoritos</button>
+    <div class="chips"><button data-filter="all" class="chip on">Todos</button><button data-filter="universe" class="chip">Cartera S&amp;P 500</button>
+      <button data-filter="stock" class="chip">Una acción</button><button data-filter="fav" class="chip">★ Favoritos</button>
       <button data-filter="paper" class="chip">En paper</button></div>
   </div>
   <div id="add-bot" class="panel" style="display:none">
     <label>Estrategia <select id="ab-strategy"></select></label>
-    <label>Acción <input id="ab-symbol" size="8" placeholder="AAPL"></label>
-    <button id="ab-go" class="btn primary">Crear bot</button>
+    <span class="seg"><label><input type="radio" name="ab-kind" value="universe" checked> Cartera S&amp;P 500, máximo
+      <select id="ab-maxpos"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option></select> a la vez</label>
+      <label><input type="radio" name="ab-kind" value="stock"> Una acción <input id="ab-symbol" size="8" placeholder="AAPL"></label></span>
+    <button id="ab-go" class="btn primary">Probar</button>
     <span id="ab-msg" class="muted"></span>
     <p class="muted small" id="ab-info"></p>
   </div>
@@ -61,14 +65,14 @@
   <div class="actions">
     <button id="b-fav" class="btn ghost">☆ Favorito</button>
     <button id="b-paper" class="btn pink">Activar en paper</button>
-    <button id="b-other" class="btn ghost">Probar en otra acción</button>
+    <button id="b-other" class="btn ghost">Probarla de otra forma</button>
     <button id="b-hide" class="btn ghost">Quitar de la biblioteca</button>
   </div>
   <div id="b-activate" class="panel" style="display:none">
     <p><b>Paper trading automático en tu cuenta de Alpaca</b> (dinero ficticio). Cada noche, después del cierre, la app mira la señal
       y deja la orden para la apertura; los stops y objetivos quedan puestos en Alpaca. Te avisa por Telegram de cada operación.</p>
     <label>Parte de la cuenta para este bot <input id="act-pct" type="number" min="1" max="100" value="20" style="width:70px">%</label>
-    <label><input type="checkbox" id="act-follow" checked> si el backtest está dentro de una operación ahora, entrar también en la próxima apertura</label>
+    <label><input type="checkbox" id="act-follow" checked> <span id="act-follow-txt">si el backtest está dentro de una operación ahora, entrar también en la próxima apertura</span></label>
     <button id="act-go" class="btn pink">Activar</button> <button id="act-cancel" class="btn ghost">Cancelar</button>
     <span id="act-msg" class="muted"></span>
   </div>
@@ -84,8 +88,15 @@
       <p id="b-summary"></p>
       <p class="muted small" id="b-source"></p>
       <div id="b-params" class="small"></div>
+      <p id="b-rank" class="small"></p>
       <p id="b-next" class="small"></p>
     </div>
+  </div>
+  <div id="b-computing" class="card" style="display:none">
+    <h3>Calculando la cartera…</h3>
+    <p class="muted small">Prueba la estrategia en cada acción del S&amp;P 500 y simula la cartera día a día. La primera vez tarda un par de
+      minutos; luego se guarda y solo se recalcula cuando hay precios nuevos.</p>
+    <div class="progress"><div id="b-comp-bar" class="bar2"></div></div><p id="b-comp-msg" class="small"></p>
   </div>
   <div class="card">
     <div class="cardhead"><div><h3>Curva de capital</h3><p class="muted small" id="b-chart-note">Pasa el ratón por la curva para ver cada punto.</p></div>
@@ -93,10 +104,11 @@
         <label class="small"><input type="checkbox" id="b-dd"> caídas</label></div></div>
     <div id="b-chart" class="chart"></div>
     <p class="legend small"><span class="sw g"></span> backtest <span class="sw p"></span> paper trading (dinero ficticio, días nuevos)
-      <span class="sw s"></span> comprar y mantener la acción</p>
+      <span class="sw s"></span> <span id="b-hold-label">comprar y mantener la acción</span></p>
   </div>
   <div class="tabs" id="b-tabs">
-    <button data-tab="perf" class="on">Rendimiento</button><button data-tab="trades">Operaciones</button>
+    <button data-tab="perf" class="on">Rendimiento</button><button data-tab="today" class="uonly">Hoy y mañana</button>
+    <button data-tab="breadth" class="uonly">Por acción</button><button data-tab="trades">Operaciones</button>
     <button data-tab="monthly">P&amp;L mensual</button><button data-tab="mc">Monte Carlo</button>
     <button data-tab="audit">Auditoría</button><button data-tab="paperlog">Paper trading</button>
   </div>
@@ -107,6 +119,8 @@
       <div><h4>Métricas clave</h4><div id="b-key" class="keylist"></div></div>
     </div>
   </div>
+  <div class="card tabbody" id="tab-today" style="display:none"><div id="b-today"></div></div>
+  <div class="card tabbody" id="tab-breadth" style="display:none"><div id="b-breadth"></div></div>
   <div class="card tabbody" id="tab-trades" style="display:none"><div class="scroll"><table id="b-trades"></table></div></div>
   <div class="card tabbody" id="tab-monthly" style="display:none"><div class="scroll"><table id="b-monthly" class="heat"></table></div></div>
   <div class="card tabbody" id="tab-mc" style="display:none">
