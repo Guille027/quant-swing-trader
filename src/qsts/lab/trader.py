@@ -332,7 +332,9 @@ class PaperTrader:
                 stop: float | None = None, target: float | None = None, order_type: str = "market",
                 tif: str = "day", level: float | None = None, simple: bool = False) -> m.LabOrder | None:
         cid = self._client_id(b, purpose, symbol)
-        req = {"symbol": symbol, "qty": int(qty), "side": side, "type": order_type, "time_in_force": tif,
+        q = float(qty)
+        qty = int(q) if q.is_integer() or order_type != "market" else math.floor(q * 1e4) / 1e4
+        req = {"symbol": symbol, "qty": qty, "side": side, "type": order_type, "time_in_force": tif,
                "client_order_id": cid}
         kind = order_type if tif not in ("opg", "cls") else f"{order_type}-{tif}"
         if order_type == "stop" and purpose in ("entry", "exit"):
@@ -360,7 +362,7 @@ class PaperTrader:
                 kind = "limit"
         if purpose in ("entry", "exit") and level is not None:
             stop, target = (level, None) if order_type == "stop" else (None, level)
-        row = m.LabOrder(id=cid, bot_id=b.id, symbol=symbol, side=side, qty=int(qty), purpose=purpose,
+        row = m.LabOrder(id=cid, bot_id=b.id, symbol=symbol, side=side, qty=qty, purpose=purpose,
                          order_type=kind, stop_price=stop, limit_price=target, signal_day=signal_day)
         try:
             o = broker.submit(req)
@@ -666,7 +668,13 @@ class PaperTrader:
                 return 0.0
         ref = level if kind == "stop" and level else close  # a stop entry fills at (or above) its level
         qty = math.floor(max(amount, 0.0) / max(ref, close if kind == "stop" else 0.0))
-        if qty < 1:
+        # fractions of a share (documented in the SDK for market orders on 'fractionable' assets): the whole amount is
+        # invested, as in the backtest. Not for shorts, stop/limit entries, day trades or positions with resting
+        # stop / target orders (those need whole shares at Alpaca).
+        if (kind == "market" and direction > 0 and not day_trade and stop is None and target is None
+                and amount >= 1.0 and broker.asset(sym).get("fractionable")):
+            qty = math.floor(amount / close * 1e4) / 1e4
+        if qty <= 0:
             self.event("skip", f"⏭️ {sym}: el dinero disponible del bot ({money(amount)}) no llega para 1 acción.",
                        b.id, notify=True)
             return 0.0
@@ -679,7 +687,7 @@ class PaperTrader:
                "limit_open": f"en la apertura solo si abre a {money(level)} o mejor"}[kind]
         extra = (f" · stop {money(stop)}" if stop else "") + (f" · objetivo {money(target)}" if target else "") +                 (" · se cierra al final del día" if day_trade else "")
         text = (f"🔔 {why.capitalize()} en {sym} (cierre del {due.date()}): orden de "
-                f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty} acciones {how} "
+                f"{'COMPRA' if direction > 0 else 'VENTA EN CORTO'} de {qty:g} acciones {how} "
                 f"(≈ {money(qty * ref)}){extra} — bot {label}")
         bk.setdefault(sym, {}).update(stop=stop, target=target, pending=None)
         if kind == "limit_open":
@@ -774,6 +782,9 @@ class PaperTrader:
     def _protect(self, broker, b, sym: str, d: int, qty: float, stop, target, due, bk: dict,
                  first_tif: str = "gtc") -> None:
         if stop is None and target is None:
+            return
+        if not float(qty).is_integer():  # Alpaca takes fractions only in market orders: the app exits at the signal
+            bk.setdefault(sym, {}).update(stop=stop, target=target)
             return
         live = [o for o in self.orders(b.id)
                 if o.symbol == sym and o.purpose in ("protect", "stop", "target") and o.status in OPEN_ORDER]

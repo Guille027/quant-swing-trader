@@ -7,7 +7,8 @@ never leave it.
 Behaviour relied on, as documented in the SDK (alpaca-py 0.44, `alpaca.trading.enums`):
 - a `day` order submitted after the close is queued and submitted the following trading day;
 - equities support the order classes simple, bracket (needs take_profit AND stop_loss), oco and oto (needs one of
-  them); fractional quantities only with market orders, so this app always sends whole shares;
+  them); fractional quantities (up to 9 decimals) only with market orders on assets marked `fractionable`, so
+  this app sends fractions only for market orders without stop / target legs and whole shares otherwise;
 - time in force `opg` (market/limit on open: only the opening auction; rejected if sent between 9:28 and 19:00
   New York time, queued for the next opening auction after 19:00) and `cls` (market/limit on close: rejected if
   sent after 15:50 New York time).
@@ -99,7 +100,9 @@ class AlpacaPaper:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
         from alpaca.trading.requests import (LimitOrderRequest, MarketOrderRequest, StopLossRequest,
                                              StopOrderRequest, TakeProfitRequest)
-        common = {"symbol": req["symbol"], "qty": int(req["qty"]), "side": OrderSide(req["side"]),
+        q = float(req["qty"])
+        qty = int(q) if q.is_integer() or req.get("type", "market") != "market" else round(q, 4)
+        common = {"symbol": req["symbol"], "qty": qty, "side": OrderSide(req["side"]),
                   "time_in_force": TimeInForce(req.get("time_in_force", "day")),
                   "client_order_id": req["client_order_id"]}
         if req.get("order_class"):

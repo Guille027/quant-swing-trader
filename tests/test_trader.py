@@ -147,7 +147,9 @@ def test_signal_to_order_to_fill_to_exit(world):
     close = float(world["data"]["bars"]["close"].iloc[-1])
     tr.tick(AFTER_CLOSE)
     entry = br.last(side="buy")
-    assert entry["qty"] == int(20_000 // close) and entry["type"] == "market" and entry["time_in_force"] == "day"
+    # no stop / target: fractions of a share, the whole 20,000 invested as in the backtest
+    assert entry["qty"] == pytest.approx(20_000 / close, abs=1e-4) and entry["qty"] != int(entry["qty"])
+    assert entry["type"] == "market" and entry["time_in_force"] == "day"
     assert "COMPRA" in sent[-1] and "apertura" in sent[-1]
     n = len(br.orders)
     tr.tick(AFTER_CLOSE)
@@ -193,7 +195,7 @@ def test_stops_and_targets_rest_at_alpaca(world):
     set_plan(world, {"2024-06-03": {"entry": 1, "stop_pct": 0.05, "target_pct": 0.10}})
     tr.tick(AFTER_CLOSE)
     e = br.last(side="buy")
-    assert e["order_class"] == "bracket"
+    assert e["order_class"] == "bracket" and e["qty"] == int(e["qty"])  # resting stop / target: whole shares
     assert e["req"]["stop_loss"] == pytest.approx(close * 0.95) and e["req"]["take_profit"] == pytest.approx(close * 1.10)
     br.fill(e["id"], close)
     for leg in e["legs"]:  # the bracket's exit legs lapse at the end of the day
@@ -341,7 +343,7 @@ def test_portfolio_bot_buys_the_best_ranked_stocks_up_to_its_places(uworld):
     assert sorted(o["symbol"] for o in buys) == ["AAA", "CCC"]  # 2 places: ranks 3 (CCC) and 2 (AAA)
     for o in buys:  # each place gets half of the bot's 50,000
         close = float(uworld["data"]["frames"][o["symbol"]]["close"].iloc[-1])
-        assert o["qty"] == int(25_000 // close)
+        assert o["qty"] == pytest.approx(25_000 / close, abs=1e-4)
     assert "COMPRA" in sent[-1] and "S&P 500" in sent[-1]
     for o in buys:
         br.fill(o["id"], float(uworld["data"]["frames"][o["symbol"]]["close"].iloc[-1]))
