@@ -477,7 +477,13 @@ async function loadPaper() {
       ["Estado", b => b.status === "active" ? '<span class="badge live">en paper</span>' : '<span class="badge">detenido</span>'],
       ["Capital", b => `${usd(b.capital)} (${nf(b.allocation_pct, 0)}%)`], ["Posición", b => b.kind === "universe" ? (b.held.length ? b.held.map(esc).join(", ") : "—") : (b.position ? nf(b.position, 0) + " acciones" : "—")],
       ["Resultado cerrado", b => `<span class="${b.realized >= 0 ? "up" : "down"}">${usd(b.realized)}</span>`], ["Operaciones", b => b.trades],
-      ["Desde", b => when(b.activated_at)]], "Ningún bot en paper todavía: abre uno en la Biblioteca y pulsa «Activar en paper».");
+      ["Desde", b => when(b.activated_at)],
+      ["", b => b.status === "active" ? `<button class="btn ghost" data-recheck="${esc(b.id)}" title="Solo con la bolsa cerrada: manda lo que falte del último cierre; lo ya enviado no se repite">Volver a revisar el último cierre</button>` : ""]],
+      "Ningún bot en paper todavía: abre uno en la Biblioteca y pulsa «Activar en paper».");
+    $$("#pp-bots [data-recheck]").forEach(x => x.onclick = async () => {
+      x.disabled = true; x.textContent = "Revisando…";
+      try { const r = await post(`/api/bots/${encodeURIComponent(x.dataset.recheck)}/recheck`); alert(r.state); } catch (e) { alert(e.message); }
+      loadPaper(); });
     table($("#pp-events"), p.events, [["Cuándo", e => when(e.at)], ["Bot", e => e.bot ? `<a href="#/bot/${encodeURIComponent(e.bot)}">${esc(e.bot)}</a>` : ""], ["", e => esc(e.text)]], "Sin actividad");
   } catch (e) { $("#pp-state").textContent = e.message; }
 }
