@@ -324,6 +324,26 @@ class PaperTrader:
                        bid, notify=True)
             return {"closing": bool(closed), "symbols": closed}
 
+    def recheck(self, bid: str, now: pd.Timestamp | None = None) -> str:
+        """Handle the last close's signals again (e.g. entries skipped before a fix). Only while the market is
+        closed, so entries still go to the next open as in the backtest. Orders already sent are not repeated:
+        stocks with an open entry order or a position are left alone."""
+        with self._lock:
+            b = self.lab.get_bot(bid)
+            if b.paper_status != "active":
+                raise ValueError("este bot no está en paper trading")
+            if not self.enabled():
+                raise ValueError("en este ordenador el paper trading está desactivado (lo hace el servidor)")
+            broker = self.broker()
+            if broker is None:
+                raise ValueError("conecta primero tu cuenta paper de Alpaca (Ajustes)")
+            if broker.clock().get("is_open"):
+                raise ValueError("la bolsa ya ha abierto: las entradas de ese cierre ya no se pueden mandar al mismo "
+                                 "precio que el backtest")
+            self._update_bot(bid, last_signal_day=None)
+            self.event("info", f"🔁 Revisando otra vez las señales del último cierre ({bid}), a petición tuya.", bid)
+        return self.tick(now)
+
     # ------------------------------------------------------------------ orders
     def _client_id(self, b: m.LabBot, purpose: str, symbol: str = "") -> str:
         return f"qsts-{hash_obj([b.id, symbol, purpose, _now().isoformat()], 10)}-{purpose[:3]}"

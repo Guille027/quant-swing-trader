@@ -24,6 +24,7 @@ class FakeAlpaca:
         self.orders, self.pos, self.cancelled = {}, {}, []
         self.ids = itertools.count(1)
         self.reject_gtc = False
+        self.fractionable = True
 
     def account(self):
         return {"equity": self.equity, "cash": self.equity, "shorting_enabled": True, "trading_blocked": False,
@@ -36,7 +37,8 @@ class FakeAlpaca:
         return {s: {"qty": q} for s, q in self.pos.items() if q}
 
     def asset(self, symbol):
-        return {"tradable": True, "shortable": self.shortable, "easy_to_borrow": self.shortable, "fractionable": True}
+        return {"tradable": True, "shortable": self.shortable, "easy_to_borrow": self.shortable,
+                "fractionable": self.fractionable}
 
     def submit(self, req):
         if self.reject_gtc and req.get("time_in_force") == "gtc":
@@ -424,3 +426,23 @@ def test_day_trades_close_at_the_close_and_limit_on_open_waits_for_its_window(wo
         assert br.last(side="sell")["time_in_force"] == "day" and "no se cerró" in " ".join(sent[-3:])
     finally:
         REGISTRY.pop("test_day", None)
+
+
+def test_recheck_sends_what_was_skipped_without_repeating(uworld):
+    tr, br, lab, bot = uworld["trader"], uworld["broker"], uworld["lab"], uworld["bot"]
+    br.equity, br.fractionable = 40.0, False  # 20 $ per place: not enough for one whole share
+    tr.activate(bot.id, 100, follow_open=False, now=AFTER_CLOSE)
+    uplan(uworld, {s: {"2024-06-03": {"entry": 1}} for s in ("AAA", "BBB", "CCC")})
+    tr.tick(AFTER_CLOSE)
+    lab.wait()
+    tr.tick(AFTER_CLOSE)
+    assert not br.orders and "no llega" in uworld["sent"][-1]
+    br.fractionable = True  # the fix: fractions of a share
+    tr.recheck(bot.id, AFTER_CLOSE)
+    buys = [o for o in br.orders.values() if o["side"] == "buy"]
+    assert sorted(o["symbol"] for o in buys) == ["AAA", "CCC"] and all(0 < o["qty"] < 1 for o in buys)
+    tr.recheck(bot.id, AFTER_CLOSE)  # again: nothing is sent twice
+    assert len([o for o in br.orders.values() if o["side"] == "buy"]) == 2
+    br.is_open = True
+    with pytest.raises(ValueError, match="ya ha abierto"):
+        tr.recheck(bot.id, NEXT_DAY_OPEN)

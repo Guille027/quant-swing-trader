@@ -403,6 +403,15 @@ def create_app(ctx: AppContext) -> FastAPI:
         except (ValueError, BrokerError) as e:
             raise HTTPException(400, str(e))
 
+    @app.post("/api/bots/{bid}/recheck")
+    def recheck(bid: str):
+        try:
+            return {"state": _trader().recheck(bid)}
+        except KeyError:
+            raise HTTPException(404, "bot desconocido")
+        except (ValueError, BrokerError) as e:
+            raise HTTPException(400, str(e))
+
     @app.post("/api/bots/{bid}/deactivate")
     def deactivate(bid: str, body: DeactivateBody):
         try:

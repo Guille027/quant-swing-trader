@@ -411,9 +411,16 @@ function renderPaperLog() {
   if (!p) { $("#b-paperlog").innerHTML = "Este bot no está en paper trading. Pulsa <b>Activar en paper</b> para que opere solo en tu cuenta paper de Alpaca."; return; }
   $("#b-paperlog").classList.remove("muted");
   $("#b-paperlog").innerHTML = `<p>Capital asignado: <b>${usd(p.capital)}</b> (${nf(p.allocation_pct, 0)}% de la cuenta) · desde ${when(p.activated_at)}</p>` +
+    (p.status === "active" ? `<p class="small"><button id="pl-recheck" class="btn ghost">Volver a revisar el último cierre</button>
+      <span class="muted">Solo con la bolsa cerrada. Manda lo que falte (por ejemplo, entradas que se saltaron); lo ya enviado no se repite.</span>
+      <span id="pl-msg"></span></p>` : "") +
     `<h4>Posiciones abiertas en Alpaca</h4><table id="pl-pos"></table>` +
     (p.pending_entries.length ? `<p class="small"><span class="badge warn">Entradas pendientes para la próxima apertura</span> ${p.pending_entries.map(x => `<b>${esc(x.symbol)}</b> (${esc(x.reason)})`).join(", ")}</p>` : "") +
     `<h4>Operaciones cerradas</h4><table id="pl-trades"></table><h4>Órdenes enviadas a Alpaca</h4><table id="pl-orders"></table><h4>Registro</h4><table id="pl-events"></table>`;
+  const rc = $("#pl-recheck");
+  if (rc) rc.onclick = async () => { $("#pl-msg").textContent = " Revisando…";
+    try { const r = await post(`/api/bots/${encodeURIComponent(bot.bot.id)}/recheck`); $("#pl-msg").textContent = " " + r.state; setTimeout(() => loadBot(bot.bot.id), 1500); }
+    catch (e) { $("#pl-msg").innerHTML = ` <span class="bad">${esc(e.message)}</span>`; } };
   table($("#pl-pos"), p.positions, [["Acción", x => `<b>${esc(x.symbol)}</b>`], ["Acciones", x => nf(x.qty, 0)], ["Precio medio", x => usd(x.avg_price)],
     ["Stop", x => x.stop ? usd(x.stop) : "—"], ["Objetivo", x => x.target ? usd(x.target) : "—"]], "Ninguna");
   table($("#pl-trades"), p.trades, [["Acción", t => `<b>${esc(t.symbol || "")}</b>`], ["Lado", t => t.side], ["Entrada", t => t.entry], ["Salida", t => t.exit], ["Acciones", t => nf(t.qty, 0)],
