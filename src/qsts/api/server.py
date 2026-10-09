@@ -462,6 +462,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             time.sleep(600)
 
     ctx.extra["auto_update_tick"] = auto_update_tick
+    ctx.extra["make_trader"] = _trader
+    ctx.extra["data_busy"] = lambda: _data_runner().state.running
 
     @app.post("/api/settings/paper_here")
     def set_paper_here(body: FlagBody):

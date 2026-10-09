@@ -38,6 +38,9 @@ and simulation were removed (they remain in the git history).
 - [ ] Checked against the real Alpaca paper account (needs the user's keys; not reachable from the build environment)
 
 ### Running 24/7
+- [x] Nightly run on the PC: `Programar QSTS.bat` registers a Windows task at 23:00 that wakes the PC and runs
+      `qsts run-once` (prices + signals + orders, then exit; skipped if the QSTS window is open; Telegram warning if
+      it cannot finish). Log in `var/nightly.log`.
 - [x] `qsts server` (headless, 127.0.0.1, restarted by systemd), cloud-init script for an Oracle Cloud Always Free
       Ubuntu 24.04 machine with private access through Tailscale (`deploy/oracle/`, guide in `docs/SERVIDOR.md`)
 - [x] Hand-over from the PC (copy + paper trading off there), upload of the copy from the browser, self-update

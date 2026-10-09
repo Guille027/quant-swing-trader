@@ -3,6 +3,7 @@
   qsts ingest   --provider yahoo|csv [--root DIR] --symbols AAPL,MSFT --start 2010-01-01 [--end ...]
   qsts serve    [--port 8765]            # backend + UI in the browser (127.0.0.1 only)
   qsts desktop                            # same, in a native window if pywebview is installed
+  qsts run-once                           # nightly task: prices + paper trading signals, then exit
   qsts server   [--port 8765]            # 24/7 server (Oracle Cloud): no window, restarts itself to load data
   qsts shortcut                           # Windows: desktop/Start-menu shortcut that opens the app
   qsts backtest --strategy connors_rsi2 --symbol SPY   # one backtest in the terminal
@@ -71,6 +72,11 @@ def cmd_server(args, ctx):
     server.run()
 
 
+def cmd_run_once(args, ctx):
+    from qsts.app.nightly import main as nightly
+    nightly(ctx, args.port)
+
+
 def cmd_desktop(args, ctx):
     from qsts.app.launcher import main as launch
     launch(args.port)
@@ -106,7 +112,7 @@ def main(argv=None):
     s.add_argument("--symbols", required=True)
     s.add_argument("--start", default="2010-01-01")
     s.add_argument("--end")
-    for name in ("serve", "desktop", "server"):
+    for name in ("serve", "desktop", "server", "run-once"):
         s = sub.add_parser(name)
         s.add_argument("--port", type=int, default=8765)
     sub.add_parser("shortcut", help="crea el acceso directo QSTS en el escritorio (Windows)")
@@ -116,7 +122,7 @@ def main(argv=None):
     s.add_argument("--symbol", required=True)
     args = p.parse_args(argv)
     ctx = build_context()
-    {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "server": cmd_server, "shortcut": cmd_shortcut,
+    {"ingest": cmd_ingest, "serve": cmd_serve, "desktop": cmd_desktop, "server": cmd_server, "run-once": cmd_run_once, "shortcut": cmd_shortcut,
      "strategies": cmd_strategies, "backtest": cmd_backtest}[args.cmd](args, ctx)
 
 

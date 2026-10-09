@@ -154,3 +154,20 @@ def test_server_handover_upload_and_automatic_prices(app, tmp_path):
     assert tick(pd.Timestamp("2025-01-03 22:05", tz="UTC")) is None  # still stale, but retries wait 20 minutes
     c.post("/api/settings/auto_update", json={"enabled": False})
     assert tick(pd.Timestamp("2025-01-03 23:00", tz="UTC")) is None
+
+
+def test_nightly_run_does_the_work_and_warns_when_it_cannot_finish(app):
+    from qsts.app.nightly import app_is_open, run_once
+    c, ctx, broker = app
+    c.post("/api/data/ingest", json={"mode": "symbols", "symbols": ["SPY"]})
+    wait_job(c)
+    sent = []
+    ctx.extra["broker_factory"] = lambda: broker
+    ctx.extra["telegram_factory"] = lambda tok, chat: type("T", (), {"send": lambda self, t: sent.append(t)})()
+    from pydantic import SecretStr
+    ctx.settings.telegram_bot_token, ctx.settings.telegram_chat_id = SecretStr("123:abc"), "1"
+    ctx.extra["make_trader"]().activate("connors_rsi2-spy", 10, follow_open=False)
+    # the stored test prices end in 2024: they can never be brought up to date, so it gives up and says so
+    state = run_once(ctx, max_minutes=0.02, sleep=lambda s: None, log=lambda m: None)
+    assert state and "no terminó a tiempo" in sent[-1]
+    assert app_is_open(port=1) is False
