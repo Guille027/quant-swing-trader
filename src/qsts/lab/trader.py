@@ -258,6 +258,9 @@ class PaperTrader:
             if not self.enabled():
                 raise ValueError("en este ordenador el paper trading está desactivado (lo hace el servidor): "
                                  "actívalo desde la app del servidor")
+            if REGISTRY[b.strategy].overnight:
+                raise ValueError("las estrategias que compran al cierre todavía no se pueden operar en paper: "
+                                 "de momento solo se pueden probar en el backtest")
             broker = self.broker()
             if broker is None:
                 raise ValueError("conecta primero tu cuenta paper de Alpaca (Ajustes)")

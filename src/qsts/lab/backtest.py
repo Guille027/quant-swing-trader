@@ -22,7 +22,8 @@ from qsts.lab.strategy import Strategy
 
 REASONS = {"signal": "señal", "reverse": "señal contraria", "stop": "stop", "stop_gap": "stop (hueco de apertura)",
            "target": "objetivo", "target_gap": "objetivo (hueco de apertura)", "end": "abierta (fin de datos)",
-           "data_end": "sin más datos de la acción", "close": "cierre del día (intradía)"}
+           "data_end": "sin más datos de la acción", "close": "cierre del día (intradía)",
+           "open": "venta en la apertura siguiente"}
 
 
 def entry_fill(direction: int, o: float, h: float, l: float, stop_level: float, limit_level: float,  # noqa: E741
@@ -79,11 +80,11 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, params: dict | None = N
     lo = _ts(cfg.start) if cfg.start else bars.index[0]
     hi = _ts(cfg.end) if cfg.end else bars.index[-1]
     window = (bars.index >= lo) & (bars.index <= hi)
-    return _simulate(bars, sig, window, cfg, day_trade=strategy.day_trade)
+    return _simulate(bars, sig, window, cfg, day_trade=strategy.day_trade, overnight=strategy.overnight)
 
 
 def _simulate(bars: pd.DataFrame, sig: pd.DataFrame, window: np.ndarray, cfg: BacktestConfig,
-              day_trade: bool = False) -> BacktestResult:
+              day_trade: bool = False, overnight: bool = False) -> BacktestResult:
     o, h, l, c = (bars[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))  # noqa: E741
     entry = sig["entry"].to_numpy()
     exit_long, exit_short = sig["exit_long"].to_numpy(), sig["exit_short"].to_numpy()
@@ -143,6 +144,8 @@ def _simulate(bars: pd.DataFrame, sig: pd.DataFrame, window: np.ndarray, cfg: Ba
             continue
         if started:
             j = i - 1
+            if overnight and qty != 0:  # 0) overnight strategy: bought at yesterday's close, sold at this open
+                close_position(i, o[i], "open", market=True)
             if qty != 0:  # 1) resting orders at the open: a gap through the level fills at the open
                 d = np.sign(qty)
                 if np.isfinite(stop) and d * (o[i] - stop) <= 0:
@@ -155,7 +158,7 @@ def _simulate(bars: pd.DataFrame, sig: pd.DataFrame, window: np.ndarray, cfg: Ba
                     close_position(i, o[i], "signal", market=True)
                 elif entry[j] == -d:
                     close_position(i, o[i], "reverse", market=True)
-            if qty == 0 and entry[j] != 0:  # 3) new entry (market at the open, stop or limit-on-open order)
+            if qty == 0 and entry[j] != 0 and not overnight:  # 3) new entry (market at the open, stop or limit-on-open)
                 fill = entry_fill(int(entry[j]), o[i], h[i], l[i], e_stop[j], e_limit[j], slip)
                 if fill is not None:
                     open_position(i, int(entry[j]), j, fill)
@@ -169,6 +172,8 @@ def _simulate(bars: pd.DataFrame, sig: pd.DataFrame, window: np.ndarray, cfg: Ba
                     close_position(i, target, "target", market=False)
             if day_trade and qty != 0:  # 5) intraday strategy: out at the close of the day (market-on-close)
                 close_position(i, c[i], "close", market=True)
+            if overnight and qty == 0 and entry[j] != 0:  # 6) overnight: bought at this close (market-on-close)
+                open_position(i, int(entry[j]), j, c[i] * (1 + int(entry[j]) * slip))
         started = True
         if qty != 0 and np.isfinite(trail[i]):  # trailing stop for the next bars: only in the position's favour
             d = np.sign(qty)

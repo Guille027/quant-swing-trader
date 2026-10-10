@@ -57,4 +57,7 @@ def main(ctx, port: int = 8765) -> None:
         log("la ventana de QSTS está abierta: ella se encarga")
         return
     log("revisión nocturna: empieza")
-    log("revisión nocturna: termina — " + run_once(ctx, log=log))
+    state = run_once(ctx, log=log)
+    log("revisión nocturna: termina — " + state)
+    if state.startswith(DONE):  # every night a short message, so silence means it did not run
+        ctx.extra["make_trader"]().notify(f"🌙 Revisión nocturna de QSTS hecha: {state}.")

@@ -62,6 +62,7 @@ class Strategy:
     max_positions: ClassVar[int | None] = None  # the author's number of positions, if published (capped at 5)
     rank_rule: ClassVar[str] = ""          # the author's ranking rule in plain Spanish ("" = the fixed rule)
     day_trade: ClassVar[bool] = False      # positions closed at the close of their entry day (intraday)
+    overnight: ClassVar[bool] = False      # bought at the CLOSE (signal of the day before), sold at the next open
     style: ClassVar[str] = ""              # "intradía" | "pocos días" | "semanas" | "meses" (as published)
     notes: ClassVar[str] = ""              # how the published rules were interpreted for this app
 
@@ -126,7 +127,8 @@ class Strategy:
                 "allow_short": cls.allow_short, "default_symbols": list(cls.default_symbols), "version": cls.version(),
                 "universe": cls.universe, "max_positions": cls.positions(),
                 "rank_rule": cls.rank_rule or DEFAULT_RANK_RULE, "rank_by_author": bool(cls.rank_rule),
-                "day_trade": cls.day_trade, "style": cls.style, "notes": cls.notes}
+                "day_trade": cls.day_trade, "overnight": cls.overnight, "paper_ready": not cls.overnight,
+                "style": cls.style, "notes": cls.notes}
 
     @classmethod
     def positions(cls) -> int:

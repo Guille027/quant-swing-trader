@@ -55,6 +55,7 @@ class Panel:
     floats: dict = field(default_factory=dict)  # stop / target / stop_pct / target_pct / trail (only if used)
     last_bar: np.ndarray | None = None          # last row with a bar, per stock
     day_trade: bool = False                     # positions closed at the close of their entry day
+    overnight: bool = False                     # bought at the close, sold at the next open
 
     def f(self, name: str, i: int, k: int) -> float:
         a = self.floats.get(name)
@@ -67,14 +68,15 @@ class Panel:
 class PanelBuilder:
     """Fills a Panel one stock at a time (so the whole universe's DataFrames never sit in memory together)."""
 
-    def __init__(self, calendar: pd.DatetimeIndex, symbols: list[str], day_trade: bool = False):
+    def __init__(self, calendar: pd.DatetimeIndex, symbols: list[str], day_trade: bool = False,
+                 overnight: bool = False):
         self.index, self.symbols = calendar, list(symbols)
         T, N = len(calendar), len(self.symbols)
         nan = lambda: np.full((T, N), np.nan)  # noqa: E731
         self.p = Panel(calendar, self.symbols, nan(), nan(), nan(), nan(), np.zeros((T, N), np.int8),
                        np.zeros((T, N), bool), np.zeros((T, N), bool), nan(), np.zeros((T, N), bool))
         self.p.last_bar = np.full(N, -1)
-        self.p.day_trade = day_trade
+        self.p.day_trade, self.p.overnight = day_trade, overnight
 
     def add(self, symbol: str, bars: pd.DataFrame, sig: pd.DataFrame, start: pd.Timestamp | None) -> None:
         k = self.symbols.index(symbol)
@@ -176,6 +178,43 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                             "entry_time": idx[i], "entry_index": i, "entry_price": fill, "qty": units,
                             "entry_fee": fee, "entry_equity": equity_now, "signal_time": idx[j]}}
 
+    def enter(i: int, j: int, at_close: bool) -> None:
+        nonlocal cash
+        free = maxp - len(pos)
+        if free > 0:  # 2) free places: the best-ranked new signals of the previous close
+            ok = panel.eligible[j] & np.isfinite(c[i] if at_close else o[i]) & allowed
+            if monkey:
+                hit = ok & (rng.random(N) < monkey["p"])
+                ks = rng.permutation(np.flatnonzero(hit))
+                dirs = np.where(rng.random(len(ks)) < monkey.get("short", 0.0), -1, 1)
+            else:
+                ks = np.flatnonzero(ok & (panel.entry[j] != 0))
+                r = panel.rank[j, ks]
+                ks = ks[np.lexsort((ks, np.where(np.isfinite(r), -r, np.inf)))]
+                dirs = panel.entry[j, ks].astype(int)
+            if len(ks):
+                held = list(pos)
+                marks = np.array([last_close[k] for k in held])
+                qtys = np.array([pos[k]["qty"] for k in held])
+                equity_prev = cash + float((qtys * marks).sum()) if held else cash
+                gross = float((np.abs(qtys) * marks).sum()) if held else 0.0
+                for k, d in zip(ks, dirs):
+                    if free <= 0:
+                        break
+                    if k in pos:
+                        continue
+                    amount = min(equity_prev / maxp, equity_prev - gross)
+                    if amount <= equity_prev * 1e-4:
+                        break
+                    free -= 1  # an order is sent for this place; a stop / limit order may not be executed
+                    fill = (c[i, k] * (1 + d * slip) if at_close else o[i, k] * (1 + d * slip) if monkey else
+                            entry_fill(int(d), o[i, k], h[i, k], l[i, k], panel.f("entry_stop", j, k),
+                                       panel.f("entry_limit", j, k), slip))
+                    if fill is None:
+                        continue
+                    open_(int(k), i, j, int(d), amount, equity_prev, fill)
+                    gross += amount
+
     first = True
     for i in rows:
         if not first:
@@ -188,7 +227,9 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                 if not np.isfinite(o[i, k]):
                     continue
                 d = np.sign(p["qty"])
-                if np.isfinite(p["stop"]) and d * (o[i, k] - p["stop"]) <= 0:
+                if panel.overnight:  # bought at yesterday's close, sold at this open
+                    close(k, i, o[i, k], "open", market=True)
+                elif np.isfinite(p["stop"]) and d * (o[i, k] - p["stop"]) <= 0:
                     close(k, i, o[i, k], "stop_gap", market=True)
                 elif np.isfinite(p["target"]) and d * (o[i, k] - p["target"]) >= 0:
                     close(k, i, o[i, k], "target_gap", market=False)
@@ -199,40 +240,8 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                     close(k, i, o[i, k], "signal", market=True)
                 elif panel.entry[j, k] == -d:
                     close(k, i, o[i, k], "reverse", market=True)
-            free = maxp - len(pos)
-            if free > 0:  # 2) free places: the best-ranked new signals of the previous close
-                ok = panel.eligible[j] & np.isfinite(o[i]) & allowed
-                if monkey:
-                    hit = ok & (rng.random(N) < monkey["p"])
-                    ks = rng.permutation(np.flatnonzero(hit))
-                    dirs = np.where(rng.random(len(ks)) < monkey.get("short", 0.0), -1, 1)
-                else:
-                    ks = np.flatnonzero(ok & (panel.entry[j] != 0))
-                    r = panel.rank[j, ks]
-                    ks = ks[np.lexsort((ks, np.where(np.isfinite(r), -r, np.inf)))]
-                    dirs = panel.entry[j, ks].astype(int)
-                if len(ks):
-                    held = list(pos)
-                    marks = np.array([last_close[k] for k in held])
-                    qtys = np.array([pos[k]["qty"] for k in held])
-                    equity_prev = cash + float((qtys * marks).sum()) if held else cash
-                    gross = float((np.abs(qtys) * marks).sum()) if held else 0.0
-                    for k, d in zip(ks, dirs):
-                        if free <= 0:
-                            break
-                        if k in pos:
-                            continue
-                        amount = min(equity_prev / maxp, equity_prev - gross)
-                        if amount <= equity_prev * 1e-4:
-                            break
-                        free -= 1  # an order is sent for this place; a stop / limit order may not be executed
-                        fill = (o[i, k] * (1 + d * slip) if monkey else
-                                entry_fill(int(d), o[i, k], h[i, k], l[i, k], panel.f("entry_stop", j, k),
-                                           panel.f("entry_limit", j, k), slip))
-                        if fill is None:
-                            continue
-                        open_(int(k), i, j, int(d), amount, equity_prev, fill)
-                        gross += amount
+            if not panel.overnight:  # 2) free places at the open
+                enter(i, j, at_close=False)
             for k in list(pos):  # 3) resting orders inside the bar (stop first when both are touched)
                 if not np.isfinite(o[i, k]):
                     continue
@@ -248,6 +257,8 @@ def run_portfolio(panel: Panel, cfg: PortfolioConfig | None = None, symbols_mask
                 for k in list(pos):
                     if np.isfinite(c[i, k]):
                         close(k, i, c[i, k], "close", market=True)
+            if panel.overnight:  # 5) overnight strategy: free places filled at this close
+                enter(i, j, at_close=True)
         first = False
         tr = panel.floats.get("trail")
         if tr is not None and not monkey:

@@ -247,3 +247,20 @@ def test_intraday_strategies_match_between_engines():
         port = run_portfolio(pb.done(), PortfolioConfig(initial_capital=10_000, max_positions=1))
         assert len(single.trades) > 10 and (single.trades["bars"] == 0).all()
         np.testing.assert_allclose(port.trades["pnl"], single.trades["pnl"], rtol=1e-9)
+
+
+def test_overnight_strategy_buys_at_the_close_and_sells_at_the_next_open():
+    from qsts.lab.portfolio import PanelBuilder, PortfolioConfig, run_portfolio
+    rows = FLAT + [(100, 101, 99, 100), (102, 103, 101, 102), (104, 105, 103, 104)]
+    res = run_backtest(REGISTRY["overnight_hold"], bars_from(rows), cfg=NOCOST)
+    t = res.trades
+    # bought at each close, sold at the next open: 100 -> 102 the night between rows 4 and 5
+    assert (t["reason"] == "open").all() and (t["bars"] == 1).all()
+    assert t.iloc[2]["entry_price"] == 100 and t.iloc[2]["exit_price"] == 102
+    bars = to_canonical(synthetic_daily("2015-01-01", "2018-12-31", seed=9), Timeframe.D1)
+    st = REGISTRY["overnight_hold"]
+    single = run_backtest(st, bars, cfg=BacktestConfig(initial_capital=10_000))
+    pb = PanelBuilder(bars.index, ["X"], overnight=True)
+    pb.add("X", bars, st.run(bars), None)
+    port = run_portfolio(pb.done(), PortfolioConfig(initial_capital=10_000, max_positions=1))
+    np.testing.assert_allclose(port.trades["pnl"], single.trades["pnl"], rtol=1e-9)

@@ -333,7 +333,7 @@ class LabService:
         st = REGISTRY[b.strategy]
         uni = self.universe()
         syms = sorted(uni["symbols"])
-        pb = PanelBuilder(self._calendar(uni), syms, day_trade=st.day_trade)
+        pb = PanelBuilder(self._calendar(uni), syms, day_trade=st.day_trade, overnight=st.overnight)
         p = (b.params or {}) if params is None else params
         if frames is None and self._batch is not None:
             frames = self._batch
@@ -353,13 +353,15 @@ class LabService:
                 else (pd.Timestamp(start) if start is not None else None)
             pb.add(sym, bars, sig, start)
             if breadth is not None:
-                breadth.append(self._one_stock(sym, bars, sig, start, st.day_trade))
+                breadth.append(self._one_stock(sym, bars, sig, start, st.day_trade, st.overnight))
         return pb.done()
 
     @staticmethod
-    def _one_stock(sym: str, bars: pd.DataFrame, sig: pd.DataFrame, start, day_trade: bool = False) -> dict:
+    def _one_stock(sym: str, bars: pd.DataFrame, sig: pd.DataFrame, start, day_trade: bool = False,
+                   overnight: bool = False) -> dict:
         window = np.ones(len(bars), bool) if start is None else np.asarray(bars.index >= start)
-        res = _simulate(bars, sig, window, BacktestConfig(initial_capital=CAPITAL), day_trade=day_trade)
+        res = _simulate(bars, sig, window, BacktestConfig(initial_capital=CAPITAL), day_trade=day_trade,
+                        overnight=overnight)
         ts = metrics.trade_stats(res.trades)
         eq = res.equity
         hold = buy_and_hold(bars, eq.index[0], eq.index[-1], CAPITAL) if len(eq) else eq
